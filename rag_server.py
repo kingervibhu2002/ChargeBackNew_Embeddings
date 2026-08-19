@@ -102,7 +102,7 @@ def add_document(
     title: str,
     content: str,
     summary: str = "",
-    section: str = "",
+    knowledge_domain: str = "",
     network: str = "",
     reason_code: str = "",
     document_type: str = "",
@@ -117,14 +117,14 @@ def add_document(
       3. Upsert the vector + payload into Qdrant (overwrites if ID exists).
 
     Args:
-        title         (str): Short, descriptive name for the document.
-        content       (str): Full text content of the document to be embedded.
-        summary       (str): Optional short overview paragraph (~2-3 sentences).
-        section       (str): Encyclopedia section folder, e.g. '04_Visa'.
-        network       (str): Card network this doc covers, e.g. 'Visa'.
-        reason_code   (str): Reason code if doc is code-specific, e.g. '13.1'.
-        document_type (str): Doc category, e.g. 'reason_code', 'policy', 'guide'.
-        keywords      (str): Comma-separated keywords for BM25 boosting.
+        title            (str): Short, descriptive name for the document.
+        content          (str): Full text content of the document to be embedded.
+        summary          (str): Optional short overview paragraph (~2-3 sentences).
+        knowledge_domain (str): Encyclopedia section folder, e.g. '04_Visa'.
+        network          (str): Card network this doc covers, e.g. 'Visa'.
+        reason_code      (str): Reason code if doc is code-specific, e.g. '13.1'.
+        document_type    (str): Doc category, e.g. 'reason_code', 'policy', 'guide'.
+        keywords         (str): Comma-separated keywords for BM25 boosting.
 
     Returns:
         str: Confirmation with document title, ID, and total doc count.
@@ -135,13 +135,69 @@ def add_document(
     _store.add_document(
         doc_id, title, content, embedding,
         summary=summary,
-        section=section,
+        knowledge_domain=knowledge_domain,
         network=network,
         reason_code=reason_code,
         document_type=document_type,
         keywords=kw_list,
     )
     return f"Indexed '{title}' → id={doc_id}  (total docs: {len(_store)})"
+
+
+@mcp.tool()
+def add_chunk(
+    document_title: str,
+    document_id: str,
+    content: str,
+    chunk_index: int,
+    knowledge_domain: str = "",
+    network: str = "",
+    reason_code: str = "",
+    section: str = "",
+    subsection: str = "",
+) -> str:
+    """
+    Add or update one chunk of a document in the parallel chunk collection
+    (chunking.py splits a document's body; this tool indexes one resulting
+    piece). Embeds chunking.build_contextual_prefix(...) + content — the
+    prefix anchors the chunk's vector to which document/code/section it's
+    from, but is never stored in the payload itself; `content` there stays
+    the raw chunk text for clean display/citation.
+
+    Args:
+        document_title:   Parent document's title (same string add_document
+                          was called with for this doc).
+        document_id:      Parent document's id — pass the same id that was
+                          returned as part of add_document's confirmation
+                          (or recompute identically), so chunks stay linkable
+                          to their whole-doc counterpart.
+        content:          Raw chunk text (unprefixed).
+        chunk_index:      Position of this chunk within its document.
+        knowledge_domain: Folder-derived domain, e.g. '07_RuPay'.
+        network:          e.g. 'Visa' — may be empty for non-network docs.
+        reason_code:      e.g. 'U001' — may be empty when not code-specific.
+        section:          Enclosing ## heading text, or empty.
+        subsection:       Enclosing ### heading text (or FAQ question slug),
+                          or empty.
+
+    Returns:
+        str: Confirmation with the chunk's id.
+    """
+    from chunking import build_contextual_prefix, chunk_id as make_chunk_id
+
+    cid = make_chunk_id(document_id, chunk_index)
+    prefix = build_contextual_prefix(document_title, network, reason_code, section or None, subsection or None)
+    embedding = _embed(prefix + content)
+    _store.add_chunk(
+        cid, document_id, document_title, content, embedding,
+        knowledge_domain=knowledge_domain,
+        network=network,
+        reason_code=reason_code,
+        section=section or None,
+        subsection=subsection or None,
+        chunk_index=chunk_index,
+    )
+    return f"Indexed chunk '{cid}' (doc='{document_title}')"
 
 
 @mcp.tool()

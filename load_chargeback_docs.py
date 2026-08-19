@@ -10,10 +10,20 @@ Then use rag_client.py to ask questions against the indexed knowledge.
 """
 
 import asyncio
+import hashlib
 import sys
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from chunking import split_into_chunks
+
+
+def _doc_id(title: str) -> str:
+    """Same MD5[:8]-of-title scheme used by rag_server.py/api_server.py —
+    see load_encyclopedia.py's identical helper for why this isn't imported
+    from rag_server.py directly (its top-level embedding-model load)."""
+    return hashlib.md5(title.encode()).hexdigest()[:8]
 
 # ---------------------------------------------------------------------------
 # Chargeback knowledge base
@@ -545,6 +555,7 @@ async def main() -> None:
 
             print(f"Indexing {len(CHARGEBACK_DOCUMENTS)} chargeback documents...\n")
 
+            chunk_total = 0
             for doc in CHARGEBACK_DOCUMENTS:
                 result = await session.call_tool(
                     "add_document",
@@ -552,7 +563,25 @@ async def main() -> None:
                 )
                 print(f"  {result.content[0].text}")
 
-            print("\nDone! Knowledge base is ready.")
+                # Parallel chunk collection — these 10 docs have no ##
+                # markup (confirmed), so split_into_chunks() falls back to
+                # its paragraph-grouped splitter automatically.
+                document_id = _doc_id(doc["title"])
+                chunks = split_into_chunks(doc["content"])
+                for chunk in chunks:
+                    await session.call_tool(
+                        "add_chunk",
+                        {
+                            "document_title": doc["title"],
+                            "document_id":    document_id,
+                            "content":        chunk["content"],
+                            "chunk_index":    chunk["chunk_index"],
+                        },
+                    )
+                chunk_total += len(chunks)
+
+            print(f"\n({chunk_total} chunks indexed)")
+            print("Done! Knowledge base is ready.")
             print("Run `python rag_client.py` and ask chargeback questions.")
 
 

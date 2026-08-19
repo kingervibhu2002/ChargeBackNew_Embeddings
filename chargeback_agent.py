@@ -40,7 +40,13 @@ from langgraph.graph import END, StateGraph
 
 from guardrails import check_length, detect_prompt_injection, mask_pii, _parse_json_safe
 from evidence_tags import EvidenceTag, EVIDENCE_TAG_LABELS, humanize_evidence
-from network_detection import detect_network_title_keys, is_upi_context
+from network_detection import (
+    DOMAIN_CANDIDATE_POOL_SIZE,
+    detect_knowledge_domain,
+    detect_network_title_keys,
+    is_upi_context,
+    select_domain_chunk,
+)
 import classifier
 import decision_rules
 
@@ -233,6 +239,24 @@ class DisputeAgent:
 
         # Guard 4 — deterministic intent classification (no LLM call)
         query_type = classifier.classify_query_type(masked_query)
+
+        # Anaphoric follow-up fallback: a bare reference ("Are all of those
+        # covered?", "What's the difference between those two?") carries no
+        # payment-domain keyword of its own and classifies as "invalid" in
+        # isolation — but on a genuine second turn, additional_context holds
+        # the prior turn's question, which usually does. Retry classification
+        # against query+context combined before giving up, so a real
+        # follow-up isn't rejected purely because THIS turn's text alone is
+        # context-free. Only rescues an "invalid" result — never overrides a
+        # query that already classified as something else on its own, and
+        # never fires on a genuine first turn (additional_context is always
+        # empty there). Confirmed via live 2-turn test: without this,
+        # "Are all of those covered?" was rejected even with the correct
+        # prior-turn context already attached.
+        context = state.get("additional_context", "")
+        if query_type == "invalid" and context:
+            query_type = classifier.classify_query_type(f"{masked_query} {context}")
+
         is_valid   = query_type not in ("invalid", "escalation")
 
         # Build the rejection / escalation message
@@ -775,32 +799,100 @@ class DisputeAgent:
                     results.append(r)
                     seen_ids.add(r["id"])
         else:
-            results = self._store.search(embedding, top_k=4)
-            # A detected network/app should still ground a plain informational
-            # question, not just list/stage/code-comparison queries — without
-            # this, network_title_keys is computed above but never consulted
-            # here, so a question phrased around a consumer app name (e.g.
-            # "...via PhonePe...", mapped to NPCI by _NETWORK_TITLE_KEYS)
-            # still depends entirely on raw semantic ranking, which verified
-            # testing showed does NOT reliably surface the network-specific
-            # overview doc even though a title-exact match exists.
-            if network_title_keys:
-                title_matches = self._store.filter_by_title(network_title_keys)[:3]
-                seen_ids = {r["id"] for r in results}
-                for r in title_matches:
-                    if r["id"] not in seen_ids:
-                        results.append(r)
-                        seen_ids.add(r["id"])
+            # Plain single-question path — the one branch that moves to the
+            # chunk collection. list_intent/stage_intent/coverage_intent/
+            # mentioned_codes above all genuinely want exhaustive whole-doc
+            # breadth via filter_by_title() and stay on the whole-doc
+            # collection unchanged; only an open-ended question benefits from
+            # chunk-level precision.
+            chunk_hits = self._store.search_chunks(embedding, top_k=6)
 
-        # Deduplicate by title (encyclopedia indexed twice with different title formats).
-        seen_titles: set = set()
-        unique_results = []
-        for r in results:
-            norm = r["title"].lower().strip()
-            if norm not in seen_titles:
-                seen_titles.add(norm)
-                unique_results.append(r)
-        results = unique_results
+            # Domain boost — chunking substantially reduced the old whole-doc
+            # dilution problem (the RuPay/NPCI overview doc's best section
+            # rose from a 0.554 whole-document score to 0.670 once split out)
+            # but didn't eliminate the need for this entirely: a generic FAQ
+            # chunk phrased as a question ("What happens if I don't
+            # respond...") can still outscore a topically-correct but more
+            # narrative chunk on question-form similarity alone, regardless
+            # of topic — confirmed for the exact query that motivated this
+            # migration (~0.80 for the generic FAQ vs 0.67 for the correct
+            # NPCI chunk). Unlike the old whole-doc title-boost, this is
+            # ranked by real cosine similarity throughout at chunk
+            # granularity, so it can't resurface the old bug of an arbitrary
+            # wrong-code chunk winning by luck — it just gives the right
+            # network's genuinely-best chunks a chance to be seen at all.
+            chunk_hits = [r for r in chunk_hits if r["score"] >= 0.65]
+
+            domain = detect_knowledge_domain(query, state.get("additional_context", ""))
+            promoted = None
+            if domain:
+                domain_hits = self._store.search_chunks(
+                    embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE, knowledge_domain=domain
+                )
+                seen = {r["chunk_id"] for r in chunk_hits}
+
+                # select_domain_chunk() prefers the domain's Overview
+                # document for a general query rather than whatever scores
+                # marginally highest — a narrow reason-code page's denser
+                # vocabulary routinely outscores genuinely general content on
+                # raw similarity within one domain (see network_detection.py
+                # for the measurement that showed this: for a broad "what
+                # happens" query, the RuPay Overview's best chunk ranked 9th
+                # of 10 domain candidates, behind several single-scenario
+                # pages like "Technical Root Causes of Multi-Debit Events").
+                _, detected_code = classifier.extract_network_and_code(query)
+                tier, best = select_domain_chunk(domain_hits, "" if detected_code == "Unknown" else detected_code)
+
+                if best and best["chunk_id"] not in seen:
+                    if tier == "strong":
+                        # Leads the retrieved context, not just present in it
+                        # — same reasoning as api_server.py's
+                        # search_documents(): a plain score-sort undoes any
+                        # "guaranteed slot" positioning, so the promotion has
+                        # to survive past that sort explicitly.
+                        promoted = best
+                        seen.add(best["chunk_id"])
+                    else:
+                        chunk_hits = chunk_hits[:5] + [best]
+                        seen.add(best["chunk_id"])
+
+                for r in domain_hits:
+                    if r["score"] >= 0.65 and r["chunk_id"] not in seen:
+                        chunk_hits.append(r)
+                        seen.add(r["chunk_id"])
+
+                chunk_hits.sort(key=lambda r: r["score"], reverse=True)
+                if promoted:
+                    chunk_hits = [promoted] + [r for r in chunk_hits if r["chunk_id"] != promoted["chunk_id"]]
+
+            # Narrow expansion: pull each matched chunk's immediate document-
+            # local neighbors so the LLM prompt gets a fuller section of
+            # context than one isolated chunk, without pulling in the whole
+            # document — small-to-big retrieval, not small-then-everything.
+            seen_chunk_ids = {r["chunk_id"] for r in chunk_hits}
+            expanded = list(chunk_hits)
+            for r in chunk_hits:
+                for n in self._store.get_neighbor_chunks(r["document_id"], r["chunk_index"], radius=1):
+                    if n["chunk_id"] not in seen_chunk_ids:
+                        expanded.append(n)
+                        seen_chunk_ids.add(n["chunk_id"])
+            results = expanded
+
+        # Deduplicate by title (encyclopedia indexed twice with different
+        # title formats). Skipped for chunk-shaped results (the `else` branch
+        # above) — those are already deduplicated by chunk_id as they're
+        # assembled, and multiple chunks legitimately share the same
+        # document_title (different sections of the same document, not
+        # duplicate indexing the way this check was written to catch).
+        if results and "chunk_id" not in results[0]:
+            seen_titles: set = set()
+            unique_results = []
+            for r in results:
+                norm = r["title"].lower().strip()
+                if norm not in seen_titles:
+                    seen_titles.add(norm)
+                    unique_results.append(r)
+            results = unique_results
 
         compare_intent = any(kw in query.lower() for kw in [
             "compare", "difference between", "vs", "versus", "differ",
@@ -854,7 +946,25 @@ class DisputeAgent:
                     doc_parts.append(f"### {r['title']}\n{excerpt}…")
             docs_text = "\n\n".join(doc_parts)
         else:
-            docs_text = "\n\n".join(r["content"][:1000] for r in results)
+            # Label each chunk's network explicitly rather than relying on
+            # the model to infer it from prose alone — confirmed this
+            # matters: without a label, the LLM cited a Visa/Mastercard-
+            # specific "$15-$50 chargeback fee" figure as if it applied to a
+            # UPI/NPCI question, hedged as "the knowledge base says" (true)
+            # but presented as directly applicable (false — the RuPay/NPCI
+            # docs never mention a merchant-paid dispute fee at all). A
+            # structural signal the model can act on beats a stronger prose
+            # instruction alone for this failure mode — it still has to
+            # read every source's prose to catch a cross-network fact, a
+            # label lets it filter before it ever starts reasoning about content.
+            doc_parts = []
+            for r in results:
+                network_label = r.get("network") or "general / not network-specific"
+                doc_parts.append(
+                    f"[Source: {r.get('document_title', '')} — network: {network_label}]\n"
+                    f"{r['content'][:1000]}"
+                )
+            docs_text = "\n\n".join(doc_parts)
 
         if not results:
             return {
@@ -938,13 +1048,32 @@ class DisputeAgent:
                     "bank), and the merchant's involvement is indirect. Do NOT use Visa/"
                     "Mastercard terminology (issuing bank, card network, acquiring bank) "
                     "even if other, more generic retrieved documents use that framing — "
-                    "those describe a different payment rail and do not apply here."
+                    "those describe a different payment rail and do not apply here.\n\n"
+                    "This same caution applies to SPECIFIC FACTS, not just terminology. A "
+                    "dollar/rupee figure, a percentage, or a day-count from a generic or "
+                    "Visa/Mastercard-specific document does not automatically apply to UPI/"
+                    "NPCI — for example, a card-network 'chargeback fee' is not evidence "
+                    "that NPCI charges merchants an equivalent fee for a UPI dispute.\n\n"
+                    "Each source below is labeled with its network. Before stating any "
+                    "specific number, check which source it came from: if the ONLY source "
+                    "for that number is labeled a different network or 'general / not "
+                    "network-specific', do not present it as a UPI/NPCI fact. Say plainly "
+                    "that the knowledge base doesn't document a UPI-specific figure for "
+                    "that point, rather than substituting the other network's number — "
+                    "presenting another network's fact as if it were UPI-specific is a "
+                    "factual error, not a reasonable generalization, even if you name the "
+                    "source honestly."
                 )
             else:
                 system_prompt = (
                     "You are a chargeback expert. Answer the question clearly and "
                     "concisely using only the provided knowledge base documents. "
-                    "Explain in plain English. Do not use jargon without explaining it."
+                    "Explain in plain English. Do not use jargon without explaining it.\n\n"
+                    "If the retrieved documents cover more than one card network, "
+                    "attribute network-specific facts (fees, deadlines, thresholds) to the "
+                    "network they actually describe — do not present one network's "
+                    "documented figure as if it applies to a different network the "
+                    "question is actually about."
                 )
 
         response = self._invoke([
@@ -1113,7 +1242,7 @@ class DisputeAgent:
         # examples retrieved via payload filter — these are templated letters
         # that provide concrete structure for the draft.
         if decision == "fight":
-            rebuttal_docs = self._store.filter_by_payload({"section": "10_Rebuttal_Library"}, limit=3)
+            rebuttal_docs = self._store.filter_by_payload({"knowledge_domain": "10_Rebuttal_Library"}, limit=3)
             rebuttal_contents = [r["content"] for r in rebuttal_docs]
             all_docs = base_docs + [c for c in rebuttal_contents if c not in base_docs]
         else:

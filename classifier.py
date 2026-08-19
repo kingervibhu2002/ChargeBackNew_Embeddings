@@ -61,17 +61,38 @@ _CONCEPT_QUERY_PATTERNS = (
     "and its ", "and their ", "all codes", "all types", "all kinds",
     "how many", "what types", "what kinds", "categories of",
     "difference between", "compare ", "explain ",
+    # Hinglish list-request construction: "<topic> ki list chahiye" / "ki
+    # list do" = "want/give a list of <topic>" — same imperative-list intent
+    # as the English starters below, just a different sentence shape (the
+    # list-word sits mid-sentence, not at the start).
+    "ki list",
 )
 
-# Payment-domain terms that qualify a question-form input as on-topic
+# Payment-domain terms that qualify a question-form input as on-topic.
+# "upi" and "code"/"codes" were missing — a query naming only "UPI" (not
+# "rupay"/"npci") or asking generically about "codes" (not a specific
+# network) fell through to has_payment_topic=False and got misrouted or
+# rejected even though it's squarely on-topic for this assistant.
 _QUESTION_PAYMENT_TERMS = [
     "chargeback", "dispute", "reason code", "visa", "mastercard", "amex",
-    "american express", "rupay", "npci", "representment", "acquirer", "issuer",
-    "timelines", "timeline", "evidence", "rebuttal", "pre-arbitration",
-    "arbitration", "process", "procedure", "policy", "fight", "refund",
+    "american express", "rupay", "npci", "upi", "representment", "acquirer",
+    "issuer", "timelines", "timeline", "evidence", "rebuttal",
+    "pre-arbitration", "arbitration", "process", "procedure", "policy",
+    "fight", "refund", "code",
     # Hinglish
     "chargeback kya", "kya hota hai",
 ]
+
+# Imperative list-request openers — "List X", "Show me X", "Give me X",
+# "Enumerate X", "Display X". classify_query_type's question-detection
+# previously only recognised interrogative phrasing (a "?", a wh-word, or a
+# fixed concept pattern) and had no case for command-mood requests, which is
+# the single most natural way to ask for a list in English. Confirmed live:
+# even "List all Visa codes" — about as unambiguous a list request as any
+# query can be — was rejected as invalid before this was added.
+_IMPERATIVE_LIST_STARTERS = (
+    "list ", "show me", "give me", "enumerate", "display all", "display the",
+)
 
 # Concrete incident keywords — merchant describing a real problem
 _DISPUTE_INCIDENT_TERMS = [
@@ -80,7 +101,14 @@ _DISPUTE_INCIDENT_TERMS = [
     "never received", "bank reversed", "reversed my", "funds reversed",
     "settlement", "representment", "i got a", "i received a",
     "they filed", "customer filed", "reason code", "notification",
-    "visa 1", "mastercard 4", "amex c", "rupay u",
+    # Note: "visa 1", "mastercard 4", "amex c", "rupay u" were removed here
+    # deliberately — they were meant to catch genuine code mentions like
+    # "Visa 13.1", but as loose substrings they also matched innocent phrases
+    # like "Amex codes" or "RuPay users" (any word starting with the next
+    # letter), forcing informational questions into the dispute evidence-
+    # gathering flow. They were redundant anyway: extract_network_and_code()
+    # below already catches every genuine code mention with an actual
+    # decimal/digit-format regex, which these loose substrings can't validate.
     # Hinglish
     "paise nahi aaye", "paisa nahi aaya", "nahi mili raqam",
     "amount nahi aaya", "mera paisa", "meri payment", "bank ne wapas",
@@ -121,6 +149,7 @@ def classify_query_type(query: str) -> str:
     is_question_form    = (
         q.endswith("?")
         or any(q.startswith(w) for w in _QUESTION_STARTERS)
+        or any(q.startswith(w) for w in _IMPERATIVE_LIST_STARTERS)
         or any(marker in q for marker in _MID_SENTENCE_QUESTION_MARKERS)
         or any(pattern in q for pattern in _CONCEPT_QUERY_PATTERNS)
     )

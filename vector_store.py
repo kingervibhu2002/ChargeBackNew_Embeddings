@@ -25,8 +25,17 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-# Every document goes into this single Qdrant collection.
+# Every whole document goes into this collection.
 _COLLECTION = "chargeback_docs"
+
+# Chunk-level collection, parallel to _COLLECTION — same client/process, same
+# ./qdrant_data directory, just a second named collection. List/coverage/
+# compare-style queries (which genuinely want whole-doc breadth) keep using
+# _COLLECTION unchanged; precision Q&A retrieval uses this one instead. Kept
+# as a second collection rather than replacing _COLLECTION outright because
+# those two query shapes have genuinely different granularity needs, not
+# because chunking is somehow optional for either.
+_CHUNKS_COLLECTION = "chargeback_encyclopedia_chunks"
 
 
 class VectorStore:
@@ -54,8 +63,9 @@ class VectorStore:
         """
         # QdrantClient(path=...) runs in embedded local mode — no server needed.
         self.client = QdrantClient(path=persist_path)
-        # Flag to avoid redundant collection-existence checks on every write.
+        # Flags to avoid redundant collection-existence checks on every write.
         self._collection_ready = False
+        self._chunks_collection_ready = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -88,6 +98,21 @@ class VectorStore:
             )
 
         self._collection_ready = True
+
+    def _ensure_chunks_collection(self, vector_size: int) -> None:
+        """Same lazy-creation pattern as _ensure_collection, for the parallel
+        chunk collection. Separate readiness flag since the two collections
+        aren't necessarily created in the same call."""
+        if self._chunks_collection_ready:
+            return
+
+        existing = [c.name for c in self.client.get_collections().collections]
+        if _CHUNKS_COLLECTION not in existing:
+            self.client.create_collection(
+                collection_name=_CHUNKS_COLLECTION,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
+        self._chunks_collection_ready = True
 
     def _str_id_to_int(self, doc_id: str) -> int:
         """
@@ -125,7 +150,7 @@ class VectorStore:
         content: str,
         embedding: List[float],
         summary: str = "",
-        section: str = "",
+        knowledge_domain: str = "",
         network: str = "",
         reason_code: str = "",
         document_type: str = "",
@@ -165,15 +190,84 @@ class VectorStore:
                     id=self._str_id_to_int(doc_id),
                     vector=embedding,
                     payload={
-                        "doc_id":        doc_id,
-                        "title":         title,
-                        "content":       content,
-                        "summary":       summary,
-                        "section":       section,
-                        "network":       network,
-                        "reason_code":   reason_code,
-                        "document_type": document_type,
-                        "keywords":      keywords or [],
+                        "doc_id":           doc_id,
+                        "title":            title,
+                        "content":          content,
+                        "summary":          summary,
+                        "knowledge_domain": knowledge_domain,
+                        "network":          network,
+                        "reason_code":      reason_code,
+                        "document_type":    document_type,
+                        "keywords":         keywords or [],
+                    },
+                )
+            ],
+        )
+
+    def add_chunk(
+        self,
+        chunk_id: str,
+        document_id: str,
+        document_title: str,
+        content: str,
+        embedding: List[float],
+        knowledge_domain: str = "",
+        network: str = "",
+        reason_code: str = "",
+        section: Optional[str] = None,
+        subsection: Optional[str] = None,
+        chunk_index: int = 0,
+    ) -> None:
+        """
+        Insert or overwrite one chunk in the parallel chunk collection.
+
+        Same idempotent-upsert pattern as add_document(), against
+        _CHUNKS_COLLECTION instead — same client, same ./qdrant_data
+        directory, a different named collection. `content` here is the raw,
+        unprefixed chunk text (for clean display/citation); `embedding` is
+        expected to have been computed from chunking.build_contextual_prefix()
+        + content, not content alone — the prefix lives only in what gets
+        embedded, never duplicated into the payload.
+
+        Args:
+            chunk_id:         Stable id from chunking.chunk_id() — positional,
+                              not derived from heading text.
+            document_id:      The parent document's id (matches the id used
+                              for that same document in the whole-doc
+                              collection, so the two stay linkable).
+            document_title:   Parent document's title, for display/citation.
+            content:          Raw chunk text (unprefixed).
+            embedding:        Vector for build_contextual_prefix(...) + content.
+            knowledge_domain: Folder-derived domain, e.g. "07_RuPay".
+            network:          e.g. "Visa" — may be "" for non-network docs.
+            reason_code:      e.g. "U001" — may be "" when not code-specific.
+            section:          Enclosing ## heading text, or None.
+            subsection:       Enclosing ### heading text (or FAQ question
+                              slug), or None.
+            chunk_index:      Position of this chunk within its document.
+
+        Returns:
+            None
+        """
+        self._ensure_chunks_collection(len(embedding))
+
+        self.client.upsert(
+            collection_name=_CHUNKS_COLLECTION,
+            points=[
+                PointStruct(
+                    id=self._str_id_to_int(chunk_id),
+                    vector=embedding,
+                    payload={
+                        "chunk_id":         chunk_id,
+                        "document_id":      document_id,
+                        "document_title":   document_title,
+                        "content":          content,
+                        "knowledge_domain": knowledge_domain,
+                        "network":          network,
+                        "reason_code":      reason_code,
+                        "section":          section,
+                        "subsection":       subsection,
+                        "chunk_index":      chunk_index,
                     },
                 )
             ],
@@ -233,16 +327,129 @@ class VectorStore:
         )
         return [
             {
-                "id":            hit.payload["doc_id"],
-                "title":         hit.payload["title"],
-                "content":       hit.payload["content"],
-                "summary":       hit.payload.get("summary", ""),
-                "section":       hit.payload.get("section", ""),
-                "network":       hit.payload.get("network", ""),
-                "reason_code":   hit.payload.get("reason_code", ""),
-                "score":         round(hit.score, 4),
+                "id":               hit.payload["doc_id"],
+                "title":            hit.payload["title"],
+                "content":          hit.payload["content"],
+                "summary":          hit.payload.get("summary", ""),
+                "knowledge_domain": hit.payload.get("knowledge_domain", ""),
+                "network":          hit.payload.get("network", ""),
+                "reason_code":      hit.payload.get("reason_code", ""),
+                "score":            round(hit.score, 4),
             }
             for hit in result.points
+        ]
+
+    def search_chunks(
+        self, query_embedding: List[float], top_k: int = 6, knowledge_domain: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Find the top-k most semantically similar chunks for a query vector,
+        against the parallel chunk collection — the precision-retrieval
+        counterpart to search(). Returns 384-dim-cosine-ranked chunks rather
+        than whole documents, so a query about one section of a document
+        isn't diluted by the rest of that document's unrelated content.
+
+        Args:
+            query_embedding:  Vector for the query (NOT prefixed — the
+                              contextual prefix is a write-time-only concept;
+                              queries are embedded plain).
+            top_k:            Number of chunks to return.
+            knowledge_domain: Optional payload filter, e.g. "07_RuPay" — used
+                              when a network/app is already detected in the
+                              query, to narrow the candidate pool up front
+                              rather than rely on ranking alone.
+
+        Returns:
+            List[Dict]: chunk_id, document_id, document_title, content,
+                       knowledge_domain, network, reason_code, section,
+                       subsection, chunk_index, score. Empty list if the
+                       chunk collection doesn't exist yet.
+        """
+        try:
+            query_filter = (
+                Filter(must=[FieldCondition(key="knowledge_domain", match=MatchValue(value=knowledge_domain))])
+                if knowledge_domain else None
+            )
+            result = self.client.query_points(
+                collection_name=_CHUNKS_COLLECTION,
+                query=query_embedding,
+                query_filter=query_filter,
+                limit=top_k,
+                with_payload=True,
+            )
+        except Exception:
+            return []
+        return [
+            {
+                "chunk_id":         hit.payload["chunk_id"],
+                "document_id":      hit.payload["document_id"],
+                "document_title":   hit.payload["document_title"],
+                "content":          hit.payload["content"],
+                "knowledge_domain": hit.payload.get("knowledge_domain", ""),
+                "network":          hit.payload.get("network", ""),
+                "reason_code":      hit.payload.get("reason_code", ""),
+                "section":          hit.payload.get("section"),
+                "subsection":       hit.payload.get("subsection"),
+                "chunk_index":      hit.payload.get("chunk_index", 0),
+                "score":            round(hit.score, 4),
+            }
+            for hit in result.points
+        ]
+
+    def get_neighbor_chunks(self, document_id: str, chunk_index: int, radius: int = 1) -> List[Dict]:
+        """
+        Return the chunks immediately before/after a given chunk within the
+        same document — narrow context expansion for _answer_question_node's
+        precision-Q&A path: a single matched chunk decides WHICH document and
+        section is relevant, but its immediate neighbors (same document,
+        adjacent position) usually complete the section's context better than
+        the isolated chunk alone, without pulling in the whole document.
+
+        No embedding needed — a direct payload-filtered scroll on document_id,
+        then filtered client-side to the index window (the chunk collection
+        per document is small enough that this is cheap).
+
+        Args:
+            document_id: Parent document id.
+            chunk_index: Index of the chunk to find neighbors for.
+            radius:      How many positions before/after to include.
+
+        Returns:
+            List[Dict]: Neighboring chunks (same shape as search_chunks()'s
+                       results, score=1.0), NOT including chunk_index itself,
+                       ordered by chunk_index ascending.
+        """
+        try:
+            points, _ = self.client.scroll(
+                collection_name=_CHUNKS_COLLECTION,
+                scroll_filter=Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]),
+                limit=1000,
+                with_payload=True,
+                with_vectors=False,
+            )
+        except Exception:
+            return []
+        neighbors = [
+            p for p in points
+            if abs(p.payload.get("chunk_index", -999) - chunk_index) <= radius
+            and p.payload.get("chunk_index") != chunk_index
+        ]
+        neighbors.sort(key=lambda p: p.payload.get("chunk_index", 0))
+        return [
+            {
+                "chunk_id":         p.payload["chunk_id"],
+                "document_id":      p.payload["document_id"],
+                "document_title":   p.payload["document_title"],
+                "content":          p.payload["content"],
+                "knowledge_domain": p.payload.get("knowledge_domain", ""),
+                "network":          p.payload.get("network", ""),
+                "reason_code":      p.payload.get("reason_code", ""),
+                "section":          p.payload.get("section"),
+                "subsection":       p.payload.get("subsection"),
+                "chunk_index":      p.payload.get("chunk_index", 0),
+                "score":            1.0,
+            }
+            for p in neighbors
         ]
 
     def filter_by_payload(self, filters: Dict[str, Any], limit: int = 50) -> List[Dict]:
@@ -251,7 +458,7 @@ class VectorStore:
         Uses Qdrant's native field-condition filtering — no full-collection scan.
 
         Args:
-            filters: e.g. {"section": "04_Visa"} or {"network": "Mastercard"}.
+            filters: e.g. {"knowledge_domain": "04_Visa"} or {"network": "Mastercard"}.
             limit:   Maximum number of results (default 50).
 
         Returns:
@@ -273,14 +480,14 @@ class VectorStore:
             return []
         return [
             {
-                "id":            p.payload["doc_id"],
-                "title":         p.payload["title"],
-                "content":       p.payload["content"],
-                "summary":       p.payload.get("summary", ""),
-                "section":       p.payload.get("section", ""),
-                "network":       p.payload.get("network", ""),
-                "reason_code":   p.payload.get("reason_code", ""),
-                "score":         1.0,
+                "id":               p.payload["doc_id"],
+                "title":            p.payload["title"],
+                "content":          p.payload["content"],
+                "summary":          p.payload.get("summary", ""),
+                "knowledge_domain": p.payload.get("knowledge_domain", ""),
+                "network":          p.payload.get("network", ""),
+                "reason_code":      p.payload.get("reason_code", ""),
+                "score":            1.0,
             }
             for p in points
         ]
@@ -337,41 +544,73 @@ class VectorStore:
         fused.sort(key=lambda x: x["score"], reverse=True)
         return fused[:top_k]
 
-    def filter_by_title(self, keywords: List[str]) -> List[Dict]:
+    def filter_by_title(
+        self, keywords: List[str], query_embedding: Optional[List[float]] = None
+    ) -> List[Dict]:
         """
-        Return all documents whose title contains any of the given keywords
+        Return documents whose title contains any of the given keywords
         (case-insensitive). Used for network-specific list queries where
         semantic search alone may miss lower-ranked but relevant documents.
 
+        Without query_embedding, matches keep Qdrant's scroll order and a
+        flat score=1.0 — fine for callers that want the FULL matched set
+        (e.g. dumping every doc for a network into an LLM prompt for a list/
+        compare answer), where relative order within the set doesn't matter.
+
+        With query_embedding, matches are instead ranked by real cosine
+        similarity to it. Needed by any caller that only takes a slice of
+        the matches (e.g. a top-3 boost) — scroll order is arbitrary storage
+        order, not relevance, so an unranked slice can surface an unrelated
+        document (e.g. a specific reason-code page) ahead of the one that
+        actually answers a general question, and tag it with a misleadingly
+        confident score=1.0 in the process.
+
         Args:
-            keywords: List of strings to match against document titles.
+            keywords:        List of strings to match against document titles.
+            query_embedding: Optional vector to rank matches against.
 
         Returns:
-            List[Dict]: Matching documents with id, title, content, score=1.0.
+            List[Dict]: Matching documents with id, title, content, score.
         """
         try:
             points, _ = self.client.scroll(
                 collection_name=_COLLECTION,
                 limit=1000,
                 with_payload=True,
-                with_vectors=False,
+                with_vectors=bool(query_embedding),
             )
         except Exception:
             return []
         lower_kws = [k.lower() for k in keywords]
+        matches = [
+            p for p in points
+            if any(kw in p.payload.get("title", "").lower() for kw in lower_kws)
+        ]
+
+        if query_embedding:
+            def _cosine(a: List[float], b: List[float]) -> float:
+                dot     = sum(x * y for x, y in zip(a, b))
+                norm_a  = sum(x * x for x in a) ** 0.5
+                norm_b  = sum(y * y for y in b) ** 0.5
+                return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+            scored = [(p, _cosine(query_embedding, p.vector)) for p in matches]
+            scored.sort(key=lambda pair: pair[1], reverse=True)
+        else:
+            scored = [(p, 1.0) for p in matches]
+
         return [
             {
-                "id":          p.payload["doc_id"],
-                "title":       p.payload["title"],
-                "content":     p.payload["content"],
-                "summary":     p.payload.get("summary", ""),
-                "section":     p.payload.get("section", ""),
-                "network":     p.payload.get("network", ""),
-                "reason_code": p.payload.get("reason_code", ""),
-                "score":       1.0,
+                "id":               p.payload["doc_id"],
+                "title":            p.payload["title"],
+                "content":          p.payload["content"],
+                "summary":          p.payload.get("summary", ""),
+                "knowledge_domain": p.payload.get("knowledge_domain", ""),
+                "network":          p.payload.get("network", ""),
+                "reason_code":      p.payload.get("reason_code", ""),
+                "score":            round(score, 4),
             }
-            for p in points
-            if any(kw in p.payload.get("title", "").lower() for kw in lower_kws)
+            for p, score in scored
         ]
 
     def list_documents(self) -> List[Dict]:

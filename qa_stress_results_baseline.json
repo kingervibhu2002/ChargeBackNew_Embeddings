@@ -1,0 +1,1830 @@
+[
+  {
+    "id": 1,
+    "category": "brand_vs_technical",
+    "query": "What happens if I get a chargeback for a Google Pay transaction?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "General Chargeback FAQs for Merchants",
+        "score": 0.7902
+      },
+      {
+        "title": "What Is a Chargeback",
+        "score": 0.7826
+      },
+      {
+        "title": "Chargeback Fees: Full Cost Breakdown for Merchants",
+        "score": 0.7781
+      },
+      {
+        "title": "What Is a Chargeback?",
+        "score": 0.7747
+      }
+    ],
+    "latency_s": 0.02
+  },
+  {
+    "id": 2,
+    "category": "brand_vs_technical",
+    "query": "My customer paid via Paytm and is now disputing \u2014 what's the process?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Customer Service and CRM Evidence",
+        "score": 0.7378
+      },
+      {
+        "title": "Chargebacks for Digital Goods and Subscriptions",
+        "score": 0.7302
+      },
+      {
+        "title": "How to Write a Chargeback Rebuttal Letter",
+        "score": 0.7243
+      },
+      {
+        "title": "Subscription Cancellation Defense \u2014 Comprehensive Guide",
+        "score": 0.72
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 3,
+    "category": "brand_vs_technical",
+    "query": "Someone used BHIM to pay and now claims fraud \u2014 who's involved?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Friendly Fraud and First-Party Misuse",
+        "score": 0.7388
+      },
+      {
+        "title": "Rebuttal Template \u2014 Suspected Friendly Fraud",
+        "score": 0.7267
+      },
+      {
+        "title": "Friendly Fraud \u2014 First-Party Misuse",
+        "score": 0.7194
+      },
+      {
+        "title": "Refund Fraud",
+        "score": 0.7167
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 4,
+    "category": "brand_vs_technical",
+    "query": "Is a WhatsApp Pay dispute handled differently from a normal UPI one?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "NPCI U007 \u2014 Wrong Amount Transferred",
+        "score": 0.7254
+      },
+      {
+        "title": "NPCI UPI Dispute Code U001 \u2014 Transaction Not Done by Customer (Fraud)",
+        "score": 0.7241
+      },
+      {
+        "title": "NPCI UPI Dispute Code U003 \u2014 Customer Debited but Merchant Not Credited",
+        "score": 0.7228
+      },
+      {
+        "title": "NPCI UPI Dispute Code U004 \u2014 Customer Account Debited Multiple Times",
+        "score": 0.7171
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 5,
+    "category": "brand_vs_technical",
+    "query": "Customer says Amazon Pay deducted twice \u2014 what reason code applies?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "NPCI UPI Dispute Code U004 \u2014 Customer Account Debited Multiple Times",
+        "score": 0.7238
+      },
+      {
+        "title": "Visa 12.6 \u2014 Duplicate Processing",
+        "score": 0.7223
+      },
+      {
+        "title": "Mastercard 4834 \u2014 Duplicate Processing",
+        "score": 0.7144
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 13.2 (Cancelled Recurring Transaction)",
+        "score": 0.7142
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 6,
+    "category": "brand_vs_technical",
+    "query": "I use Razorpay as my payment gateway \u2014 does that change anything?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Payment Gateway, PSP, and Aggregator: Differences and Chargeback Implications",
+        "score": 0.751
+      },
+      {
+        "title": "Chargebacks for Digital Goods and Subscriptions",
+        "score": 0.6903
+      },
+      {
+        "title": "Full Transaction Lifecycle: From Click to Funding",
+        "score": 0.6852
+      },
+      {
+        "title": "Chargeback Glossary \u2014 G to R",
+        "score": 0.682
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 7,
+    "category": "brand_vs_technical",
+    "query": "My settlement is through HDFC \u2014 are they the acquiring bank here?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Acquiring Bank: Role, Merchant Contracts, and Chargeback Handling",
+        "score": 0.7224
+      },
+      {
+        "title": "Settlement and Clearing: How Merchant Funds Move",
+        "score": 0.6909
+      },
+      {
+        "title": "Chargeback Glossary \u2014 A to F",
+        "score": 0.6808
+      },
+      {
+        "title": "Mastercard Chargeback Reason Code 4855 \u2014 Goods or Services Not Provided",
+        "score": 0.6798
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 8,
+    "category": "brand_vs_technical",
+    "query": "Customer's bank is SBI \u2014 what's SBI's role in this dispute?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "NPCI UPI Dispute Code U001 \u2014 Transaction Not Done by Customer (Fraud)",
+        "score": 0.7341
+      },
+      {
+        "title": "RBI Guidelines for Indian Merchants \u2014 Chargeback and Payment Compliance",
+        "score": 0.7274
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (SaaS / Subscription)",
+        "score": 0.7198
+      },
+      {
+        "title": "Issuing Bank: Role, Chargeback Initiation, and Liability",
+        "score": 0.7131
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 9,
+    "category": "brand_vs_technical",
+    "query": "Is a CRED transaction handled the same as UPI?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "NPCI UPI Dispute Code U001 \u2014 Transaction Not Done by Customer (Fraud)",
+        "score": 0.7609
+      },
+      {
+        "title": "NPCI U006 \u2014 Transaction Declined but Amount Debited",
+        "score": 0.75
+      },
+      {
+        "title": "NPCI U007 \u2014 Wrong Amount Transferred",
+        "score": 0.7496
+      },
+      {
+        "title": "NPCI UPI Dispute Code U002 \u2014 Duplicate Transaction",
+        "score": 0.7388
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 10,
+    "category": "brand_vs_technical",
+    "query": "What if the customer paid with their RuPay-linked UPI ID?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "NPCI UPI Dispute Code U001 \u2014 Transaction Not Done by Customer (Fraud)",
+        "score": 0.775
+      },
+      {
+        "title": "NPCI U005 \u2014 Fraudulent Transaction",
+        "score": 0.7651
+      },
+      {
+        "title": "NPCI U007 \u2014 Wrong Amount Transferred",
+        "score": 0.7365
+      },
+      {
+        "title": "NPCI UPI Dispute Code U003 \u2014 Customer Debited but Merchant Not Credited",
+        "score": 0.7204
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 11,
+    "category": "quantifier_arithmetic",
+    "query": "What are the top 3 minus 1 fraud-related reason codes?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "1. **Visa\u202f10.1 \u2013 EMV Liability Shift: Counterfeit Fraud**  \n   Covers counterfeit\u2011card fraud where a cloned chip card is used at the point of sale, shifting liability to the merchant.\n\n2. **Mastercard\u202f4837 \u2013 No Cardholder Authorization**  \n   The most common CNP (card\u2011not\u2011present) fraud code, used when the cardholder denies authorising the transaction.",
+    "latency_s": 1.56
+  },
+  {
+    "id": 12,
+    "category": "quantifier_arithmetic",
+    "query": "List the first 5 of the 10 UPI codes.",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 13,
+    "category": "quantifier_arithmetic",
+    "query": "Give me half of the Visa reason codes.",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": true,
+    "decision": "",
+    "reason_code": "Visa Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "I still need one key detail to help you.\n\nDid a customer file a chargeback against you \u2014 meaning your bank sent you a chargeback notification and reversed funds from your account?\n\nIf yes: please share the reason code or reason written on the chargeback notification (e.g. 'Visa 13.1', 'item not received', 'fraud', '4853'). This tells us what the customer claimed and determines how to respond.\n\nIf ",
+    "latency_s": 0.05
+  },
+  {
+    "id": 14,
+    "category": "quantifier_arithmetic",
+    "query": "What's the second most common reason code after fraud?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Visa Chargeback Reason Codes",
+        "score": 0.7705
+      },
+      {
+        "title": "Mastercard Chargeback Reason Code 4870 \u2014 Chip Liability Shift",
+        "score": 0.743
+      },
+      {
+        "title": "Mastercard Chargeback Reason Code 4871 \u2014 Chip and PIN Liability Shift",
+        "score": 0.7353
+      },
+      {
+        "title": "Amex Dispute Code FR2 \u2014 Fraud \u2014 EMV Counterfeit",
+        "score": 0.7333
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 15,
+    "category": "quantifier_arithmetic",
+    "query": "Show me codes 2 through 6 for Mastercard.",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 16,
+    "category": "quantifier_arithmetic",
+    "query": "What are all the codes except the fraud ones?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": true,
+    "decision": "",
+    "reason_code": "Unknown Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "I still need one key detail to help you.\n\nDid a customer file a chargeback against you \u2014 meaning your bank sent you a chargeback notification and reversed funds from your account?\n\nIf yes: please share the reason code or reason written on the chargeback notification (e.g. 'Visa 13.1', 'item not received', 'fraud', '4853'). This tells us what the customer claimed and determines how to respond.\n\nIf ",
+    "latency_s": 2.7
+  },
+  {
+    "id": 17,
+    "category": "quantifier_arithmetic",
+    "query": "List every code that isn't about delivery.",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 18,
+    "category": "quantifier_arithmetic",
+    "query": "Give me the last 3 Amex codes.",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": true,
+    "decision": "",
+    "reason_code": "Amex Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "I still need one key detail to help you.\n\nDid a customer file a chargeback against you \u2014 meaning your bank sent you a chargeback notification and reversed funds from your account?\n\nIf yes: please share the reason code or reason written on the chargeback notification (e.g. 'Visa 13.1', 'item not received', 'fraud', '4853'). This tells us what the customer claimed and determines how to respond.\n\nIf ",
+    "latency_s": 0.05
+  },
+  {
+    "id": 19,
+    "category": "quantifier_arithmetic",
+    "query": "How many total codes are there minus the ones needing no evidence?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "**Total codes mentioned:** 8  \n**Codes that lack evidence requirements (no rebuttal template shown):** 10.2, 4849  \n**Result (total\u202f\u2013\u202fno\u2011evidence codes):** **6**.",
+    "latency_s": 1.23
+  },
+  {
+    "id": 20,
+    "category": "quantifier_arithmetic",
+    "query": "What's the middle one of the Visa fraud codes?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "1. **10.3 \u2014 Other Fraud: Card\u2011Present** \u2013 This catch\u2011all fraud code applies to in\u2011person transactions that are fraudulent but don\u2019t fit the specific EMV liability\u2011shift categories (10.1 or 10.2).",
+    "latency_s": 1.15
+  },
+  {
+    "id": 21,
+    "category": "substring_collision",
+    "query": "Explain the difference between UPI transactions in general.",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": true,
+    "decision": "",
+    "reason_code": "RuPay Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "I still need one key detail to help you.\n\nDid a customer file a chargeback against you \u2014 meaning your bank sent you a chargeback notification and reversed funds from your account?\n\nIf yes: please share the reason code or reason written on the chargeback notification (e.g. 'Visa 13.1', 'item not received', 'fraud', '4853'). This tells us what the customer claimed and determines how to respond.\n\nIf ",
+    "latency_s": 0.05
+  },
+  {
+    "id": 22,
+    "category": "substring_collision",
+    "query": "What does \"unpaid\" mean in a chargeback context?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "What Is a Chargeback?",
+        "score": 0.7913
+      },
+      {
+        "title": "How to Write a Chargeback Rebuttal Letter",
+        "score": 0.7801
+      },
+      {
+        "title": "What Is a Chargeback",
+        "score": 0.776
+      },
+      {
+        "title": "General Chargeback FAQs for Merchants",
+        "score": 0.7738
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 23,
+    "category": "substring_collision",
+    "query": "Is \"amexpert\" a real evidence requirement term?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Evidence Strategy Overview",
+        "score": 0.7076
+      },
+      {
+        "title": "Compelling Evidence: What It Is and How to Use It",
+        "score": 0.7072
+      },
+      {
+        "title": "Amex Dispute Code C08 \u2014 Goods or Services Not Received",
+        "score": 0.6887
+      },
+      {
+        "title": "Email and Communication Evidence",
+        "score": 0.6859
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 24,
+    "category": "substring_collision",
+    "query": "What is a rupaycard exactly?",
+    "route": "search",
+    "n_results": 2,
+    "results": [
+      {
+        "title": "RuPay and NPCI Dispute Process \u2014 Complete Overview",
+        "score": 0.7103
+      },
+      {
+        "title": "Chargeback Glossary of Key Terms",
+        "score": 0.6539
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 25,
+    "category": "substring_collision",
+    "query": "Explain visanet's role (not asking about the network \"Visa\").",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Card Networks: Visa, Mastercard, Amex, Discover, and Global Networks",
+        "score": 0.7615
+      },
+      {
+        "title": "American Express Dispute Process \u2014 Complete Merchant Overview",
+        "score": 0.6859
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (SaaS / Subscription)",
+        "score": 0.6749
+      },
+      {
+        "title": "Visa 11.3 \u2014 No Authorization",
+        "score": 0.6699
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 26,
+    "category": "substring_collision",
+    "query": "What's a \"masterclass\" dispute strategy?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Mastercard Dispute Process \u2014 Overview",
+        "score": 0.716
+      },
+      {
+        "title": "Evidence Strategy Overview",
+        "score": 0.6673
+      },
+      {
+        "title": "Subscription Cancellation Defense \u2014 Comprehensive Guide",
+        "score": 0.6589
+      },
+      {
+        "title": "Pre-Arbitration: The Issuer's Second Challenge and How to Respond",
+        "score": 0.6517
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 27,
+    "category": "substring_collision",
+    "query": "What is UPIN used for?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 28,
+    "category": "substring_collision",
+    "query": "Explain \"cvvresult\" fields.",
+    "route": "search",
+    "n_results": 1,
+    "results": [
+      {
+        "title": "Chargeback Glossary of Key Terms",
+        "score": 0.6523
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 29,
+    "category": "substring_collision",
+    "query": "What does \"arbitrationstage\" mean?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Second Chargeback (Pre-Arbitration): What It Is and What to Do",
+        "score": 0.7235
+      },
+      {
+        "title": "Pre-Arbitration: The Issuer's Second Challenge and How to Respond",
+        "score": 0.7153
+      },
+      {
+        "title": "Chargeback Arbitration: The Card Network's Final Judgment",
+        "score": 0.7071
+      },
+      {
+        "title": "Chargeback Lifecycle and Timelines",
+        "score": 0.697
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 30,
+    "category": "substring_collision",
+    "query": "Is \"npciupi\" one word or two systems?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "NPCI U010 \u2014 Technical Error / System Failure",
+        "score": 0.7078
+      },
+      {
+        "title": "NPCI UPI Dispute Code U002 \u2014 Duplicate Transaction",
+        "score": 0.6879
+      },
+      {
+        "title": "NPCI UPI Dispute Code U004 \u2014 Customer Account Debited Multiple Times",
+        "score": 0.6817
+      },
+      {
+        "title": "RuPay and NPCI Dispute Process \u2014 Complete Overview",
+        "score": 0.662
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 31,
+    "category": "multi_intent",
+    "query": "Which codes are at pre-arbitration and what evidence do they need?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "### The short answer  \n**There is no special \u201cpre\u2011arbitration\u2011only\u201d list of reason codes.**  \nEvery Visa, Mastercard, Amex, Discover, etc. reason code can appear at the very first charge\u2011back filing. If the issuer is not satisfied with the merchant\u2019s first representment, the dispute moves to the **pre\u2011arbitration** (sometimes called the \u201csecond chargeback\u201d) stage, and the same code stays attached ",
+    "latency_s": 6.1
+  },
+  {
+    "id": 32,
+    "category": "multi_intent",
+    "query": "List all Visa codes and tell me which stage each is typically escalated to.",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 33,
+    "category": "multi_intent",
+    "query": "Compare Visa and Mastercard's arbitration timelines, and list their fraud codes too.",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "**What you need to know about the three\u2011step dispute life\u2011cycle**\n\nA card\u2011network dispute always moves through the same three logical phases, no matter which reason (or \u201ccode\u201d) the cardholder or issuer cites:\n\n| Phase | Who is involved | What can happen | Typical time\u2011frame (Visa vs. Mastercard) | What it costs / what the risk is |\n|-------|----------------|----------------|-----------------------",
+    "latency_s": 18.66
+  },
+  {
+    "id": 34,
+    "category": "multi_intent",
+    "query": "Are all Amex codes covered, and which ones are at the arbitration stage?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "**Short answer:**  \nAll American\u202fExpress reason codes are \u201ccovered\u201d in the sense that any of them can be used at the very first (charge\u2011back) stage.\u202fThere is **no separate set of codes that belong only to the arbitration stage** \u2013 every code you might file (C02, C04, C14, C28, F24, etc.) can travel through the three\u2011step dispute life\u2011cycle and end up in arbitration if the parties cannot resolve it",
+    "latency_s": 17.12
+  },
+  {
+    "id": 35,
+    "category": "multi_intent",
+    "query": "What's the difference between chargeback and pre-arbitration, and list codes for each?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "**The short answer**\n\n- **Chargeback** \u2013 the *first* dispute the issuer opens on a transaction.  \n- **Pre\u2011arbitration** \u2013 the *second* chargeback (sometimes called a \u201csecond\u2011chargeback\u201d or \u201cpre\u2011arbitration filing\u201d). It occurs only after the issuer has rejected your initial representment and has re\u2011filed the dispute.  \n- **Arbitration** \u2013 the *final* stage where the card network (Visa, Mastercard, ",
+    "latency_s": 25.13
+  },
+  {
+    "id": 36,
+    "category": "multi_intent",
+    "query": "Give me every RuPay code and explain the lifecycle stage concept.",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "### The \u201cLifecycle\u201d of a RuPay (UPI) Dispute  \n*(Chargeback \u2192 Pre\u2011Arbitration \u2192 Arbitration)*  \n\n> **Key point:**  \n> Every dispute code (U001, U003, U005, U009, U010, etc.) can be filed at the **initial chargeback** stage.  \n> The code itself does **not** dictate which stage the dispute will occupy.  \n> If the merchant, the acquiring bank, or the issuing bank cannot resolve the issue within the p",
+    "latency_s": 14.83
+  },
+  {
+    "id": 37,
+    "category": "multi_intent",
+    "query": "Is my list of Mastercard codes complete, and what's missing from arbitration coverage?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "### The big picture \u2013 why \u201cstage\u2011specific\u201d codes don\u2019t exist  \n\nAll Mastercard reason codes (e.g.,\u202f4840,\u202f4853,\u202f4831,\u202f4835, etc.) can be raised **at the very first step of the dispute \u2013 the chargeback**.  \nThe network does **not** reserve a special subset of codes for \u201cpre\u2011arbitration\u201d or \u201carbitration\u201d.  \n\nIf the card\u2011holder, the issuer, or the merchant does not resolve the dispute at the chargebac",
+    "latency_s": 5.18
+  },
+  {
+    "id": 38,
+    "category": "multi_intent",
+    "query": "Compare all four networks' arbitration processes in one table.",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "**Important foundation \u2013 reason codes are not \u201cstage\u2011locked\u201d**  \nEvery dispute begins with a **chargeback**.  At that moment the card\u2011holder (or the issuing bank on the card\u2011holder\u2019s behalf) selects a reason code that explains why the transaction is being contested.  The same set of reason codes can be used again if the dispute moves forward \u2013 there is **no separate list of codes that belong only ",
+    "latency_s": 18.91
+  },
+  {
+    "id": 39,
+    "category": "multi_intent",
+    "query": "List codes needing delivery evidence, sorted by lifecycle stage.",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 40,
+    "category": "multi_intent",
+    "query": "What are all fraud codes across networks, grouped by which stage they escalate at?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": true,
+    "decision": "",
+    "reason_code": "Unknown Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "I still need one key detail to help you.\n\nDid a customer file a chargeback against you \u2014 meaning your bank sent you a chargeback notification and reversed funds from your account?\n\nIf yes: please share the reason code or reason written on the chargeback notification (e.g. 'Visa 13.1', 'item not received', 'fraud', '4853'). This tells us what the customer claimed and determines how to respond.\n\nIf ",
+    "latency_s": 20.59
+  },
+  {
+    "id": 41,
+    "category": "anaphoric",
+    "query": "Are all of those covered?",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 42,
+    "category": "anaphoric",
+    "query": "What about the other one?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 43,
+    "category": "anaphoric",
+    "query": "Is that the complete list?",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 44,
+    "category": "anaphoric",
+    "query": "Same question but for Mastercard.",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Mastercard Chargeback Reason Code 4855 \u2014 Goods or Services Not Provided",
+        "score": 0.7622
+      },
+      {
+        "title": "Rebuttal Template \u2014 Mastercard Reason Code 4855 (Hotel \u2014 Goods/Services Not Provided)",
+        "score": 0.7522
+      },
+      {
+        "title": "Rebuttal Template \u2014 Mastercard Reason Code 4855 (Travel / Airline)",
+        "score": 0.7363
+      },
+      {
+        "title": "Rebuttal Template \u2014 Mastercard Reason Code 4853 (Services Not Rendered)",
+        "score": 0.7277
+      }
+    ],
+    "latency_s": 0.02
+  },
+  {
+    "id": 45,
+    "category": "anaphoric",
+    "query": "And what about evidence for that one?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 46,
+    "category": "anaphoric",
+    "query": "Did I miss anything?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 47,
+    "category": "anaphoric",
+    "query": "What's the difference between those two?",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 48,
+    "category": "anaphoric",
+    "query": "Show me the rest.",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 49,
+    "category": "anaphoric",
+    "query": "Same thing but for RuPay.",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 50,
+    "category": "anaphoric",
+    "query": "Is there more to it?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 51,
+    "category": "hinglish",
+    "query": "Chargeback kya hota hai aur usme kaun kaun involved hote hain?",
+    "route": "search",
+    "n_results": 1,
+    "results": [
+      {
+        "title": "What Is a Chargeback",
+        "score": 0.6504
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 52,
+    "category": "hinglish",
+    "query": "Visa aur Mastercard mein kya fark hai?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Rebuttal Template \u2014 Mastercard Reason Code 4837 (CNP Fraud)",
+        "score": 0.6819
+      },
+      {
+        "title": "Mastercard 4849 \u2014 Questionable Merchant Activity",
+        "score": 0.6784
+      },
+      {
+        "title": "Rebuttal Template \u2014 Mastercard Reason Code 4855 (Hotel \u2014 Goods/Services Not Provided)",
+        "score": 0.6778
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (Physical Retail / E-Commerce)",
+        "score": 0.6771
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 53,
+    "category": "hinglish",
+    "query": "Mujhe saare fraud codes ki list chahiye.",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": true,
+    "decision": "",
+    "reason_code": "Mastercard 4840",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please provide the authorization records for each disputed transaction (e.g., AVS match, CVV match, 3\u2011DS authentication, EMV chip data) and any delivery confirmation if the goods were physical.",
+    "latency_s": 53.25
+  },
+  {
+    "id": 54,
+    "category": "hinglish",
+    "query": "Arbitration stage ka matlab kya hai?",
+    "route": "search",
+    "n_results": 3,
+    "results": [
+      {
+        "title": "Chargeback Arbitration: The Card Network's Final Judgment",
+        "score": 0.6744
+      },
+      {
+        "title": "Pre-Arbitration: The Issuer's Second Challenge and How to Respond",
+        "score": 0.67
+      },
+      {
+        "title": "Chargeback Lifecycle and Timelines",
+        "score": 0.6679
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 55,
+    "category": "hinglish",
+    "query": "Evidence submit karne ka process kya hai?",
+    "route": "search",
+    "n_results": 3,
+    "results": [
+      {
+        "title": "Email and Communication Evidence",
+        "score": 0.6779
+      },
+      {
+        "title": "Proof of Delivery",
+        "score": 0.6643
+      },
+      {
+        "title": "Evidence and Submission FAQs for Merchants",
+        "score": 0.6557
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 56,
+    "category": "hinglish",
+    "query": "Kaunse codes mein delivery proof chahiye hota hai?",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 57,
+    "category": "hinglish",
+    "query": "Pre-arbitration aur arbitration mein kya difference hai?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "**Pre\u2011arbitration\u202f\u0914\u0930\u202fArbitration\u202f\u0915\u0947 \u092c\u0940\u091a \u0915\u093e \u0905\u0902\u0924\u0930 \u2013 \u090f\u0915 \u0938\u0902\u0915\u094d\u0937\u093f\u092a\u094d\u0924 \u0938\u093e\u0930\u093e\u0902\u0936**\n\n| \u092a\u0939\u0932\u0942 | Pre\u2011Arbitration | Arbitration |\n|------|----------------|-------------|\n| **\u0915\u093f\u0938 \u091a\u0930\u0923 \u092e\u0947\u0902 \u0939\u094b\u0924\u093e \u0939\u0948?** | \u092f\u0939 **\u0926\u0942\u0938\u0930\u093e** (\u092f\u093e \u201c\u0926\u0942\u0938\u0930\u093e\u2011\u091a\u0948\u0932\u0947\u0902\u091c\u201d) \u091a\u0930\u0923 \u0939\u0948, \u091c\u092c \u0907\u0936\u094d\u092f\u0942\u0905\u0930 \u0928\u0947 \u0906\u092a\u0915\u093e \u092a\u0939\u0932\u093e \u0930\u093f\u092a\u094d\u0930\u0947\u091c\u0947\u0902\u091f\u092e\u0947\u0902\u091f (\u0938\u093e\u0915\u094d\u0937\u094d\u092f) \u0916\u093e\u0930\u093f\u091c \u0915\u0930 \u0926\u093f\u092f\u093e \u0914\u0930 \u092b\u093f\u0930 \u0938\u0947 \u0921\u093f\u0938\u094d\u092a\u094d\u092f\u0942\u091f \u092b\u093e\u0907\u0932 \u0915\u093f\u092f\u093e\u0964 | \u092f\u0939 **\u0924\u0940\u0938\u0930\u093e\u202f\u0914\u0930 \u0905\u0902\u0924\u093f\u092e** \u091a\u0930\u0923 \u0939\u0948\u0964 \u0915\u093e\u0930\u094d\u0921 \u0928\u0947\u091f\u0935\u0930\u094d\u0915 (Visa, Mastercard, \u0906\u0926\u093f) \u0938\u094d\u0935\u092f\u0902 \u092e\u0927\u094d\u092f\u0938\u094d",
+    "latency_s": 12.93
+  },
+  {
+    "id": 58,
+    "category": "hinglish",
+    "query": "Mera dispute kitne din mein resolve hoga?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 59,
+    "category": "hinglish",
+    "query": "Kya sabhi RuPay codes yahan cover hain?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "1. **U001 \u2013 Transaction Not Done by Customer (Fraud)** \u2013 Customer claims the UPI transaction was made without any knowledge or authorization.  \n2. **U002 \u2013 Duplicate Transaction** \u2013 The same payment is debited twice from the customer\u2019s account for a single intended transaction.  \n3. **U003 \u2013 Customer Debited but Merchant Not Credited** \u2013 Funds leave the customer\u2019s account but never reach the merch",
+    "latency_s": 24.84
+  },
+  {
+    "id": 60,
+    "category": "hinglish",
+    "query": "Refund aur chargeback mein kya fark hai samjhao.",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "How to Write a Chargeback Rebuttal Letter",
+        "score": 0.7406
+      },
+      {
+        "title": "NPCI U009 \u2014 Merchant Not Providing Refund",
+        "score": 0.7265
+      },
+      {
+        "title": "Refund Fraud",
+        "score": 0.7206
+      },
+      {
+        "title": "General Chargeback FAQs for Merchants",
+        "score": 0.717
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 61,
+    "category": "fake_codes",
+    "query": "What does reason code 4 mean?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (Digital Goods)",
+        "score": 0.733
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (Physical Retail / E-Commerce)",
+        "score": 0.7218
+      },
+      {
+        "title": "Visa 12.4 \u2014 Incorrect Account Number",
+        "score": 0.7075
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (SaaS / Subscription)",
+        "score": 0.6802
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 62,
+    "category": "fake_codes",
+    "query": "Is there a reason code called \"13\"?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 13.3 (Not As Described)",
+        "score": 0.7292
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 13.1 (Not Received \u2014 Physical Goods)",
+        "score": 0.7201
+      },
+      {
+        "title": "Visa 13.1 \u2014 Merchandise/Services Not Received",
+        "score": 0.7152
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 13.1 (Not Received \u2014 Digital Goods)",
+        "score": 0.7146
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 63,
+    "category": "fake_codes",
+    "query": "What's code U8 about?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "NPCI U008 \u2014 Goods or Services Not Delivered",
+        "score": 0.688
+      },
+      {
+        "title": "NPCI U010 \u2014 Technical Error / System Failure",
+        "score": 0.664
+      },
+      {
+        "title": "NPCI UPI Dispute Code U001 \u2014 Transaction Not Done by Customer (Fraud)",
+        "score": 0.6554
+      },
+      {
+        "title": "NPCI U005 \u2014 Fraudulent Transaction",
+        "score": 0.6531
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 64,
+    "category": "fake_codes",
+    "query": "Explain reason 4837 versus amount \u20b94837.",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Mastercard 4831 \u2014 Transaction Amount Differs",
+        "score": 0.7709
+      },
+      {
+        "title": "Rebuttal Template \u2014 Mastercard Reason Code 4855 (Travel / Airline)",
+        "score": 0.7533
+      },
+      {
+        "title": "Rebuttal Template \u2014 Mastercard Reason Code 4855 (Hotel \u2014 Goods/Services Not Provided)",
+        "score": 0.7531
+      },
+      {
+        "title": "Mastercard Chargeback Reason Code 4855 \u2014 Goods or Services Not Provided",
+        "score": 0.7429
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 65,
+    "category": "fake_codes",
+    "query": "What's the code for a $10.4 transaction?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (Physical Retail / E-Commerce)",
+        "score": 0.7409
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (Digital Goods)",
+        "score": 0.7251
+      },
+      {
+        "title": "Amex Dispute Code C04 \u2014 Goods or Services Cancelled",
+        "score": 0.7002
+      },
+      {
+        "title": "Chargeback Fees: Full Cost Breakdown for Merchants",
+        "score": 0.688
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 66,
+    "category": "fake_codes",
+    "query": "Is F2 a real Amex code?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Amex Dispute Code F24 \u2014 No Card Member Authorization (CNP Fraud)",
+        "score": 0.7887
+      },
+      {
+        "title": "Amex Dispute Code F29 \u2014 Card Not Present",
+        "score": 0.7805
+      },
+      {
+        "title": "Amex Dispute Code FR2 \u2014 Fraud \u2014 EMV Counterfeit",
+        "score": 0.7676
+      },
+      {
+        "title": "Amex Dispute Code C02 \u2014 Credit Not Processed",
+        "score": 0.7554
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 67,
+    "category": "fake_codes",
+    "query": "What does code 001 mean?",
+    "route": "search",
+    "n_results": 1,
+    "results": [
+      {
+        "title": "NPCI U010 \u2014 Technical Error / System Failure",
+        "score": 0.656
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 68,
+    "category": "fake_codes",
+    "query": "Explain C8 evidence requirements.",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Evidence Strategy Overview",
+        "score": 0.7239
+      },
+      {
+        "title": "Compelling Evidence: What It Is and How to Use It",
+        "score": 0.6948
+      },
+      {
+        "title": "Email and Communication Evidence",
+        "score": 0.6729
+      },
+      {
+        "title": "Evidence and Submission FAQs for Merchants",
+        "score": 0.6608
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 69,
+    "category": "fake_codes",
+    "query": "What's U010 vs U10?",
+    "route": "search",
+    "n_results": 1,
+    "results": [
+      {
+        "title": "NPCI U010 \u2014 Technical Error / System Failure",
+        "score": 0.6517
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 70,
+    "category": "fake_codes",
+    "query": "Is 12.6 the same as 12.6.1?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 71,
+    "category": "unanswerable",
+    "query": "What's my chargeback ratio right now?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Chargeback Ratio: How It's Calculated and Why It Matters",
+        "score": 0.7961
+      },
+      {
+        "title": "Chargeback Fees: Full Cost Breakdown for Merchants",
+        "score": 0.7726
+      },
+      {
+        "title": "Chargeback Thresholds and Monitoring Programs",
+        "score": 0.7519
+      },
+      {
+        "title": "General Chargeback FAQs for Merchants",
+        "score": 0.7424
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 72,
+    "category": "unanswerable",
+    "query": "Am I in the Visa Fraud Monitoring Program?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Visa 10.5 \u2014 Visa Fraud Monitoring Program (VFMP)",
+        "score": 0.7864
+      },
+      {
+        "title": "Visa Chargeback Reason Codes",
+        "score": 0.7761
+      },
+      {
+        "title": "Visa Fraud Monitoring Program (VFMP)",
+        "score": 0.7737
+      },
+      {
+        "title": "Visa Dispute Monitoring Program (VDMP)",
+        "score": 0.7578
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 73,
+    "category": "unanswerable",
+    "query": "What's the average resolution time for my disputes?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Chargeback Timeline and Deadline FAQs",
+        "score": 0.738
+      },
+      {
+        "title": "Chargeback Lifecycle and Timelines",
+        "score": 0.7337
+      },
+      {
+        "title": "GDPR and Data Retention for Chargeback Evidence",
+        "score": 0.687
+      },
+      {
+        "title": "Chargeback Timelines Reference: Every Deadline by Network",
+        "score": 0.684
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 74,
+    "category": "unanswerable",
+    "query": "Which of my transactions used 3-D Secure?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "3-D Secure (3DS / 3DS2)",
+        "score": 0.812
+      },
+      {
+        "title": "Best Practices for Digital Goods Merchants \u2014 Chargeback Prevention and Defense",
+        "score": 0.6941
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (Digital Goods)",
+        "score": 0.6921
+      },
+      {
+        "title": "Chargeback Prevention Best Practices \u2014 Comprehensive Merchant Guide",
+        "score": 0.6776
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 75,
+    "category": "unanswerable",
+    "query": "Was this a fallback (chip-fail) transaction?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "NPCI U006 \u2014 Transaction Declined but Amount Debited",
+        "score": 0.7369
+      },
+      {
+        "title": "NPCI U010 \u2014 Technical Error / System Failure",
+        "score": 0.7096
+      },
+      {
+        "title": "NPCI U007 \u2014 Wrong Amount Transferred",
+        "score": 0.6941
+      },
+      {
+        "title": "Mastercard Chargeback Reason Code 4870 \u2014 Chip Liability Shift",
+        "score": 0.6768
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 76,
+    "category": "unanswerable",
+    "query": "What's my current MATCH list status?",
+    "route": "dispute",
+    "is_valid_query": false,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 0,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "Please describe a chargeback dispute \u2014 for example: 'I received a Visa chargeback for $300, the customer claims they never received the order but I have delivery confirmation.'",
+    "latency_s": 0.0
+  },
+  {
+    "id": 77,
+    "category": "unanswerable",
+    "query": "Did this transaction have AVS match?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Address Verification Service (AVS)",
+        "score": 0.7836
+      },
+      {
+        "title": "Evidence and Submission FAQs for Merchants",
+        "score": 0.7013
+      },
+      {
+        "title": "Retrieval Request (Copy Request): What It Is and How to Respond",
+        "score": 0.6913
+      },
+      {
+        "title": "Mastercard Chargeback Reason Code 4855 \u2014 Goods or Services Not Provided",
+        "score": 0.6861
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 78,
+    "category": "unanswerable",
+    "query": "What's my acquirer's name?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Acquiring Bank: Role, Merchant Contracts, and Chargeback Handling",
+        "score": 0.7314
+      },
+      {
+        "title": "Chargeback Glossary \u2014 A to F",
+        "score": 0.7145
+      },
+      {
+        "title": "Chargeback Glossary of Key Terms",
+        "score": 0.7003
+      },
+      {
+        "title": "Representment Guide: How to Build and Submit a Winning Chargeback Dispute",
+        "score": 0.6523
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 79,
+    "category": "unanswerable",
+    "query": "Is this merchant PCI-DSS compliant?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "PCI DSS for Merchants \u2014 Compliance Guide",
+        "score": 0.8269
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (Digital Goods)",
+        "score": 0.6787
+      },
+      {
+        "title": "Visa Chargeback Reason Codes",
+        "score": 0.6703
+      },
+      {
+        "title": "NPCI U008 \u2014 Goods or Services Not Delivered",
+        "score": 0.6664
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 80,
+    "category": "unanswerable",
+    "query": "What's the interchange fee on this transaction?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Chargeback Fees: Full Cost Breakdown for Merchants",
+        "score": 0.7297
+      },
+      {
+        "title": "Visa 12.5 \u2014 Incorrect Amount",
+        "score": 0.7267
+      },
+      {
+        "title": "Visa 12.6 \u2014 Duplicate Processing",
+        "score": 0.7126
+      },
+      {
+        "title": "Amex Dispute Code M49 \u2014 Transaction Amount Discrepancy",
+        "score": 0.7104
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 81,
+    "category": "negation",
+    "query": "Which codes require NO evidence at all?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "1. **Visa\u202f12.7 \u2013 Invalid Data** \u2013 The chargeback is generated automatically by the issuer\u2019s validation system, so merchants are not required to submit any evidence.  \n\n2. **NPCI\u202fU005 \u2013 Fraudulent Transaction** \u2013 Because the dispute concerns a cardholder being deceived rather than merchant performance, no merchant evidence is expected.",
+    "latency_s": 11.63
+  },
+  {
+    "id": 82,
+    "category": "negation",
+    "query": "What's NOT covered by the Visa liability shift?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "**What the Visa EMV liability\u2011shift does\u202f*not* cover**\n\nThe Visa liability\u2011shift (the \u201cEMV shift\u201d) only applies when a **card\u2011present** transaction is processed **without using the chip** (i.e., a magnetic\u2011stripe swipe or manual imprint) and the fraud falls into one of two categories:\n\n* **10.1 \u2013 Counterfeit fraud** \u2013 a cloned or fake card is used.  \n* **10.2 \u2013 Non\u2011counterfeit fraud** \u2013 a genuine ",
+    "latency_s": 18.68
+  },
+  {
+    "id": 83,
+    "category": "negation",
+    "query": "Which networks don't have an arbitration stage?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 84,
+    "category": "negation",
+    "query": "What codes exist in Mastercard but not Visa?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "**Mastercard\u2011only reason codes (not found in Visa\u2019s list)**  \n\n1. **4807 \u2013 Warning Bulletin** \u2013 Issued when a merchant processes a card that appears on Mastercard\u2019s list of stolen, lost, or compromised cards.  \n2. **4808 \u2013 Required Authorization Not Obtained** \u2013 Charged when a transaction is settled without a valid or sufficient issuer authorization.  \n3. **4812 \u2013 Account Number Not on File** \u2013 Ap",
+    "latency_s": 45.1
+  },
+  {
+    "id": 85,
+    "category": "negation",
+    "query": "Which evidence type is never required for fraud codes?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "1. **Authorization Code Only** \u2013 A bare authorization code is never required (and is insufficient) for any fraud\u2011related chargeback reason code.",
+    "latency_s": 12.08
+  },
+  {
+    "id": 86,
+    "category": "negation",
+    "query": "What's the one thing RuPay does differently from every other network?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "1. **RuPay** \u2013 It is the only Indian card network owned and operated by the not\u2011for\u2011profit NPCI, a domestic scheme created to cut reliance on international networks and provide lower\u2011cost payments.",
+    "latency_s": 15.49
+  },
+  {
+    "id": 87,
+    "category": "negation",
+    "query": "Which codes can't be fought regardless of evidence?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "1. **Visa Reason Code\u202f10.1 \u2013 EMV Liability Shift Counterfeit Fraud** \u2013 Liability automatically shifts to the merchant for chip\u2011card transactions processed on non\u2011chip terminals, so the dispute cannot be contested regardless of any evidence.",
+    "latency_s": 10.24
+  },
+  {
+    "id": 88,
+    "category": "negation",
+    "query": "What doesn't count as delivery proof?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Proof of Delivery",
+        "score": 0.77
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 13.1 (Not Received \u2014 Physical Goods)",
+        "score": 0.7618
+      },
+      {
+        "title": "Visa 13.1 \u2014 Merchandise/Services Not Received",
+        "score": 0.7602
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 13.1 (Not Received \u2014 Digital Goods)",
+        "score": 0.749
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 89,
+    "category": "negation",
+    "query": "Which network has the fewest reason codes?",
+    "route": "dispute",
+    "is_valid_query": true,
+    "needs_more_info": false,
+    "decision": "",
+    "reason_code": "Unknown",
+    "confidence_score": 8,
+    "is_grounded": true,
+    "groundedness_issues": "",
+    "final_answer_preview": "1. **Discover** \u2013 No reason codes are listed for Discover in the provided material.  \n2. **American Express** \u2013 Only one reason code (C18\u202f\u2014\u202fNo\u2011Show/Cancelled Reservation) is mentioned.  \n3. **Visa** \u2013 Two reason codes are referenced (10.4\u202f\u2014\u202fUnauthorized CNP for digital goods; 13.1\u202f\u2014\u202fNot received digital goods).  \n4. **Mastercard** \u2013 Two reason codes are referenced (4812\u202f\u2014\u202fAccount number not on fil",
+    "latency_s": 10.82
+  },
+  {
+    "id": 90,
+    "category": "negation",
+    "query": "What's excluded from the EMV liability shift?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Visa 10.2 \u2014 EMV Liability Shift: Non-Counterfeit Fraud",
+        "score": 0.7274
+      },
+      {
+        "title": "Visa 10.1 \u2014 EMV Liability Shift: Counterfeit Fraud",
+        "score": 0.7095
+      },
+      {
+        "title": "Amex Dispute Code FR2 \u2014 Fraud \u2014 EMV Counterfeit",
+        "score": 0.7091
+      },
+      {
+        "title": "Mastercard Chargeback Reason Code 4870 \u2014 Chip Liability Shift",
+        "score": 0.6992
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 91,
+    "category": "meta",
+    "query": "How does this suggestion feature actually work?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 92,
+    "category": "meta",
+    "query": "What data do you have access to about me?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 93,
+    "category": "meta",
+    "query": "Are you using an LLM or just a database?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 94,
+    "category": "meta",
+    "query": "How accurate are your recommendations?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 95,
+    "category": "meta",
+    "query": "What happens to my data after I ask a question?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 96,
+    "category": "meta",
+    "query": "Can you see other merchants' data?",
+    "route": "search",
+    "n_results": 4,
+    "results": [
+      {
+        "title": "Merchant: Account, Liability, and Chargeback Exposure",
+        "score": 0.6804
+      },
+      {
+        "title": "Rebuttal Template \u2014 Visa Reason Code 10.4 (Digital Goods)",
+        "score": 0.6801
+      },
+      {
+        "title": "Best Practices for Digital Goods Merchants \u2014 Chargeback Prevention and Defense",
+        "score": 0.6673
+      },
+      {
+        "title": "Visa Chargeback Reason Codes",
+        "score": 0.6636
+      }
+    ],
+    "latency_s": 0.01
+  },
+  {
+    "id": 97,
+    "category": "meta",
+    "query": "What's your confidence score on this answer?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 98,
+    "category": "meta",
+    "query": "Is this advice legally binding?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 99,
+    "category": "meta",
+    "query": "How is my answer being generated right now?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  },
+  {
+    "id": 100,
+    "category": "meta",
+    "query": "What can't you help me with?",
+    "route": "search",
+    "n_results": 0,
+    "results": [],
+    "latency_s": 0.01
+  }
+]

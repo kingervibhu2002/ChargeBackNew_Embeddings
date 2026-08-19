@@ -1,10 +1,10 @@
 ---
 title: "RuPay and NPCI Dispute Process — Complete Overview"
-description: "Comprehensive guide to the RuPay card network and NPCI UPI dispute process: India's domestic payment ecosystem, auto-reversal rules, chargeback timelines, ombudsman escalation, and how NPCI disputes differ from Visa/Mastercard."
+description: "Comprehensive guide to the RuPay card network and NPCI UPI dispute process: India's domestic payment ecosystem, auto-reversal rules, chargeback timelines, ombudsman escalation, how NPCI disputes differ from Visa/Mastercard, the distinction between an informal refund request and a formal NPCI dispute, and what payment data can and cannot prove."
 category: RuPay
 type: Overview
-last_updated: 2026-06-29
-tags: [rupay, NPCI, UPI, India, dispute-process, chargeback, auto-reversal, payment-network, merchant-guide, banking-ombudsman]
+last_updated: 2026-08-19
+tags: [rupay, NPCI, UPI, India, dispute-process, chargeback, auto-reversal, payment-network, merchant-guide, banking-ombudsman, evidence, fulfillment-data]
 ---
 
 # RuPay and NPCI Dispute Process — Complete Overview
@@ -45,6 +45,22 @@ NPCI functions as both the network operator and the dispute arbitrator for trans
 - Report unresolved disputes to NPCI through the NPCI dispute management system
 
 Merchants are less directly involved in NPCI's dispute framework than in Visa/Mastercard disputes. In most NPCI dispute scenarios, the dispute is between the customer's bank (issuing bank) and the merchant's bank (acquiring bank), with NPCI arbitrating. The merchant's role is primarily to provide settlement records, transaction confirmation, or delivery evidence to their bank.
+
+---
+
+## UPI Dispute vs. Merchant Refund Request: Two Different Events
+
+Not every customer complaint about a Google Pay, PhonePe, or other UPI app payment is a formal NPCI dispute — conflating the two leads merchants to either over-react to routine customer service messages or under-react to something that's already escalated.
+
+**If the payment succeeded and the customer's issue is with the merchant** — wrong item, item not as described, wants to cancel, wants a refund for a legitimate reason — this is a **private commercial matter between the customer and the merchant**. The customer's own UPI app providers say as much: for a successful payment, the customer's first step is to contact the merchant directly for a refund, not their bank. Nothing here routes through NPCI unless the merchant refuses or fails to resolve it.
+
+**A formal NPCI dispute (one of the U-codes) only exists when something went wrong at the payment layer itself**, or when a legitimate refund request goes unresolved long enough that the customer escalates to their bank instead of the merchant:
+
+- Money moved but the merchant never received it (U003), or moved more than once (U002, U004) — a payment-mechanics failure, nothing to do with the merchant's service.
+- The merchant did not deliver what was paid for, or refuses a refund the merchant already agreed was owed (U008, U009) — this is exactly the case where an unresolved customer-service issue *becomes* a formal dispute.
+- The transaction itself was never authorized by the customer (U001, U005) — fraud, not a service complaint at all.
+
+**Practical implication for merchants**: treat a customer's "where's my order?" or "I want a refund" message through chat, app support, or a marketplace inbox as a customer-service ticket to resolve directly — not as a dispute notice to wait out. There is no bank, NPCI case, or formal deadline attached to it yet. Resolving it promptly at this stage is also the best way to prevent it from ever becoming a U008/U009 dispute against the merchant's account later.
 
 ---
 
@@ -116,6 +132,28 @@ Merchants are not direct parties in Ombudsman proceedings, but ombudsman complai
 
 ---
 
+## What Your Payment Data Can and Cannot Prove
+
+A UPI app or PSP only ever sees the payment layer of a transaction — it has no visibility into whether the merchant actually fulfilled the order. Knowing this boundary matters when preparing evidence for a dispute, because the two categories of record live in entirely different systems.
+
+**What UPI/NPCI transaction data can prove:**
+- The UTR (UPI Transaction Reference) and NPCI case ID
+- Amount and timestamp
+- Payer and payee VPA
+- Transaction status (success, failed, reversed)
+- Which bank the funds settled to
+
+**What it cannot prove — because it was never part of the payment record:**
+- What was ordered (SKU, product, or service description)
+- Whether the order shipped, and which courier handled it
+- Proof of delivery (signature, GPS-confirmed drop, photo at door)
+- Whether a service was actually rendered
+- Whether a refund promised outside the payment rail (store credit, replacement) was honored
+
+A UTR proves a payment happened. It proves nothing about whether the merchant did what the payment was for. For a U008 (goods or services not delivered) or U009 (merchant not providing refund) dispute, the acquiring bank and NPCI have only the payment-layer record — the merchant is the only party who can supply the fulfillment-layer evidence, and it has to come from the merchant's own order management, logistics/courier, or CRM systems, not from the payment gateway or PSP. See the Evidence section of this encyclopedia for what counts as acceptable proof of delivery and service completion.
+
+---
+
 ## Merchant Obligations Under the NPCI Framework
 
 Merchants processing UPI and RuPay payments have specific obligations:
@@ -129,6 +167,12 @@ Merchants processing UPI and RuPay payments have specific obligations:
 ---
 
 ## Frequently Asked Questions
+
+**Q: A customer messaged me on Google Pay/WhatsApp saying they never got their order. Is that a chargeback?**
+A: Not yet. That's a customer-service message, not a formal NPCI dispute — the customer contacted the merchant directly, which is exactly the right first step for a successful payment where the issue is with the merchant's fulfillment, not the payment itself. Resolve it directly (ship, refund, or explain) the same way you would any support ticket. It only becomes a formal U008/U009 dispute if it goes unresolved and the customer escalates to their bank instead.
+
+**Q: My acquiring bank asked for proof of delivery on a UPI dispute. Can't they just check the transaction record?**
+A: No — the transaction record only proves the payment happened (UTR, amount, timestamp, status). It has no visibility into whether you shipped anything. Proof of delivery has to come from your own order management or courier/logistics system, not from NPCI, your PSP, or your acquiring bank — none of them were ever party to the fulfillment side of the transaction.
 
 **Q: My customer filed a UPI complaint with their bank. When will I know about it?**
 A: You will typically learn about UPI disputes only if the dispute reaches your acquiring bank and the bank requests transaction evidence. For auto-reversal disputes (technical failures), you may never be formally notified — the bank system handles it. For merchant-fault disputes (U008, U009), your acquirer will contact you for evidence or may directly debit your settlement account.

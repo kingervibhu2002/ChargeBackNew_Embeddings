@@ -37,11 +37,12 @@ from fastembed import TextEmbedding
 from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel
 
+import classifier
 from auth import DEMO_IDENTITIES, Identity, require_identity
 from chargeback_agent import build_dispute_agent
 from guardrails import AuditLogger, CostCircuitBreaker, RateLimiter
 from merchant_db import init_db, MERCHANTS
-from network_detection import detect_network_title_keys
+from network_detection import DOMAIN_CANDIDATE_POOL_SIZE, detect_knowledge_domain, select_domain_chunk
 from text_to_sql import query_chargebacks
 from usermaster import get_auto_decision, set_auto_decision
 from vector_store import VectorStore
@@ -172,19 +173,30 @@ class AddDocumentRequest(BaseModel):
 
 class SearchResult(BaseModel):
     """
-    A single document returned by the GET /search endpoint.
+    A single chunk returned by the GET /search endpoint.
+
+    Backed by the chunk-level collection, not a whole document — `content`
+    is a focused excerpt (one section/subsection/FAQ item), not an entire
+    document's text, so a general question surfaces the relevant part of a
+    document instead of its first N characters regardless of relevance.
 
     Attributes:
-        id      (str):   Unique document identifier (8-char MD5 hex).
-        title   (str):   Human-readable document name.
-        content (str):   Full text of the document.
-        score   (float): Cosine similarity score between 0.0 and 1.0.
-                         Higher means more relevant to the query.
+        id             (str):   Chunk identifier (document_id + position).
+        title          (str):   Kept for backward compatibility with existing
+                                callers/tests that key on document identity —
+                                equal to document_title.
+        content        (str):   The chunk's own text (a section excerpt, not
+                                the whole document).
+        score          (float): Cosine similarity score between 0.0 and 1.0.
+        document_title (str):   Parent document's title (same as `title`).
+        section        (Optional[str]): Enclosing ## heading text, if any.
     """
     id: str
     title: str
     content: str
     score: float
+    document_title: str
+    section: Optional[str] = None
 
 
 class DocumentSummary(BaseModel):
@@ -353,23 +365,120 @@ async def add_document(req: AddDocumentRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.get("/search", summary="Search for relevant documents", response_model=List[SearchResult])
-async def search(query: str, top_k: int = 3):
+def search_documents(store: VectorStore, embed_fn, query: str, top_k: int = 3) -> List[dict]:
     """
-    Find the most semantically relevant documents for a natural-language query.
+    Core retrieval logic for GET /search, factored out of the route handler so
+    it can be called directly (in-process, no HTTP, no rate limiting) by
+    eval_retrieval.py's golden-set harness — going through the live HTTP
+    endpoint for a 40+ query eval run trips RateLimiter's 20-requests/hour cap
+    partway through, silently turning the back half of a run into 429s that
+    look identical to genuine retrieval misses. This function is the single
+    source of truth both callers share, so eval results reflect the exact
+    same ranking logic real users get.
+
+    Chunk-level, not whole-document: earlier this session, a whole-document
+    version of this function needed a network-detection title-boost to
+    compensate for embedding dilution — even the single most relevant
+    document for a UPI question ("RuPay and NPCI Dispute Process — Complete
+    Overview") scored 0.554, dead last among 11 NPCI-titled docs, because its
+    one vector had to represent the doc's entire history/structure/timelines
+    at once. Chunking substantially reduces this: that same doc's best
+    section ("Merchant Obligations Under the NPCI Framework") rose to 0.670
+    once split out on its own. But verified after migrating — that's still
+    not always enough on its own: a generic FAQ chunk phrased "What happens
+    if I don't respond..." can outscore a topically-correct but more
+    narrative chunk purely on question-form similarity, regardless of topic
+    (confirmed: exactly this happened for the query that motivated this
+    whole migration, scoring ~0.80 against the NPCI chunk's 0.67). So a
+    lighter-weight version of the old boost is still needed — not a title
+    match against 11 loosely-related docs with a fake score, but a real,
+    separately-ranked query into just the detected network's chunks, merged
+    into the general candidates and re-sorted by genuine score. This can't
+    resurface the old bug (an arbitrary wrong-code chunk winning by luck):
+    everything here is ranked by real cosine similarity throughout, at chunk
+    granularity, so only genuinely close matches make the merged list.
 
     Workflow:
-      1. Validate that the knowledge base is not empty.
-      2. Embed the query into a 384-dim vector using FastEmbed.
-      3. Ask Qdrant to return the top-k closest document vectors.
-      4. Filter out weak matches (score below 0.65) to avoid returning
-         irrelevant results for off-topic or vague queries.
+      1. Embed the query into a 384-dim vector using FastEmbed.
+      2. Ask Qdrant to return the top-k closest chunk vectors.
+      3. If a network/app is named, also fetch top domain-specific chunks
+         and merge them in (dedup by chunk_id).
+      4. Filter out weak matches (score below 0.65), re-sort, cap to top_k.
 
     Score guide:
       0.85+  Strong match — answer confidently.
       0.70+  Good match   — answer with context.
       0.65+  Weak match   — returned but borderline.
-      Below 0.65 — filtered out; returns 404 with a helpful message.
+      Below 0.65 — filtered out.
+
+    Args:
+        store:    Connected VectorStore.
+        embed_fn: Callable (str) -> list[float].
+        query:    Natural-language question or search phrase.
+        top_k:    Number of results to return.
+
+    Returns:
+        List[dict]: Ranked list of matching chunks with scores. Empty list
+                    if the chunk collection has no documents or nothing
+                    clears the relevance threshold.
+    """
+    embedding = embed_fn(query)
+    results = store.search_chunks(embedding, top_k=top_k)
+    results = [r for r in results if r["score"] >= 0.65]
+
+    domain = detect_knowledge_domain(query)
+    promoted = None
+    if domain:
+        domain_hits = store.search_chunks(
+            embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE, knowledge_domain=domain
+        )
+        seen = {r["chunk_id"] for r in results}
+
+        # select_domain_chunk() prefers the domain's Overview document for a
+        # general query rather than whatever scores marginally highest — a
+        # narrow reason-code page's denser vocabulary routinely outscores
+        # genuinely general content on raw similarity within one domain
+        # (see network_detection.py for the measurement that showed this).
+        _, detected_code = classifier.extract_network_and_code(query)
+        tier, best = select_domain_chunk(domain_hits, "" if detected_code == "Unknown" else detected_code)
+
+        if best and best["chunk_id"] not in seen:
+            if tier == "strong":
+                # Leads the answer (results[0], the large primary bubble in
+                # chat.html) — a named network is a strong enough signal
+                # that content clearing the same 0.65 bar as everything else
+                # shouldn't just appear somewhere in the list. Confirmed
+                # necessary: an earlier version only guaranteed a *slot*, but
+                # the plain score-sort below put it back at its natural rank
+                # regardless — a 0.69-scoring NPCI chunk was included yet
+                # still displayed 4th, behind generic content the user
+                # actually read as the answer.
+                promoted = best
+                seen.add(best["chunk_id"])
+            else:
+                # Below the full bar — guarantee a slot, not the lead.
+                results = results[: max(top_k - 1, 0)] + [best]
+                seen.add(best["chunk_id"])
+
+        for r in domain_hits:
+            if r["score"] >= 0.65 and r["chunk_id"] not in seen:
+                results.append(r)
+                seen.add(r["chunk_id"])
+
+    results = sorted(results, key=lambda r: r["score"], reverse=True)
+    if promoted:
+        results = [promoted] + [r for r in results if r["chunk_id"] != promoted["chunk_id"]]
+    return results[:top_k]
+
+
+@app.get("/search", summary="Search for relevant documents", response_model=List[SearchResult])
+async def search(query: str, top_k: int = 3):
+    """
+    Find the most semantically relevant documents for a natural-language query.
+
+    Thin route wrapper around search_documents() — see that function for the
+    retrieval workflow. This layer only handles HTTP concerns: the empty-store
+    404, the top_k=10 ceiling, and the no-results 404.
 
     Args:
         query (str): Natural-language question or search phrase.
@@ -388,38 +497,7 @@ async def search(query: str, top_k: int = 3):
             detail="Knowledge base is empty. POST /add some documents first."
         )
 
-    top_k = min(top_k, 10)
-    embedding = _embed(query)
-    results = _store.search(embedding, top_k=top_k)
-
-    # Boost in network/app-specific docs even for this plain, LLM-free
-    # search — a query naming a consumer UPI app ("PhonePe", "Google Pay")
-    # rather than the technical term ("UPI", "NPCI") matches no network
-    # keyword otherwise, and raw semantic ranking doesn't reliably surface
-    # the network-specific doc even when a title-exact match exists
-    # (verified: absent from the top 10 results for exactly this kind of
-    # question). Mirrors the boost chargeback_agent.py's _answer_question_node
-    # applies, via the shared network_detection module, so both surfaces
-    # behave consistently. filter_by_title() results carry score=1.0, so
-    # they always clear the relevance threshold below.
-    title_keys, _ = detect_network_title_keys(query)
-    if title_keys:
-        title_matches = _store.filter_by_title(title_keys)[:3]
-        seen_ids = {r["id"] for r in results}
-        for r in title_matches:
-            if r["id"] not in seen_ids:
-                results.append(r)
-                seen_ids.add(r["id"])
-
-    # Discard results below the relevance threshold, and re-sort — the
-    # title-boosted matches above were appended after the semantic results,
-    # not merged in score order, so without this a 1.0-score boosted match
-    # would display last instead of first.
-    results = sorted(
-        (r for r in results if r["score"] >= 0.65),
-        key=lambda r: r["score"],
-        reverse=True,
-    )
+    results = search_documents(_store, _embed, query, top_k=min(top_k, 10))
 
     if not results:
         raise HTTPException(
@@ -427,7 +505,17 @@ async def search(query: str, top_k: int = 3):
             detail="I don't have information about that. Try asking something related to chargebacks."
         )
 
-    return [SearchResult(**r) for r in results]
+    return [
+        SearchResult(
+            id=r["chunk_id"],
+            title=r["document_title"],
+            content=r["content"],
+            score=r["score"],
+            document_title=r["document_title"],
+            section=r.get("section"),
+        )
+        for r in results
+    ]
 
 
 @app.get("/documents", summary="List all indexed documents", response_model=List[DocumentSummary])

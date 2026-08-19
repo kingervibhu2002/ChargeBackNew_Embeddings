@@ -84,3 +84,118 @@ def detect_network_title_keys(*texts: str) -> tuple:
 def is_upi_context(detected_keywords) -> bool:
     """True if any detected keyword indicates a UPI/NPCI (not RuPay-card) context."""
     return bool(UPI_CONTEXT_KEYS & set(detected_keywords))
+
+
+# Query keyword -> chunk-collection knowledge_domain folder. Same keyword set
+# as NETWORK_TITLE_KEYS, mapped to folder names instead of title substrings —
+# used to narrow/boost chunk retrieval toward the right network's docs.
+# Added after the chunking migration showed chunk-level ranking alone isn't
+# always enough: even with chunking, a generic FAQ chunk phrased "What
+# happens if I don't respond..." can outscore a topically-correct but more
+# narrative NPCI-specific chunk on question-form similarity alone, regardless
+# of topical relevance — confirmed empirically (RuPay Overview's best chunk
+# rose from a 0.554 whole-document score to 0.67 once chunked, but generic
+# FAQ chunks still scored ~0.80 on question-phrasing overlap for the exact
+# query that motivated this whole migration).
+NETWORK_KNOWLEDGE_DOMAINS = {
+    "amex":             "06_Amex",
+    "american express": "06_Amex",
+    "visa":             "04_Visa",
+    "mastercard":       "05_Mastercard",
+    "rupay":            "07_RuPay",
+    "ru pay":           "07_RuPay",
+    "upi":              "07_RuPay",
+    "npci":             "07_RuPay",
+    "phonepe":          "07_RuPay",
+    "google pay":       "07_RuPay",
+    "gpay":             "07_RuPay",
+    "paytm":            "07_RuPay",
+    "bhim":             "07_RuPay",
+    "amazon pay":       "07_RuPay",
+    "whatsapp pay":     "07_RuPay",
+}
+
+
+def detect_knowledge_domain(*texts: str):
+    """
+    Scan text(s) for a network/app keyword and return the corresponding
+    chunk-collection knowledge_domain, or None if none detected.
+
+    Args:
+        *texts: any number of strings to scan (e.g. query, additional_context).
+
+    Returns:
+        str or None: e.g. "07_RuPay", or None if no network/app keyword found.
+    """
+    combined = " ".join(t.lower() for t in texts if t)
+    for kw, domain in NETWORK_KNOWLEDGE_DOMAINS.items():
+        if kw in combined:
+            return domain
+    return None
+
+
+# Minimum domain-candidate pool size to fetch before selecting — needs to be
+# wide, not narrow. Confirmed by measurement: for a general "what happens if
+# I get a chargeback" query, the RuPay Overview doc's best chunk ranked 9th
+# of 10 domain candidates, behind several narrow single-scenario pages
+# ("Technical Root Causes of Multi-Debit Events", "Wrong Amount Transferred
+# — Resolution Process", etc.) whose denser, more concrete vocabulary
+# outscored the Overview's more general phrasing on raw similarity alone. A
+# top_k=3 fetch (the original width) would never even see the Overview
+# chunk to prefer it.
+DOMAIN_CANDIDATE_POOL_SIZE = 15
+
+
+def select_domain_chunk(domain_hits: list, reason_code: str = ""):
+    """
+    Pick which domain-filtered chunk (if any) a network-named query's
+    results should be built around, given an already-fetched candidate pool
+    (see DOMAIN_CANDIDATE_POOL_SIZE for why that pool must be wide).
+
+    Two preferences, mutually exclusive, both fixing the same underlying
+    problem: within one narrow domain, raw embedding similarity doesn't
+    reliably track "is this actually the right document," because nearly
+    every code's page reuses near-identical section headings ("Required
+    Evidence", "Evidence the Merchant Should Maintain") and generic
+    vocabulary, so whichever page phrases it slightly more like the query
+    wins on score regardless of whether it's the page actually named.
+
+    - reason_code given (e.g. "U001"): prefer a chunk whose own reason_code
+      matches it — confirmed necessary: for "What evidence is needed for a
+      RuPay U001 chargeback?", U001's own "Evidence the Merchant Should
+      Maintain" chunk (0.768) lost to FOUR other codes' "Required Evidence"
+      chunks (0.79-0.81) despite U001 being the exact code named.
+    - reason_code not given (general query): prefer a chunk from the
+      domain's Overview document instead — see the module-level comment on
+      DOMAIN_CANDIDATE_POOL_SIZE for the equivalent measurement on that case.
+
+    Args:
+        domain_hits: Chunks already fetched via
+                     VectorStore.search_chunks(..., knowledge_domain=...),
+                     ranked by score descending.
+        reason_code: The specific reason code named in the query (e.g.
+                     classifier.extract_network_and_code(query)[1], skipping
+                     the "Unknown" case), or "" for a general query.
+
+    Returns:
+        (tier, chunk): tier is "strong" (score >= 0.65 — caller should
+        promote this to lead the results), "weak" (0.60 <= score < 0.65 —
+        caller should guarantee it a slot but not the lead), or (None, None)
+        if nothing in the pool clears even the weak floor.
+    """
+    if reason_code:
+        preferred = [r for r in domain_hits if r.get("reason_code") == reason_code]
+    else:
+        preferred = [r for r in domain_hits if "overview" in r["document_title"].lower()]
+
+    if preferred and preferred[0]["score"] >= 0.60:
+        best = preferred[0]
+        return ("strong" if best["score"] >= 0.65 else "weak"), best
+
+    strong = [r for r in domain_hits if r["score"] >= 0.65]
+    if strong:
+        return "strong", strong[0]
+    weak = [r for r in domain_hits if 0.60 <= r["score"] < 0.65]
+    if weak:
+        return "weak", weak[0]
+    return None, None

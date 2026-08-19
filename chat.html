@@ -110,22 +110,6 @@
       border-bottom-left-radius: 4px;
     }
 
-    /* ── Q&A result card ──────────────────────────────────── */
-    .answer-title {
-      font-weight: 700; font-size: 13px; color: #6366f1;
-      margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em;
-    }
-    .answer-content { color: #333; white-space: pre-wrap; }
-    .sources { margin-top: 12px; padding-top: 10px; border-top: 1px solid #e0e0e8; }
-    .sources-label {
-      font-size: 11px; font-weight: 600; color: #888;
-      text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;
-    }
-    .source-chip {
-      display: inline-block; background: #e8e8f4; color: #4a4a8a;
-      font-size: 11px; padding: 3px 9px; border-radius: 20px; margin: 2px 3px 2px 0;
-    }
-    .score-badge { font-size: 10px; color: #888; margin-left: 3px; }
 
     /* ── Dispute result card ──────────────────────────────── */
     .dispute-card { display: flex; flex-direction: column; gap: 12px; }
@@ -309,9 +293,9 @@
   let awaitingContext      = false;  // true after agent asks a follow-up question
   let pendingQuery         = '';     // original dispute query (never changes mid-conversation)
   let accumulatedContext   = '';     // all follow-up answers joined; grows each turn
-  let lastQAListQuery      = '';     // previous Q&A list/coverage query — lets a bare
-                                      // follow-up like "are all covered?" inherit which
-                                      // network(s) the prior question was about
+  let lastQAQuery          = '';     // previous Q&A tab query — lets a bare follow-up
+                                      // like "are all covered?" inherit which network(s)
+                                      // or topic the prior question was about
   let lastQuerySql         = '';     // previous My Chargebacks tab SQL — lets a follow-up
                                       // like "give me the complete row for this earlier
                                       // result" resolve "this" against what was actually run
@@ -353,7 +337,7 @@
     awaitingContext    = false;
     pendingQuery       = '';
     accumulatedContext = '';
-    lastQAListQuery    = '';
+    lastQAQuery        = '';
     lastQuerySql       = '';
     showWelcome();
   }
@@ -363,7 +347,7 @@
     awaitingContext    = false;
     pendingQuery       = '';
     accumulatedContext = '';
-    lastQAListQuery    = '';
+    lastQAQuery        = '';
     lastQuerySql       = '';
 
     document.getElementById('tabQA').classList.toggle('active',      tab === 'qa');
@@ -481,57 +465,41 @@
 
   // ── Q&A handler ──────────────────────────────────────────
   async function handleQA(query, typing) {
-    const listIntent = /\b(list|all|every|enumerate|what are|show all|types of|kinds of|codes|categories|compare|difference|covered|coverage)\b/i.test(query);
-
-    if (listIntent) {
-      // List/coverage/comparison questions ("are all codes covered?", "list
-      // all amex codes") can't be answered by raw retrieval — they need
-      // exhaustive per-network retrieval plus LLM reasoning to actually
-      // answer the question asked, not just show top-K similarity matches.
-      // Route through the same /dispute pipeline the Dispute Assistant tab
-      // uses: validate_node classifies this as a general question and
-      // answer_question_node synthesizes a real answer from it.
-      const res = await fetch('/dispute', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ query, additional_context: lastQAListQuery }),
-      });
-      lastQAListQuery = query;
-      typing.remove();
-
-      if (res.status === 429) {
-        const err = await res.json();
-        addErrorBubble('Rate limit: ' + (err.detail || 'Too many requests. Try again later.'));
-        return;
-      }
-      if (res.status === 503) {
-        const err = await res.json();
-        addErrorBubble(err.detail || 'Service temporarily unavailable.');
-        return;
-      }
-      if (!res.ok) {
-        const err = await res.json();
-        addErrorBubble(err.detail || 'Server error.');
-        return;
-      }
-      const data = await res.json();
-      addDisputeBubble(data);
-      return;
-    }
-
-    const res = await fetch(`/search?query=${encodeURIComponent(query)}&top_k=4`);
+    // Always synthesize — /search's raw top-chunk excerpt, even when it's
+    // the right chunk, is only ever one isolated fragment: it can't combine
+    // multiple relevant sections into a coherent answer the way
+    // answer_question_node's LLM synthesis can (confirmed directly: a raw
+    // FAQ excerpt for "what happens if I get a chargeback for a Google Pay
+    // transaction?" only answered the one narrow question it happened to be
+    // written for, while the synthesized /dispute answer for the identical
+    // query correctly wove together the dispute flow, evidence scope, fees,
+    // and timeline into one answer). Previously only list/compare/coverage
+    // phrasing was routed here; every Q&A-tab query now is.
+    const res = await fetch('/dispute', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ query, additional_context: lastQAQuery }),
+    });
+    lastQAQuery = query;
     typing.remove();
 
-    if (res.status === 404) {
+    if (res.status === 429) {
       const err = await res.json();
-      addBotBubble([], query, err.detail);
-    } else if (!res.ok) {
+      addErrorBubble('Rate limit: ' + (err.detail || 'Too many requests. Try again later.'));
+      return;
+    }
+    if (res.status === 503) {
+      const err = await res.json();
+      addErrorBubble(err.detail || 'Service temporarily unavailable.');
+      return;
+    }
+    if (!res.ok) {
       const err = await res.json();
       addErrorBubble(err.detail || 'Server error.');
-    } else {
-      const results = await res.json();
-      addBotBubble(results, query);
+      return;
     }
+    const data = await res.json();
+    addDisputeBubble(data);
   }
 
   // ── Detect a brand-new knowledge question typed mid-dispute ─
@@ -780,43 +748,6 @@
     messagesEl.appendChild(row);
     scrollBottom();
     return row;
-  }
-
-  // Q&A result bubble
-  function addBotBubble(results, query, customMsg) {
-    const row = document.createElement('div');
-    row.className = 'bubble-row';
-
-    if (!results || results.length === 0) {
-      const msg = customMsg || `No results for "<em>${escapeHtml(query)}</em>". Try something chargeback-related.`;
-      row.innerHTML = `
-        <div class="avatar bot">⚡</div>
-        <div class="bubble bot" style="color:#888;">${msg}</div>`;
-      messagesEl.appendChild(row);
-      scrollBottom();
-      return;
-    }
-
-    const top    = results[0];
-    const others = results.slice(1);
-    const preview = top.content.trim().slice(0, 600);
-    const clipped = top.content.trim().length > 600 ? '…' : '';
-    const otherChips = others.map(r =>
-      `<span class="source-chip">${escapeHtml(r.title)}<span class="score-badge">${r.score}</span></span>`
-    ).join('');
-    const sourcesHtml = others.length > 0
-      ? `<div class="sources"><div class="sources-label">Also relevant</div>${otherChips}</div>`
-      : '';
-
-    row.innerHTML = `
-      <div class="avatar bot">⚡</div>
-      <div class="bubble bot">
-        <div class="answer-title">${escapeHtml(top.title)} · ${top.score}</div>
-        <div class="answer-content">${escapeHtml(preview)}${clipped}</div>
-        ${sourcesHtml}
-      </div>`;
-    messagesEl.appendChild(row);
-    scrollBottom();
   }
 
   // Dispute agent follow-up question bubble

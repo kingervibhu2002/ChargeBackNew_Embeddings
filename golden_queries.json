@@ -1,0 +1,187 @@
+{
+  "_meta": {
+    "description": "Golden retrieval eval set for the chargeback-encyclopedia knowledge base. Built to establish a Recall@5/Recall@10/MRR baseline on the current whole-document embedding index BEFORE the chunking migration, so the migration's effect can be measured rather than assumed.",
+    "keyed_by": "document title (as returned by /search) — will migrate to a stable document_id once chunking introduces one",
+    "relevance_scale": "3 = primary/best answer, 2 = clearly relevant secondary source, 1 = tangentially relevant. Only queries with more than one entry in `relevance` are graded (nDCG-eligible); single-answer queries are evaluated with Recall@K + MRR only.",
+    "created": "2026-08-19",
+    "corpus_size_at_creation": 159
+  },
+  "queries": [
+    {"id": "q01", "category": "exact_code", "query": "What is U001?",
+     "expected_documents": ["NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)"],
+     "relevance": {"NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)": 3}},
+
+    {"id": "q02", "category": "exact_code", "query": "What evidence is needed for a RuPay U001 chargeback?",
+     "expected_documents": ["NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)"],
+     "relevance": {"NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)": 3}},
+
+    {"id": "q03", "category": "exact_code", "query": "What is NPCI U009?",
+     "expected_documents": ["NPCI U009 — Merchant Not Providing Refund"],
+     "relevance": {"NPCI U009 — Merchant Not Providing Refund": 3}},
+
+    {"id": "q04", "category": "semantic", "query": "A customer says they never authorized a UPI payment on their account",
+     "expected_documents": ["NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)"],
+     "relevance": {"NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)": 3}},
+
+    {"id": "q05", "category": "exact_code", "query": "What is Mastercard 4870?",
+     "expected_documents": ["Mastercard Chargeback Reason Code 4870 — Chip Liability Shift"],
+     "relevance": {"Mastercard Chargeback Reason Code 4870 — Chip Liability Shift": 3}},
+
+    {"id": "q06", "category": "exact_code", "query": "What evidence defends against Mastercard 4870?",
+     "expected_documents": ["Mastercard Chargeback Reason Code 4870 — Chip Liability Shift"],
+     "relevance": {"Mastercard Chargeback Reason Code 4870 — Chip Liability Shift": 3}},
+
+    {"id": "q07", "category": "exact_code", "query": "What is Mastercard reason code 4837?",
+     "expected_documents": ["Mastercard 4837 — No Cardholder Authorization"],
+     "relevance": {"Mastercard 4837 — No Cardholder Authorization": 3}},
+
+    {"id": "q08", "category": "ambiguous", "query": "The cardholder claims they never made this purchase",
+     "expected_documents": ["Mastercard 4837 — No Cardholder Authorization", "Mastercard Chargeback Reason Code 4863 — Cardholder Does Not Recognize"],
+     "relevance": {"Mastercard 4837 — No Cardholder Authorization": 2, "Mastercard Chargeback Reason Code 4863 — Cardholder Does Not Recognize": 2}},
+
+    {"id": "q09", "category": "exact_code", "query": "What is Visa 13.1?",
+     "expected_documents": ["Visa 13.1 — Merchandise/Services Not Received"],
+     "relevance": {"Visa 13.1 — Merchandise/Services Not Received": 3}},
+
+    {"id": "q10", "category": "exact_code", "query": "What is Visa reason code 10.4?",
+     "expected_documents": ["Visa 10.4 — Other Fraud: Card-Absent"],
+     "relevance": {"Visa 10.4 — Other Fraud: Card-Absent": 3}},
+
+    {"id": "q11", "category": "semantic", "query": "A customer says a Visa purchase item never arrived",
+     "expected_documents": ["Visa 13.1 — Merchandise/Services Not Received"],
+     "relevance": {"Visa 13.1 — Merchandise/Services Not Received": 3}},
+
+    {"id": "q12", "category": "exact_code", "query": "What is Amex C08?",
+     "expected_documents": ["Amex Dispute Code C08 — Goods or Services Not Received"],
+     "relevance": {"Amex Dispute Code C08 — Goods or Services Not Received": 3}},
+
+    {"id": "q13", "category": "exact_code", "query": "What is Amex F29?",
+     "expected_documents": ["Amex Dispute Code F29 — Card Not Present"],
+     "relevance": {"Amex Dispute Code F29 — Card Not Present": 3}},
+
+    {"id": "q14", "category": "multi_section", "query": "What is the merchant's liability and what evidence should they provide for U001?",
+     "expected_documents": ["NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)"],
+     "relevance": {"NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)": 3}},
+
+    {"id": "q15", "category": "rebuttal", "query": "Draft a response to a U001 dispute where goods were delivered",
+     "expected_documents": ["NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)", "How to Write a Winning Chargeback Rebuttal Letter"],
+     "relevance": {"NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)": 3, "How to Write a Winning Chargeback Rebuttal Letter": 1}},
+
+    {"id": "q16", "category": "rebuttal", "query": "Draft a rebuttal letter for a Visa 13.1 dispute for a physical good",
+     "expected_documents": ["Rebuttal Template — Visa Reason Code 13.1 (Not Received — Physical Goods)"],
+     "relevance": {"Rebuttal Template — Visa Reason Code 13.1 (Not Received — Physical Goods)": 3}},
+
+    {"id": "q17", "category": "rebuttal", "query": "Write a rebuttal for a Mastercard 4855 hotel dispute",
+     "expected_documents": ["Rebuttal Template — Mastercard Reason Code 4855 (Hotel — Goods/Services Not Provided)"],
+     "relevance": {"Rebuttal Template — Mastercard Reason Code 4855 (Hotel — Goods/Services Not Provided)": 3}},
+
+    {"id": "q18", "category": "cross_domain", "query": "What evidence can a merchant use to fight a chargeback?",
+     "expected_documents": ["Evidence Strategy Overview", "Proof of Delivery", "Transaction and Authorization Records", "Compelling Evidence: What It Is and How to Use It"],
+     "relevance": {"Evidence Strategy Overview": 3, "Proof of Delivery": 2, "Transaction and Authorization Records": 2, "Compelling Evidence: What It Is and How to Use It": 2}},
+
+    {"id": "q19", "category": "cross_domain", "query": "How can a merchant defend against a fraud dispute?",
+     "expected_documents": ["Card Not Present (CNP) Fraud", "Evidence Strategy Overview", "3-D Secure (3DS / 3DS2)"],
+     "relevance": {"Card Not Present (CNP) Fraud": 2, "Evidence Strategy Overview": 2, "3-D Secure (3DS / 3DS2)": 2}},
+
+    {"id": "q20", "category": "concept", "query": "What does an acquiring bank do?",
+     "expected_documents": ["Acquiring Bank: Role, Merchant Contracts, and Chargeback Handling"],
+     "relevance": {"Acquiring Bank: Role, Merchant Contracts, and Chargeback Handling": 3}},
+
+    {"id": "q21", "category": "concept", "query": "What is the role of an issuing bank?",
+     "expected_documents": ["Issuing Bank: Role, Chargeback Initiation, and Liability"],
+     "relevance": {"Issuing Bank: Role, Chargeback Initiation, and Liability": 3}},
+
+    {"id": "q22", "category": "concept", "query": "Explain the complete payment transaction lifecycle",
+     "expected_documents": ["Full Transaction Lifecycle: From Click to Funding"],
+     "relevance": {"Full Transaction Lifecycle: From Click to Funding": 3}},
+
+    {"id": "q23", "category": "concept", "query": "What's the difference between a payment gateway and a PSP?",
+     "expected_documents": ["Payment Gateway, PSP, and Aggregator: Differences and Chargeback Implications"],
+     "relevance": {"Payment Gateway, PSP, and Aggregator: Differences and Chargeback Implications": 3}},
+
+    {"id": "q24", "category": "concept", "query": "What is a chargeback?",
+     "expected_documents": ["What Is a Chargeback?"],
+     "relevance": {"What Is a Chargeback?": 3}},
+
+    {"id": "q25", "category": "concept", "query": "What's the difference between a refund and a chargeback?",
+     "expected_documents": ["Refund vs. Chargeback: Key Differences and Strategic Implications"],
+     "relevance": {"Refund vs. Chargeback: Key Differences and Strategic Implications": 3}},
+
+    {"id": "q26", "category": "concept", "query": "What is a retrieval request?",
+     "expected_documents": ["Retrieval Request (Copy Request): What It Is and How to Respond"],
+     "relevance": {"Retrieval Request (Copy Request): What It Is and How to Respond": 3}},
+
+    {"id": "q27", "category": "concept", "query": "How is my chargeback ratio calculated?",
+     "expected_documents": ["Chargeback Ratio: How It's Calculated and Why It Matters"],
+     "relevance": {"Chargeback Ratio: How It's Calculated and Why It Matters": 3}},
+
+    {"id": "q28", "category": "lifecycle", "query": "Explain the chargeback lifecycle from start to finish",
+     "expected_documents": ["The Complete Chargeback Lifecycle: End-to-End Guide"],
+     "relevance": {"The Complete Chargeback Lifecycle: End-to-End Guide": 3}},
+
+    {"id": "q29", "category": "lifecycle", "query": "What happens during pre-arbitration?",
+     "expected_documents": ["Pre-Arbitration: The Issuer's Second Challenge and How to Respond"],
+     "relevance": {"Pre-Arbitration: The Issuer's Second Challenge and How to Respond": 3}},
+
+    {"id": "q30", "category": "lifecycle", "query": "What is chargeback arbitration?",
+     "expected_documents": ["Chargeback Arbitration: The Card Network's Final Judgment"],
+     "relevance": {"Chargeback Arbitration: The Card Network's Final Judgment": 3}},
+
+    {"id": "q31", "category": "lifecycle", "query": "What are the deadlines for responding to a chargeback for each network?",
+     "expected_documents": ["Chargeback Timelines Reference: Every Deadline by Network"],
+     "relevance": {"Chargeback Timelines Reference: Every Deadline by Network": 3}},
+
+    {"id": "q32", "category": "fraud", "query": "What is friendly fraud?",
+     "expected_documents": ["Friendly Fraud — First-Party Misuse"],
+     "relevance": {"Friendly Fraud — First-Party Misuse": 3}},
+
+    {"id": "q33", "category": "fraud", "query": "What is account takeover fraud?",
+     "expected_documents": ["Account Takeover (ATO)"],
+     "relevance": {"Account Takeover (ATO)": 3}},
+
+    {"id": "q34", "category": "fraud", "query": "What is card testing?",
+     "expected_documents": ["Card Testing / Carding"],
+     "relevance": {"Card Testing / Carding": 3}},
+
+    {"id": "q35", "category": "evidence", "query": "How does AVS help prevent chargebacks?",
+     "expected_documents": ["Address Verification Service (AVS)"],
+     "relevance": {"Address Verification Service (AVS)": 3}},
+
+    {"id": "q36", "category": "evidence", "query": "What is 3D Secure authentication?",
+     "expected_documents": ["3-D Secure (3DS / 3DS2)"],
+     "relevance": {"3-D Secure (3DS / 3DS2)": 3}},
+
+    {"id": "q37", "category": "faq", "query": "What are common questions merchants ask about chargebacks?",
+     "expected_documents": ["General Chargeback FAQs for Merchants"],
+     "relevance": {"General Chargeback FAQs for Merchants": 3}},
+
+    {"id": "q38", "category": "regulation", "query": "What are RBI guidelines for Indian merchants on chargebacks?",
+     "expected_documents": ["RBI Guidelines for Indian Merchants — Chargeback and Payment Compliance"],
+     "relevance": {"RBI Guidelines for Indian Merchants — Chargeback and Payment Compliance": 3}},
+
+    {"id": "q39", "category": "regulation", "query": "What is PCI DSS compliance for merchants?",
+     "expected_documents": ["PCI DSS for Merchants — Compliance Guide"],
+     "relevance": {"PCI DSS for Merchants — Compliance Guide": 3}},
+
+    {"id": "q40", "category": "monitoring", "query": "What is the Visa Dispute Monitoring Program?",
+     "expected_documents": ["Visa Dispute Monitoring Program (VDMP)"],
+     "relevance": {"Visa Dispute Monitoring Program (VDMP)": 3}},
+
+    {"id": "q41", "category": "monitoring", "query": "What is the MATCH list?",
+     "expected_documents": ["MATCH List — Member Alert to Control High-Risk Merchants"],
+     "relevance": {"MATCH List — Member Alert to Control High-Risk Merchants": 3}},
+
+    {"id": "q42", "category": "ambiguous", "query": "1. What happens if I get a chargeback for a Google Pay transaction?",
+     "notes": "Regression case from the /search title-boost bug fixed this session — must not surface an unrelated specific reason-code page (e.g. 'Technical Error / System Failure') as top result.",
+     "expected_documents": ["RuPay and NPCI Dispute Process — Complete Overview", "What Is a Chargeback?"],
+     "relevance": {"RuPay and NPCI Dispute Process — Complete Overview": 2, "What Is a Chargeback?": 1}},
+
+    {"id": "q43", "category": "best_practices", "query": "What are chargeback prevention best practices for SaaS merchants?",
+     "expected_documents": ["Best Practices for SaaS and Subscription Merchants — Chargeback Prevention"],
+     "relevance": {"Best Practices for SaaS and Subscription Merchants — Chargeback Prevention": 3}},
+
+    {"id": "q44", "category": "semantic", "query": "The customer's card was declined but the money still left their account",
+     "expected_documents": ["NPCI U006 — Transaction Declined but Amount Debited"],
+     "relevance": {"NPCI U006 — Transaction Declined but Amount Debited": 3}}
+  ]
+}

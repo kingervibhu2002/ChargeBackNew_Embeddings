@@ -16,6 +16,7 @@ when you update or add files).
 
 import argparse
 import asyncio
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -24,7 +25,17 @@ import yaml
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from chunking import derive_network, split_into_chunks
+
 ENCYCLOPEDIA_DIR = Path(__file__).parent / "chargeback-encyclopedia"
+
+
+def _doc_id(title: str) -> str:
+    """Same MD5[:8]-of-title scheme used by rag_server.py/api_server.py —
+    duplicated locally rather than imported, since importing rag_server.py
+    would trigger its top-level embedding-model load in a script that talks
+    to it over MCP stdio instead of in-process."""
+    return hashlib.md5(title.encode()).hexdigest()[:8]
 
 
 # ---------------------------------------------------------------------------
@@ -96,14 +107,21 @@ def discover_documents(section_filter: str | None = None) -> list[dict]:
 
         # Derive title: prefer frontmatter, fall back to filename
         title = meta.get("title") or path.stem.replace("_", " ")
+        stripped_body = body.strip()
 
-        # Build rich content = title + body (helps retrieval)
-        content = f"# {title}\n\n{body.strip()}"
+        # Build rich content = title + body (helps retrieval). Skip the
+        # prepended heading when the body already opens with the identical
+        # H1 — most docs' first line duplicates the frontmatter title, and
+        # prepending it again produced a literal "# Title\n\n# Title\n\n..."
+        # duplication in every raw content preview (reported this session).
+        already_has_title = stripped_body.lower().startswith(f"# {title.lower()}")
+        content = stripped_body if already_has_title else f"# {title}\n\n{stripped_body}"
         summary = _extract_overview(body)
 
         docs.append({
             "title":     title,
             "content":   content,
+            "body":      stripped_body,
             "summary":   summary,
             "metadata":  meta,
             "file_path": str(path.relative_to(ENCYCLOPEDIA_DIR)),
@@ -132,39 +150,68 @@ async def index_documents(docs: list[dict], dry_run: bool = False) -> None:
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            total   = len(docs)
-            success = 0
-            failed  = []
+            total       = len(docs)
+            success     = 0
+            failed      = []
+            chunk_total = 0
 
             print(f"\nIndexing {total} encyclopedia documents into Qdrant...\n")
 
             for i, doc in enumerate(docs, 1):
                 try:
                     meta = doc.get("metadata", {})
-                    # Derive section from file path (first path component)
-                    section = doc["file_path"].split("/")[0] if "/" in doc["file_path"] else ""
+                    # Derive knowledge_domain from file path (first path component)
+                    domain = doc["file_path"].split("/")[0] if "/" in doc["file_path"] else ""
+                    knowledge_domain = meta.get("section", domain)
+                    network          = derive_network(meta, doc["file_path"])
+                    reason_code      = str(meta.get("reason_code", ""))
+
                     result = await session.call_tool(
                         "add_document",
                         {
-                            "title":         doc["title"],
-                            "content":       doc["content"],
-                            "summary":       doc["summary"],
-                            "section":       meta.get("section", section),
-                            "network":       meta.get("network", ""),
-                            "reason_code":   str(meta.get("reason_code", "")),
-                            "document_type": meta.get("chargeback_type", meta.get("document_type", "")),
-                            "keywords":      ", ".join(meta.get("tags", [])) if meta.get("tags") else "",
+                            "title":            doc["title"],
+                            "content":          doc["content"],
+                            "summary":          doc["summary"],
+                            "knowledge_domain": knowledge_domain,
+                            "network":          network,
+                            "reason_code":      reason_code,
+                            "document_type":    meta.get("chargeback_type", meta.get("document_type", "")),
+                            "keywords":         ", ".join(str(t) for t in meta.get("tags", [])) if meta.get("tags") else "",
                         },
                     )
                     status = result.content[0].text if result.content else "OK"
                     print(f"  [{i:3}/{total}] ✓  {doc['file_path']}")
                     success += 1
+
+                    # Parallel chunk collection — same document, split along
+                    # its ## / ### structure (see chunking.py). Failures here
+                    # don't roll back the whole-doc add above; they're
+                    # reported the same way so a partial chunk failure is
+                    # visible without blocking the rest of the run.
+                    document_id = _doc_id(doc["title"])
+                    chunks = split_into_chunks(doc["body"])
+                    for chunk in chunks:
+                        await session.call_tool(
+                            "add_chunk",
+                            {
+                                "document_title":   doc["title"],
+                                "document_id":      document_id,
+                                "content":          chunk["content"],
+                                "chunk_index":      chunk["chunk_index"],
+                                "knowledge_domain": knowledge_domain,
+                                "network":          network,
+                                "reason_code":      reason_code,
+                                "section":          chunk["section"] or "",
+                                "subsection":       chunk["subsection"] or "",
+                            },
+                        )
+                    chunk_total += len(chunks)
                 except Exception as e:
                     print(f"  [{i:3}/{total}] ✗  {doc['file_path']}  ERROR: {e}")
                     failed.append(doc["file_path"])
 
             print(f"\n{'='*60}")
-            print(f"  Indexed : {success}/{total}")
+            print(f"  Indexed : {success}/{total}  ({chunk_total} chunks)")
             if failed:
                 print(f"  Failed  : {len(failed)}")
                 for f in failed:
