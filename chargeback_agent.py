@@ -1372,21 +1372,84 @@ class DisputeAgent:
                 break
 
         if decision == "fight":
+            # rc_definition empty means no built-in definition matched this
+            # reason_code — most often because it's genuinely "Unknown" (the
+            # merchant's reply never resolved to a real code, e.g. "Visa 13"
+            # instead of "Visa 13.1"). The old unconditional instruction here
+            # ("Do NOT say the reason code is unknown... use the definition
+            # provided above") still fired even when there was no definition
+            # to use, which pressured the model to fabricate a plausible-
+            # looking code — confirmed live: reason_code showed "Unknown" in
+            # the API response, but the generated letter confidently cited
+            # "Visa reason code 13.1" throughout. Both the opening-line
+            # instruction and the closing instruction now branch on whether
+            # a real definition actually exists.
+            if rc_definition:
+                opening_instruction = "Opening: state you are disputing this chargeback under the reason code above."
+                code_guidance = (
+                    "Write confidently and authoritatively. Do NOT say the reason code is "
+                    "unknown or undefined — use the definition provided above."
+                )
+            else:
+                opening_instruction = (
+                    "Opening: state you are disputing this chargeback based on the claim "
+                    "described below. Do NOT cite a specific reason code number — none was "
+                    "confirmed for this dispute."
+                )
+                code_guidance = (
+                    "IMPORTANT: no specific reason code number was confirmed for this dispute "
+                    "— do NOT invent or assert one (e.g. do not write '13.1' or any other "
+                    "specific code you were not actually given). State plainly, once, that the "
+                    "exact code wasn't confirmed on the notification, and build the rebuttal "
+                    "around the facts and evidence described instead — a delivery-evidence "
+                    "rebuttal doesn't need a code number to be substantive."
+                )
+            evidence_list = humanize_evidence(state.get("evidence_present", []))
+            evidence_str  = ", ".join(evidence_list) if evidence_list else "None confirmed"
+
+            # Evidence discipline: confirmed live, separately from the
+            # reason-code fabrication above, that this prompt also let the
+            # model invent things beyond evidence_present — a "3-D Secure
+            # authentication" evidence tag (which only means authentication
+            # occurred) turned into a fabricated, specific "ECI 02 code"
+            # claim, and the letter invented two entirely new evidence
+            # categories (IP address matching, order-confirmation-email
+            # records) that were never in evidence_present at all. The old
+            # prompt's only guardrail was step 2's placeholder pattern
+            # ("[Date of Transaction]... if not specified"), which the model
+            # over-generalized from "placeholder for a basic transactional
+            # fact" to "placeholder for an entire invented evidence type."
+            # This instruction draws that line explicitly.
+            evidence_discipline = (
+                "EVIDENCE DISCIPLINE: only reference evidence types listed in 'Evidence "
+                "available' above — do NOT invent, assume, or add any other evidence "
+                "category (e.g. do not mention IP address matching, order confirmation "
+                "emails, or communication records unless they appear in that list, even "
+                "if they're a common, plausible thing to include in this kind of letter). "
+                "For each listed evidence item, describe only what its label states — do "
+                "NOT invent a specific technical detail beyond it (e.g. '3-D Secure "
+                "authentication' means authentication occurred; do NOT invent a specific "
+                "ECI/CAVV value, protocol version, or similar detail that was never "
+                "provided). [Date of Transaction], [Transaction Amount], and [Transaction "
+                "ID] are the only fill-in-later placeholders allowed, for basic "
+                "transaction facts — that's different from inventing evidence."
+            )
+
             prompt = (
                 f"Write a professional chargeback rebuttal letter for submission to the acquiring bank.\n\n"
                 f"Merchant dispute context: {state['user_query']}\n"
                 f"Additional context: {state.get('additional_context', '')}\n"
                 f"Reason code: {card_network} {reason_code}\n"
                 + (f"Reason code definition: {rc_definition}\n" if rc_definition else "")
-                + f"Evidence available: {', '.join(humanize_evidence(state.get('evidence_present', [])))}\n\n"
+                + f"Evidence available: {evidence_str}\n\n"
                 f"Relevant policy:\n{docs_text[:1500]}\n\n"
                 "Structure:\n"
-                "1. Opening: state you are disputing this chargeback with the reason code\n"
+                f"1. {opening_instruction}\n"
                 "2. Transaction summary: refer to [Date of Transaction] and [Transaction Amount] as placeholders if not specified\n"
-                "3. Evidence: each item and exactly what it proves in relation to the reason code\n"
+                "3. Evidence: each listed item and exactly what it proves in relation to the claim — see EVIDENCE DISCIPLINE below\n"
                 "4. Closing: formally request reversal citing the evidence\n\n"
-                "Write confidently and authoritatively. Do NOT say the reason code is "
-                "unknown or undefined — use the definition provided above."
+                f"{code_guidance}\n\n"
+                f"{evidence_discipline}"
             )
         else:
             prompt = (
@@ -1464,7 +1527,26 @@ class DisputeAgent:
         is_grounded        = True
         groundedness_issues = ""
 
-        if draft_codes:
+        # A code cited in the draft but appearing SOMEWHERE in the retrieved
+        # policy text is not the same thing as a code confirmed for THIS
+        # case — retrieved_docs is general reference material pulled for
+        # semantic relevance, not proof this specific dispute's code was
+        # ever established. When the case's own reason_code is still
+        # "Unknown"/unconfirmed, ANY specific code cited in the draft is a
+        # case-level fabrication regardless of whether that code exists in
+        # the reference material — confirmed live: a Visa non-receipt query
+        # retrieved the real 13.1 policy doc for background, the merchant's
+        # own code was never confirmed (reason_code stayed "Unknown"), and
+        # the old check below missed it because "13.1" legitimately existed
+        # in retrieved_docs, just not as THIS case's confirmed code.
+        if draft_codes and reason_code in ("", "Unknown"):
+            is_grounded = False
+            groundedness_issues = (
+                f"Draft cites specific code(s) {', '.join(sorted(draft_codes))} but this "
+                f"case's own reason code was never confirmed (still 'Unknown') — the draft "
+                f"is asserting a code number that was not actually established for this dispute."
+            )
+        elif draft_codes:
             known_codes: set = set()
             for doc in state.get("retrieved_docs", []):
                 known_codes.update(self._RC_PATTERN.findall(doc))
