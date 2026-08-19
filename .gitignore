@@ -1,0 +1,33 @@
+# Qdrant local database (large binary files, recreated by running load_chargeback_docs.py)
+qdrant_data/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables / secrets
+.env
+.env.local
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# FastEmbed model cache (downloaded automatically on first run)
+.cache/
+
+# LangGraph checkpoints
+checkpoints.db
+
+# Audit log (contains query history — do not commit)
+audit.log

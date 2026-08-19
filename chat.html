@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chargeback Assistant</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f0f2f5;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 760px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: #fff;
+      box-shadow: 0 0 40px rgba(0,0,0,0.1);
+    }
+
+    /* ── Header ───────────────────────────────────────────── */
+    .header {
+      padding: 18px 24px 0;
+      background: #1a1a2e;
+      color: #fff;
+    }
+    .header-top {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding-bottom: 14px;
+    }
+    .header-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #4ade80;
+      animation: pulse 2s infinite;
+      flex-shrink: 0;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .header h1 { font-size: 17px; font-weight: 600; }
+    .header p  { font-size: 12px; opacity: 0.6; margin-top: 2px; }
+
+    /* ── Tabs ─────────────────────────────────────────────── */
+    .tabs {
+      display: flex;
+      gap: 4px;
+    }
+    .tab {
+      padding: 8px 20px;
+      font-size: 13px;
+      font-weight: 600;
+      color: rgba(255,255,255,0.55);
+      border-radius: 8px 8px 0 0;
+      cursor: pointer;
+      transition: all 0.15s;
+      border: none;
+      background: transparent;
+      letter-spacing: 0.02em;
+    }
+    .tab:hover  { color: rgba(255,255,255,0.85); }
+    .tab.active { background: #fff; color: #1a1a2e; }
+
+    /* ── Messages ─────────────────────────────────────────── */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* ── Bubbles ──────────────────────────────────────────── */
+    .bubble-row { display: flex; align-items: flex-end; gap: 8px; }
+    .bubble-row.user { flex-direction: row-reverse; }
+
+    .avatar {
+      width: 32px; height: 32px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; flex-shrink: 0;
+    }
+    .avatar.bot  { background: #1a1a2e; color: #fff; }
+    .avatar.user { background: #6366f1; color: #fff; }
+
+    .bubble {
+      max-width: 82%;
+      padding: 12px 16px;
+      border-radius: 16px;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+    .bubble.user {
+      background: #6366f1; color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .bubble.bot {
+      background: #f4f4f8; color: #1a1a1a;
+      border-bottom-left-radius: 4px;
+    }
+
+    /* ── Q&A result card ──────────────────────────────────── */
+    .answer-title {
+      font-weight: 700; font-size: 13px; color: #6366f1;
+      margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .answer-content { color: #333; white-space: pre-wrap; }
+    .sources { margin-top: 12px; padding-top: 10px; border-top: 1px solid #e0e0e8; }
+    .sources-label {
+      font-size: 11px; font-weight: 600; color: #888;
+      text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;
+    }
+    .source-chip {
+      display: inline-block; background: #e8e8f4; color: #4a4a8a;
+      font-size: 11px; padding: 3px 9px; border-radius: 20px; margin: 2px 3px 2px 0;
+    }
+    .score-badge { font-size: 10px; color: #888; margin-left: 3px; }
+
+    /* ── Dispute result card ──────────────────────────────── */
+    .dispute-card { display: flex; flex-direction: column; gap: 12px; }
+
+    .decision-badge {
+      display: inline-block; padding: 4px 12px; border-radius: 20px;
+      font-size: 12px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; width: fit-content;
+    }
+    .decision-badge.fight  { background: #dcfce7; color: #166534; }
+    .decision-badge.refund { background: #fef2f2; color: #991b1b; }
+    .decision-badge.pending { background: #fefce8; color: #854d0e; }
+
+    .rc-label {
+      font-size: 11px; font-weight: 600; color: #888;
+      text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;
+    }
+    .rc-value { font-size: 13px; font-weight: 600; color: #1a1a2e; }
+
+    .evidence-section { display: flex; flex-direction: column; gap: 6px; }
+    .ev-row { display: flex; flex-wrap: wrap; gap: 4px; }
+    .ev-chip {
+      font-size: 11px; padding: 3px 9px; border-radius: 20px;
+    }
+    .ev-chip.present { background: #dcfce7; color: #166534; }
+    .ev-chip.missing { background: #fef2f2; color: #991b1b; }
+
+    .letter-section {
+      background: #f9f9fc; border: 1px solid #e4e4f0;
+      border-radius: 10px; padding: 14px 16px;
+    }
+    .letter-label {
+      font-size: 11px; font-weight: 700; color: #6366f1;
+      text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;
+    }
+    .letter-body { font-size: 13px; color: #333; white-space: pre-wrap; line-height: 1.7; }
+
+    /* Confidence + groundedness */
+    .meta-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .confidence-badge {
+      font-size: 11px; padding: 3px 9px; border-radius: 20px;
+      font-weight: 600;
+    }
+    .confidence-badge.high   { background: #dcfce7; color: #166534; }
+    .confidence-badge.medium { background: #fefce8; color: #854d0e; }
+    .confidence-badge.low    { background: #fef2f2; color: #991b1b; }
+    .groundedness-warn {
+      background: #fef2f2; border: 1px solid #fca5a5;
+      border-radius: 8px; padding: 8px 12px;
+      font-size: 12px; color: #7f1d1d;
+    }
+
+    /* ── Typing indicator ─────────────────────────────────── */
+    .typing .bubble { padding: 14px 18px; }
+    .dot-flashing { display: flex; gap: 5px; align-items: center; }
+    .dot-flashing span {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #aaa; animation: dotBounce 1.2s infinite;
+    }
+    .dot-flashing span:nth-child(2) { animation-delay: 0.2s; }
+    .dot-flashing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes dotBounce {
+      0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+      40%            { transform: translateY(-6px); opacity: 1; }
+    }
+
+    /* ── Welcome screen ───────────────────────────────────── */
+    .welcome { text-align: center; padding: 40px 20px; color: #888; }
+    .welcome h2 { font-size: 20px; color: #333; margin-bottom: 8px; }
+    .welcome p  { font-size: 14px; }
+    .suggestions {
+      display: flex; flex-wrap: wrap; gap: 8px;
+      justify-content: center; margin-top: 20px;
+    }
+    .suggestion {
+      background: #f0f0ff; color: #6366f1; border: 1px solid #d0d0f0;
+      border-radius: 20px; padding: 7px 14px; font-size: 13px;
+      cursor: pointer; transition: background 0.15s;
+    }
+    .suggestion:hover { background: #e0e0ff; }
+
+    /* ── Follow-up banner ─────────────────────────────────── */
+    .followup-banner {
+      background: #fefce8; border: 1px solid #fde68a;
+      border-radius: 10px; padding: 10px 14px; font-size: 13px; color: #78350f;
+      margin-bottom: 4px;
+    }
+
+    /* ── Input area ───────────────────────────────────────── */
+    .input-area {
+      padding: 16px 20px; border-top: 1px solid #eee;
+      display: flex; gap: 10px; background: #fff;
+    }
+    .input-area input {
+      flex: 1; padding: 12px 16px; border: 1.5px solid #ddd;
+      border-radius: 24px; font-size: 14px; outline: none; transition: border 0.2s;
+    }
+    .input-area input:focus { border-color: #6366f1; }
+    .input-area button {
+      padding: 0 22px; background: #6366f1; color: #fff;
+      border: none; border-radius: 24px; font-size: 14px;
+      font-weight: 600; cursor: pointer; transition: background 0.2s;
+    }
+    .input-area button:hover    { background: #4f52d4; }
+    .input-area button:disabled { background: #c0c0e0; cursor: not-allowed; }
+
+    /* ── Query result table ──────────────────────────────── */
+    .query-table-wrap {
+      overflow-x: auto; margin-top: 4px; border: 1px solid #eee; border-radius: 8px;
+    }
+    .query-table { border-collapse: collapse; font-size: 12.5px; white-space: nowrap; }
+    .query-table th, .query-table td {
+      padding: 7px 12px; text-align: left; border-bottom: 1px solid #eee;
+    }
+    .query-table th {
+      background: #f8f9fa; color: #555; font-weight: 600;
+      position: sticky; top: 0;
+    }
+    .query-table tbody tr:hover { background: #fafaff; }
+    .query-table tbody tr:last-child td { border-bottom: none; }
+    .status-pill {
+      display: inline-block; padding: 2px 9px; border-radius: 10px;
+      font-size: 11.5px; font-weight: 600; white-space: nowrap;
+    }
+    .status-pill.status-won,
+    .status-pill.status-accepted  { background: #e7f7ee; color: #16803d; }
+    .status-pill.status-pending   { background: #fff6e0; color: #92700c; }
+    .status-pill.status-open      { background: #e8ecff; color: #4048c9; }
+    .status-pill.status-lost      { background: #fdeaea; color: #c22b2b; }
+    .status-pill.status-expired   { background: #f0f0f2; color: #66666e; }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <!-- Header + tabs -->
+  <div class="header">
+    <div class="header-top">
+      <div class="header-dot"></div>
+      <div>
+        <h1>Chargeback Assistant</h1>
+        <p id="headerSub">Semantic search · Powered by Qdrant + FastEmbed</p>
+      </div>
+    </div>
+    <div class="tabs">
+      <button class="tab active" id="tabQA"      onclick="switchTab('qa')">Q&amp;A Search</button>
+      <button class="tab"        id="tabDispute" onclick="switchTab('dispute')">Dispute Assistant</button>
+      <button class="tab"        id="tabQuery"   onclick="switchTab('query')">My Chargebacks</button>
+    </div>
+  </div>
+
+  <!-- Merchant selector — only visible on My Chargebacks tab -->
+  <div id="merchantBar" style="display:none; padding:8px 16px; background:#f8f9fa; border-bottom:1px solid #e9ecef; font-size:13px; display:none; align-items:center; gap:10px;">
+    <span style="color:#555; font-weight:500;">Logged in as:</span>
+    <select id="merchantSelect" onchange="onMerchantChange()" style="font-size:13px; padding:4px 8px; border:1px solid #ced4da; border-radius:6px; background:#fff;">
+      <option value="">— select merchant —</option>
+    </select>
+    <span id="merchantName" style="color:#888; font-size:12px;"></span>
+  </div>
+
+  <!-- Messages -->
+  <div class="messages" id="messages"></div>
+
+  <!-- Input -->
+  <div class="input-area">
+    <input
+      type="text"
+      id="query"
+      placeholder="Ask about chargebacks…"
+      onkeydown="if(event.key==='Enter') sendMessage()"
+      autocomplete="off"
+    />
+    <button id="sendBtn" onclick="sendMessage()">Send</button>
+  </div>
+
+</div>
+
+<script>
+  // ── State ────────────────────────────────────────────────
+  let currentTab       = 'qa';
+  let awaitingContext      = false;  // true after agent asks a follow-up question
+  let pendingQuery         = '';     // original dispute query (never changes mid-conversation)
+  let accumulatedContext   = '';     // all follow-up answers joined; grows each turn
+  let lastQAListQuery      = '';     // previous Q&A list/coverage query — lets a bare
+                                      // follow-up like "are all covered?" inherit which
+                                      // network(s) the prior question was about
+  let lastQuerySql         = '';     // previous My Chargebacks tab SQL — lets a follow-up
+                                      // like "give me the complete row for this earlier
+                                      // result" resolve "this" against what was actually run
+
+  const messagesEl = document.getElementById('messages');
+  const queryEl    = document.getElementById('query');
+  const sendBtn    = document.getElementById('sendBtn');
+
+  // ── Tab switching ────────────────────────────────────────
+  let selectedMerchantId   = '';
+  let selectedMerchantName = '';
+  let selectedMerchantKey  = '';   // API key — sent as X-Merchant-Key header
+
+  // Load merchant list (includes demo API keys) from server on page load
+  (async () => {
+    try {
+      const res  = await fetch('/merchants');
+      const list = await res.json();
+      const sel  = document.getElementById('merchantSelect');
+      list.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value            = m.id;
+        opt.dataset.apiKey   = m.api_key;   // store key in data attribute
+        opt.textContent      = `${m.id} — ${m.name}`;
+        sel.appendChild(opt);
+      });
+    } catch (e) { /* server may not be ready yet */ }
+  })();
+
+  function onMerchantChange() {
+    const sel            = document.getElementById('merchantSelect');
+    const opt            = sel.options[sel.selectedIndex];
+    selectedMerchantId   = sel.value;
+    selectedMerchantKey  = opt?.dataset.apiKey || '';
+    selectedMerchantName = opt?.text || '';
+    document.getElementById('merchantName').textContent =
+      selectedMerchantId ? `(${selectedMerchantName})` : '';
+    messagesEl.innerHTML = '';
+    awaitingContext    = false;
+    pendingQuery       = '';
+    accumulatedContext = '';
+    lastQAListQuery    = '';
+    lastQuerySql       = '';
+    showWelcome();
+  }
+
+  function switchTab(tab) {
+    currentTab = tab;
+    awaitingContext    = false;
+    pendingQuery       = '';
+    accumulatedContext = '';
+    lastQAListQuery    = '';
+    lastQuerySql       = '';
+
+    document.getElementById('tabQA').classList.toggle('active',      tab === 'qa');
+    document.getElementById('tabDispute').classList.toggle('active',  tab === 'dispute');
+    document.getElementById('tabQuery').classList.toggle('active',    tab === 'query');
+
+    const bar = document.getElementById('merchantBar');
+    bar.style.display = tab === 'query' ? 'flex' : 'none';
+
+    const subtitles = {
+      qa:      'Semantic search · Powered by Qdrant + FastEmbed',
+      dispute: 'LangGraph dispute agent · classify → search → evaluate → generate',
+      query:   'Natural language SQL · NPCI UPI chargeback data',
+    };
+    document.getElementById('headerSub').textContent = subtitles[tab];
+
+    const placeholders = {
+      qa:      'Ask about chargebacks…',
+      dispute: 'Describe your dispute — e.g. "Visa chargeback $500, customer claims non-delivery"',
+      query:   'Ask about your chargebacks — e.g. "show open cases" or "mera kitna outstanding hai?"',
+    };
+    queryEl.value       = '';
+    queryEl.placeholder = placeholders[tab];
+
+    messagesEl.innerHTML = '';
+    showWelcome();
+    queryEl.focus();
+  }
+
+  // ── Welcome screens ──────────────────────────────────────
+  function showWelcome() {
+    if (currentTab === 'qa') {
+      messagesEl.innerHTML = `
+        <div class="welcome">
+          <h2>Ask me anything about chargebacks</h2>
+          <p>I'll search the knowledge base and find the most relevant information.</p>
+          <div class="suggestions">
+            <span class="suggestion" onclick="ask(this)">What is a chargeback?</span>
+            <span class="suggestion" onclick="ask(this)">What is friendly fraud?</span>
+            <span class="suggestion" onclick="ask(this)">Visa reason code 13.2</span>
+            <span class="suggestion" onclick="ask(this)">How to write a rebuttal letter?</span>
+            <span class="suggestion" onclick="ask(this)">What is the MATCH list?</span>
+            <span class="suggestion" onclick="ask(this)">How to prevent chargebacks?</span>
+          </div>
+        </div>`;
+    } else if (currentTab === 'dispute') {
+      messagesEl.innerHTML = `
+        <div class="welcome">
+          <h2>Dispute Assistant</h2>
+          <p>Describe your chargeback. The agent will classify it, search policies,
+             assess your evidence, and generate a rebuttal letter or advice.</p>
+          <div class="suggestions">
+            <span class="suggestion" onclick="ask(this)">I received a Visa chargeback for $500. Customer claims they never received the order but our tracking shows it was delivered to their address.</span>
+            <span class="suggestion" onclick="ask(this)">Mastercard chargeback — customer says the charge is fraudulent but they placed the order using our 3D Secure checkout.</span>
+          </div>
+        </div>`;
+    } else {
+      const mid = selectedMerchantId || '—';
+      messagesEl.innerHTML = `
+        <div class="welcome">
+          <h2>My Chargebacks</h2>
+          <p>Query your NPCI UPI chargeback data in plain language — English, Hindi, or Hinglish.<br>
+             ${selectedMerchantId ? `Logged in as <strong>${selectedMerchantId}</strong>` : 'Select a merchant above to begin.'}</p>
+          <div class="suggestions">
+            <span class="suggestion" onclick="ask(this)">Show all open chargebacks</span>
+            <span class="suggestion" onclick="ask(this)">How much is outstanding this month?</span>
+            <span class="suggestion" onclick="ask(this)">Which cases have deadline this week?</span>
+            <span class="suggestion" onclick="ask(this)">What is my win rate?</span>
+            <span class="suggestion" onclick="ask(this)">Show high value chargebacks above 10000</span>
+            <span class="suggestion" onclick="ask(this)">Kitne open cases hain mere paas?</span>
+          </div>
+        </div>`;
+    }
+  }
+
+  showWelcome();
+
+  // ── Suggestion chip click ────────────────────────────────
+  function ask(el) {
+    queryEl.value = el.textContent.trim();
+    sendMessage();
+  }
+
+  // ── Send message ─────────────────────────────────────────
+  async function sendMessage() {
+    const input = queryEl.value.trim();
+    if (!input) return;
+
+    queryEl.value   = '';
+    sendBtn.disabled = true;
+
+    // Clear welcome screen on first real message
+    const welcome = messagesEl.querySelector('.welcome');
+    if (welcome) welcome.remove();
+
+    addUserBubble(input);
+    const typing = addTypingIndicator();
+
+    try {
+      if (currentTab === 'qa') {
+        await handleQA(input, typing);
+      } else if (currentTab === 'dispute') {
+        await handleDispute(input, typing);
+      } else {
+        await handleQuery(input, typing);
+      }
+    } catch (e) {
+      typing.remove();
+      addErrorBubble('Could not reach the server. Is api_server.py running?');
+    }
+
+    sendBtn.disabled = false;
+    queryEl.focus();
+  }
+
+  // ── Q&A handler ──────────────────────────────────────────
+  async function handleQA(query, typing) {
+    const listIntent = /\b(list|all|every|enumerate|what are|show all|types of|kinds of|codes|categories|compare|difference|covered|coverage)\b/i.test(query);
+
+    if (listIntent) {
+      // List/coverage/comparison questions ("are all codes covered?", "list
+      // all amex codes") can't be answered by raw retrieval — they need
+      // exhaustive per-network retrieval plus LLM reasoning to actually
+      // answer the question asked, not just show top-K similarity matches.
+      // Route through the same /dispute pipeline the Dispute Assistant tab
+      // uses: validate_node classifies this as a general question and
+      // answer_question_node synthesizes a real answer from it.
+      const res = await fetch('/dispute', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ query, additional_context: lastQAListQuery }),
+      });
+      lastQAListQuery = query;
+      typing.remove();
+
+      if (res.status === 429) {
+        const err = await res.json();
+        addErrorBubble('Rate limit: ' + (err.detail || 'Too many requests. Try again later.'));
+        return;
+      }
+      if (res.status === 503) {
+        const err = await res.json();
+        addErrorBubble(err.detail || 'Service temporarily unavailable.');
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json();
+        addErrorBubble(err.detail || 'Server error.');
+        return;
+      }
+      const data = await res.json();
+      addDisputeBubble(data);
+      return;
+    }
+
+    const res = await fetch(`/search?query=${encodeURIComponent(query)}&top_k=4`);
+    typing.remove();
+
+    if (res.status === 404) {
+      const err = await res.json();
+      addBotBubble([], query, err.detail);
+    } else if (!res.ok) {
+      const err = await res.json();
+      addErrorBubble(err.detail || 'Server error.');
+    } else {
+      const results = await res.json();
+      addBotBubble(results, query);
+    }
+  }
+
+  // ── Detect a brand-new knowledge question typed mid-dispute ─
+  // Without this, any text typed while awaitingContext is true gets
+  // appended as "additional_context" to the ORIGINAL dispute query —
+  // so asking an unrelated question (e.g. "list all dispute codes from
+  // amex") gets silently folded into the pending dispute instead of
+  // being answered on its own.
+  function looksLikeNewTopic(text) {
+    const t = text.toLowerCase();
+    const newTopicPatterns = [
+      /\blist all\b/, /\bshow all\b/, /\ball (the )?dispute codes?\b/,
+      /\bwhat are\b/, /\bwhat is a\b/, /\btypes? of\b/, /\bkinds? of\b/,
+      /\bcompare\b/, /\bdifference between\b/, /\bhow many (codes|reason codes)\b/,
+      /\bexplain (all|every|the)\b/,
+    ];
+    return newTopicPatterns.some(p => p.test(t));
+  }
+
+  // ── Dispute handler ───────────────────────────────────────
+  async function handleDispute(input, typing) {
+    let body;
+
+    if (awaitingContext && looksLikeNewTopic(input)) {
+      // Abandon the pending dispute thread — this reads as a fresh,
+      // unrelated question rather than an answer to the follow-up.
+      awaitingContext     = false;
+      pendingQuery        = '';
+      accumulatedContext  = '';
+      queryEl.placeholder = 'Describe your dispute…';
+    }
+
+    if (awaitingContext) {
+      // Follow-up turn — append this answer to everything said before
+      accumulatedContext = accumulatedContext
+        ? accumulatedContext + '\n\n' + input
+        : input;
+      body = { query: pendingQuery, additional_context: accumulatedContext };
+      // Don't reset yet — agent may ask another follow-up
+    } else {
+      // Turn 1 — fresh dispute
+      accumulatedContext = '';
+      body = { query: input, additional_context: '' };
+    }
+
+    const res = await fetch('/dispute', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+    typing.remove();
+
+    if (res.status === 429) {
+      const err = await res.json();
+      addErrorBubble('Rate limit: ' + (err.detail || 'Too many requests. Try again later.'));
+      return;
+    }
+    if (res.status === 503) {
+      const err = await res.json();
+      addErrorBubble(err.detail || 'Service temporarily unavailable.');
+      return;
+    }
+    if (!res.ok) {
+      const err = await res.json();
+      addErrorBubble(err.detail || 'Agent error.');
+      return;
+    }
+
+    const data = await res.json();
+
+    if (data.needs_more_info) {
+      // Agent needs more details — stay in follow-up mode, accumulate answers
+      awaitingContext = true;
+      if (!pendingQuery) pendingQuery = body.query;   // only set on first turn
+      queryEl.placeholder = 'Type your answer and press Enter…';
+      addFollowUpBubble(data.final_answer);
+    } else {
+      // Conversation complete — reset all state
+      awaitingContext    = false;
+      pendingQuery       = '';
+      accumulatedContext = '';
+      queryEl.placeholder = 'Describe your dispute…';
+      addDisputeBubble(data);
+    }
+  }
+
+  // ── DB Query handler ─────────────────────────────────────
+  async function handleQuery(input, typing) {
+    if (!selectedMerchantId) {
+      typing.remove();
+      addErrorBubble('Please select a merchant from the dropdown above before querying.');
+      return;
+    }
+
+    const res = await fetch('/query', {
+      method:  'POST',
+      headers: {
+        'Content-Type':   'application/json',
+        'X-Merchant-Key': selectedMerchantKey,   // server resolves merchant_id from this
+      },
+      // merchant_id NOT in body. previous_sql lets the server resolve a
+      // follow-up like "give me the complete row for this earlier result"
+      // against what was actually run last turn, instead of guessing blind.
+      body: JSON.stringify({ question: input, previous_sql: lastQuerySql }),
+    });
+    typing.remove();
+
+    if (res.status === 429) {
+      addErrorBubble('Rate limit reached. Try again later.');
+      return;
+    }
+    if (!res.ok) {
+      const err = await res.json();
+      addErrorBubble(err.detail || 'Query error.');
+      return;
+    }
+
+    const data = await res.json();
+    if (data.sql) lastQuerySql = data.sql;
+    addQueryBubble(data);
+  }
+
+  // Humanize a column name the same way the backend does: snake_case -> Title Case.
+  function humanizeCol(col) {
+    return col.replace(/_/g, ' ').replace(/\w\S*/g, w => w[0].toUpperCase() + w.slice(1).toLowerCase());
+  }
+
+  // Light client-side value formatting for table cells — mirrors the
+  // backend's own display formatting (₹ amounts, % rates) since rows_data
+  // carries raw values (needed as-is for CSV export).
+  function formatCell(col, val) {
+    if (val === null || val === undefined || val === '') return '';
+    const key = col.toLowerCase();
+    if (typeof val === 'number') {
+      if (key.includes('amount'))       return '₹' + val.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+      if (key.includes('rate'))         return val.toFixed(2) + '%';
+      return String(val);
+    }
+    return String(val);
+  }
+
+  function renderCell(col, val) {
+    if (col.toLowerCase() === 'status' && val) {
+      return `<span class="status-pill status-${String(val).toLowerCase()}">${escapeHtml(val)}</span>`;
+    }
+    return escapeHtml(formatCell(col, val));
+  }
+
+  function buildResultTable(rowsData) {
+    const cols = Object.keys(rowsData[0]);
+    const thead = '<tr>' + cols.map(c => `<th>${escapeHtml(humanizeCol(c))}</th>`).join('') + '</tr>';
+    const tbody = rowsData.map(r =>
+      '<tr>' + cols.map(c => `<td>${renderCell(c, r[c])}</td>`).join('') + '</tr>'
+    ).join('');
+    return `<div class="query-table-wrap"><table class="query-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table></div>`;
+  }
+
+  function addQueryBubble(data) {
+    const row = document.createElement('div');
+    row.className = 'bubble-row agent';
+
+    const fmt = t => t
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n/g, '<br>');
+
+    const hasCsv     = data.rows_data && data.rows_data.length > 0;
+    const csvBtnId    = 'csvBtn_' + Date.now();
+    // Any result with more than one column reads as an unreadable wall of
+    // "field: value | field: value | ..." text — that's true whether it's
+    // one detailed record or many, so table rendering is keyed on column
+    // count, not row count. Only a true single-value summary (1 row, 1
+    // column, e.g. "Win Rate: 50%") stays as plain text, since that's
+    // already clearer as a bolded sentence than a 1x1 table would be.
+    const asTable = hasCsv && Object.keys(data.rows_data[0]).length > 1;
+
+    row.innerHTML = `
+      <div class="avatar agent">⚡</div>
+      <div class="bubble agent" style="max-width:90%;">
+        ${data.rows > 0 ? `<div style="margin-bottom:8px; color:#555; font-size:12px;">${data.rows} row(s) returned</div>` : ''}
+        ${asTable ? buildResultTable(data.rows_data) : `<div style="line-height:1.7;">${fmt(data.answer)}</div>`}
+        ${hasCsv ? `
+        <div style="margin-top:12px; display:flex; gap:8px; align-items:center;">
+          <button id="${csvBtnId}"
+            style="font-size:12px; padding:5px 12px; border:1px solid #4caf50; background:#f0fff0;
+                   color:#2e7d32; border-radius:6px; cursor:pointer;">
+            ⬇ Download CSV
+          </button>
+          <span style="font-size:11px; color:#888;">${data.rows} record(s)</span>
+        </div>` : ''}
+      </div>`;
+
+    messagesEl.appendChild(row);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    // Wire CSV download after the element is in the DOM
+    if (hasCsv) {
+      document.getElementById(csvBtnId).addEventListener('click', () => {
+        downloadCsv(data.rows_data, `chargebacks_${new Date().toISOString().slice(0,10)}.csv`);
+      });
+    }
+  }
+
+  function downloadCsv(rowsData, filename) {
+    if (!rowsData || rowsData.length === 0) return;
+
+    const cols   = Object.keys(rowsData[0]);
+    const header = cols.join(',');
+    const body   = rowsData.map(row =>
+      cols.map(c => {
+        const v = row[c] == null ? '' : String(row[c]);
+        // Quote fields that contain commas, newlines, or double-quotes
+        return v.includes(',') || v.includes('"') || v.includes('\n')
+          ? '"' + v.replace(/"/g, '""') + '"'
+          : v;
+      }).join(',')
+    ).join('\n');
+
+    const blob = new Blob([header + '\n' + body], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // ── Bubble renderers ─────────────────────────────────────
+  function addUserBubble(text) {
+    const row = document.createElement('div');
+    row.className = 'bubble-row user';
+    row.innerHTML = `
+      <div class="avatar user">U</div>
+      <div class="bubble user">${escapeHtml(text)}</div>`;
+    messagesEl.appendChild(row);
+    scrollBottom();
+  }
+
+  function addTypingIndicator() {
+    const row = document.createElement('div');
+    row.className = 'bubble-row typing';
+    row.innerHTML = `
+      <div class="avatar bot">⚡</div>
+      <div class="bubble bot">
+        <div class="dot-flashing"><span></span><span></span><span></span></div>
+      </div>`;
+    messagesEl.appendChild(row);
+    scrollBottom();
+    return row;
+  }
+
+  // Q&A result bubble
+  function addBotBubble(results, query, customMsg) {
+    const row = document.createElement('div');
+    row.className = 'bubble-row';
+
+    if (!results || results.length === 0) {
+      const msg = customMsg || `No results for "<em>${escapeHtml(query)}</em>". Try something chargeback-related.`;
+      row.innerHTML = `
+        <div class="avatar bot">⚡</div>
+        <div class="bubble bot" style="color:#888;">${msg}</div>`;
+      messagesEl.appendChild(row);
+      scrollBottom();
+      return;
+    }
+
+    const top    = results[0];
+    const others = results.slice(1);
+    const preview = top.content.trim().slice(0, 600);
+    const clipped = top.content.trim().length > 600 ? '…' : '';
+    const otherChips = others.map(r =>
+      `<span class="source-chip">${escapeHtml(r.title)}<span class="score-badge">${r.score}</span></span>`
+    ).join('');
+    const sourcesHtml = others.length > 0
+      ? `<div class="sources"><div class="sources-label">Also relevant</div>${otherChips}</div>`
+      : '';
+
+    row.innerHTML = `
+      <div class="avatar bot">⚡</div>
+      <div class="bubble bot">
+        <div class="answer-title">${escapeHtml(top.title)} · ${top.score}</div>
+        <div class="answer-content">${escapeHtml(preview)}${clipped}</div>
+        ${sourcesHtml}
+      </div>`;
+    messagesEl.appendChild(row);
+    scrollBottom();
+  }
+
+  // Dispute agent follow-up question bubble
+  function addFollowUpBubble(question) {
+    const row = document.createElement('div');
+    row.className = 'bubble-row';
+    row.innerHTML = `
+      <div class="avatar bot">⚡</div>
+      <div class="bubble bot">
+        <div class="followup-banner">I need a bit more information before I can help:</div>
+        <div style="margin-top:10px;font-size:14px;color:#1a1a1a;">${escapeHtml(question)}</div>
+      </div>`;
+    messagesEl.appendChild(row);
+    scrollBottom();
+  }
+
+  // Dispute agent final result bubble
+  function addDisputeBubble(data) {
+    const row = document.createElement('div');
+    row.className = 'bubble-row';
+
+    // Question answer or rejected query — render with line breaks preserved
+    if (!data.decision) {
+      const formatted = escapeHtml(data.final_answer)
+        .replace(/\n/g, '<br>');
+      row.innerHTML = `
+        <div class="avatar bot">⚡</div>
+        <div class="bubble bot" style="color:#333; white-space:pre-wrap; line-height:1.7;">${formatted}</div>`;
+      messagesEl.appendChild(row);
+      scrollBottom();
+      return;
+    }
+
+    const decisionClass = data.decision;
+    const decisionLabel = data.decision === 'fight' ? 'Fight the chargeback' : 'Accept the refund';
+
+    // Confidence badge
+    const score = data.confidence_score || 0;
+    const confClass = score >= 8 ? 'high' : score >= 5 ? 'medium' : 'low';
+    const confLabel = score > 0 ? `Confidence ${score}/10` : '';
+    const confBadge = confLabel
+      ? `<span class="confidence-badge ${confClass}">${confLabel}</span>`
+      : '';
+
+    // Groundedness warning
+    const groundWarn = (!data.is_grounded && data.groundedness_issues)
+      ? `<div class="groundedness-warn">⚠️ Unverified claim detected: ${escapeHtml(data.groundedness_issues)}</div>`
+      : '';
+
+    const presentChips = (data.evidence_present || [])
+      .map(e => `<span class="ev-chip present">✓ ${escapeHtml(e)}</span>`).join('');
+    const missingChips = (data.evidence_missing || [])
+      .map(e => `<span class="ev-chip missing">✗ ${escapeHtml(e)}</span>`).join('');
+
+    const evidenceHtml = (presentChips || missingChips) ? `
+      <div class="evidence-section">
+        <div class="rc-label">Evidence</div>
+        <div class="ev-row">${presentChips}${missingChips}</div>
+      </div>` : '';
+
+    row.innerHTML = `
+      <div class="avatar bot">⚡</div>
+      <div class="bubble bot">
+        <div class="dispute-card">
+          <div class="meta-row">
+            <span class="decision-badge ${decisionClass}">${decisionLabel}</span>
+            ${confBadge}
+          </div>
+          <div>
+            <div class="rc-label">Reason Code</div>
+            <div class="rc-value">${escapeHtml(data.reason_code || 'Unknown')}</div>
+          </div>
+          ${evidenceHtml}
+          ${groundWarn}
+          <div class="letter-section">
+            <div class="letter-label">${data.decision === 'fight' ? 'Rebuttal Letter' : 'Advice'}</div>
+            <div class="letter-body">${escapeHtml(data.final_answer)}</div>
+          </div>
+        </div>
+      </div>`;
+    messagesEl.appendChild(row);
+    scrollBottom();
+  }
+
+  function addErrorBubble(msg) {
+    const row = document.createElement('div');
+    row.className = 'bubble-row';
+    row.innerHTML = `
+      <div class="avatar bot">⚡</div>
+      <div class="bubble bot" style="color:#c0392b;">${escapeHtml(msg)}</div>`;
+    messagesEl.appendChild(row);
+    scrollBottom();
+  }
+
+  // ── Utilities ────────────────────────────────────────────
+  function scrollBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
+  }
+
+  queryEl.focus();
+</script>
+</body>
+</html>
