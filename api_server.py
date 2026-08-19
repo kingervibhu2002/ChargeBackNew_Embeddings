@@ -24,7 +24,6 @@ Then open http://localhost:8000/docs for the interactive Swagger UI.
 """
 
 import hashlib
-import os
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -38,6 +37,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel
 
 import classifier
+import llm_provider
 from auth import DEMO_IDENTITIES, Identity, require_identity
 from chargeback_agent import build_dispute_agent
 from guardrails import AuditLogger, CostCircuitBreaker, RateLimiter
@@ -106,15 +106,17 @@ async def lifespan(app: FastAPI):
 
     # Build the LangGraph dispute agent — shares _store and _embed so only
     # one Qdrant connection is open in this process. Skipped gracefully when
-    # GROQ_API_KEY is absent; the /dispute endpoint returns 503 in that case.
-    if os.environ.get("GROQ_API_KEY"):
+    # the configured LLM provider's API key is absent (LLM_PROVIDER=groq|
+    # openai, see llm_provider.py); the /dispute endpoint returns 503 in
+    # that case.
+    if llm_provider.is_configured():
         try:
             _agent = build_dispute_agent(store=_store, embed_fn=_embed)
-            print("Dispute agent (LangGraph) ready.")
+            print(f"Dispute agent (LangGraph, provider={llm_provider.get_provider_name()}) ready.")
         except Exception as exc:
             print(f"Dispute agent not available: {exc}")
     else:
-        print("GROQ_API_KEY not set — /dispute endpoint will return 503.")
+        print(f"{llm_provider.get_env_key_name()} not set — /dispute endpoint will return 503.")
 
     yield
     # Nothing to clean up — Qdrant and FastEmbed handle their own teardown.
@@ -568,8 +570,9 @@ def dispute(req: DisputeRequest, request: Request) -> DisputeResponse:
         Pass the same original query plus the merchant's reply. The agent
         skips asking again and returns the final letter or advice.
 
-    Requires the GROQ_API_KEY environment variable to be set.
-    Get a free key at https://console.groq.com
+    Requires an LLM provider to be configured — see llm_provider.py
+    (LLM_PROVIDER=groq, default, + GROQ_API_KEY; or LLM_PROVIDER=openai +
+    OPENAI_API_KEY).
 
     Args:
         req (DisputeRequest): JSON body with query and optional additional_context.
@@ -579,7 +582,7 @@ def dispute(req: DisputeRequest, request: Request) -> DisputeResponse:
                          evidence assessment, and needs_more_info flag.
 
     Raises:
-        HTTPException 503: If GROQ_API_KEY is not configured.
+        HTTPException 503: If the configured LLM provider's API key is not set.
         HTTPException 500: If the agent encounters an unexpected error.
     """
     if _agent is None:
@@ -587,8 +590,8 @@ def dispute(req: DisputeRequest, request: Request) -> DisputeResponse:
             status_code=503,
             detail=(
                 "Dispute agent is not available. "
-                "Set GROQ_API_KEY and restart the server. "
-                "Get a free key at https://console.groq.com"
+                f"Set {llm_provider.get_env_key_name()} and restart the server "
+                f"(current LLM_PROVIDER={llm_provider.get_provider_name()})."
             ),
         )
 

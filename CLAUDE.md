@@ -12,8 +12,12 @@ Setup:
 ```bash
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-export GROQ_API_KEY=your_key_here   # required for chargeback_agent.py + text_to_sql.py; free at console.groq.com
+export GROQ_API_KEY=your_key_here   # default provider; free at console.groq.com
+# or, to use OpenAI instead:
+export LLM_PROVIDER=openai
+export OPENAI_API_KEY=your_key_here
 ```
+LLM provider is selected via `LLM_PROVIDER=groq|openai` (default `groq`) — see `llm_provider.py`, the shared factory both `chargeback_agent.py` and `text_to_sql.py` use so neither can drift on model names or API-key handling. Restart the server to switch providers.
 
 Run the server (serves the chat UI at `/`, Swagger docs at `/docs`):
 ```bash
@@ -66,7 +70,7 @@ Each LLM-calling node gets its own narrow system-prompt persona (e.g. "chargebac
 
 `_answer_question_node` handles general knowledge-base questions (routed here instead of the full dispute flow) and picks retrieval/prompt strategy from several detected intents (list, compare, lifecycle-stage, coverage-confirmation) via keyword/regex checks on the query — these checks need to be word-boundary-aware, not naive substring matches, or unrelated phrasing (e.g. "what **all** proofs...") can misroute into the wrong branch.
 
-Primary LLM is `openai/gpt-oss-120b` via Groq, with automatic fallback to `openai/gpt-oss-20b` on failure (originally `llama-3.3-70b-versatile`/`llama-3.1-8b-instant` — Meta's Llama-3 line was fully retired from Groq's catalog as of 2026-08-17; check `GET /openai/v1/models` if this needs to change again).
+LLM provider/model selection is centralized in `llm_provider.py` (`LLM_PROVIDER=groq|openai`, default `groq`), used by both `chargeback_agent.py` and `text_to_sql.py` so they can't drift on model names independently. Groq: primary `openai/gpt-oss-120b`, fallback `openai/gpt-oss-20b` on failure (originally `llama-3.3-70b-versatile`/`llama-3.1-8b-instant` — Meta's Llama-3 line was fully retired from Groq's catalog as of 2026-08-17; check `GET /openai/v1/models` if this needs to change again). OpenAI: primary `gpt-4o`, fallback `gpt-4o-mini`.
 
 ### Identity and role-based data scoping
 `usermaster.py` defines the `usermaster` table and `ADMIN_ROLES = {bankopsadmin, bankadmin_maker, bankadmin_checker}`. `auth.py` resolves the `X-Merchant-Key` header to a full `Identity(user_id, role, merchant_id)` via constant-time hash comparison against that table — identity is never accepted from the request body.

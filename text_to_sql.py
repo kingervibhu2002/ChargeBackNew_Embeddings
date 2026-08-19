@@ -31,9 +31,10 @@ import re
 import sqlite3
 from typing import Optional
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 
+import llm_provider
 from merchant_db import get_connection, MERCHANTS, NPCI_REASON_CODES
 from usermaster import ADMIN_ROLES
 
@@ -341,7 +342,7 @@ def _nl_to_sql(
     question: str,
     role: str,
     merchant_id: Optional[str],
-    llm: ChatGroq,
+    llm: BaseChatModel,
     previous_sql: str = "",
 ) -> str:
     """
@@ -838,7 +839,10 @@ def query_chargebacks(
                              resolved server-side from the authenticated session.
         merchant_id  (str): Required when role='merchant'; ignored for admin roles.
         db_path      (str): Path to SQLite DB.
-        groq_api_key (str): Groq API key (falls back to GROQ_API_KEY env var).
+        groq_api_key (str): Explicit Groq API key override — bypasses
+                             llm_provider.py's LLM_PROVIDER setting and
+                             always uses Groq. Leave unset to use whichever
+                             provider LLM_PROVIDER configures (default groq).
         previous_sql (str): The SQL executed for the prior turn in this chat
                              session, if any — lets the LLM resolve follow-up
                              references ("this earlier result", "that record").
@@ -852,18 +856,27 @@ def query_chargebacks(
     Returns:
         dict: sql, answer, rows, error
     """
-    import os
-
     is_admin = role in ADMIN_ROLES
     if not is_admin and role != "merchant":
         return {"sql": "", "answer": "", "rows": 0, "error": f"Unknown role: {role}"}
     if not is_admin and not merchant_id:
         return {"sql": "", "answer": "", "rows": 0, "error": "merchant_id is required for role='merchant'."}
 
-    key = groq_api_key or os.environ.get("GROQ_API_KEY", "")
-    if not key:
-        return {"sql": "", "answer": "", "rows": 0,
-                "error": "GROQ_API_KEY not set."}
+    # groq_api_key is a Groq-specific override, kept for backward
+    # compatibility (nothing in this codebase currently passes it — grep-
+    # verified — but an external caller might supply it directly). The
+    # default path is provider-aware via llm_provider.py
+    # (LLM_PROVIDER=groq|openai), shared with chargeback_agent.py so the
+    # two callers can't drift on model names or error messages the way this
+    # project's Groq model choice already did once (see llm_provider.py).
+    try:
+        if groq_api_key:
+            from langchain_groq import ChatGroq
+            llm = ChatGroq(model="openai/gpt-oss-120b", api_key=groq_api_key, temperature=0)
+        else:
+            llm = llm_provider.make_llm()
+    except ValueError as e:
+        return {"sql": "", "answer": "", "rows": 0, "error": str(e)}
 
     # Step 0 — conversational questions (download, how-to, etc.) → text answer
     is_conv, conv_answer = _check_conversational(question)
@@ -879,10 +892,6 @@ def query_chargebacks(
     # Broad-language flag only matters for a merchant caller — for admin
     # roles, cross-merchant breadth is the normal use case, not an anomaly.
     suspicious = (not is_admin) and bool(_SUSPICIOUS_PATTERN.search(question))
-
-    # llama-3.3-70b-versatile was retired from Groq's catalog (2026-08-17) —
-    # see the matching note in chargeback_agent.py's _make_llms().
-    llm = ChatGroq(model="openai/gpt-oss-120b", api_key=key, temperature=0)
 
     # Step 2 — generate SQL
     try:

@@ -27,17 +27,17 @@ Design:
   one Qdrant connection exists in the process (local mode allows only one).
 
 Requires:
-  GROQ_API_KEY environment variable — free at https://console.groq.com
+  An LLM provider configured via llm_provider.py — GROQ_API_KEY (default,
+  free at https://console.groq.com) or LLM_PROVIDER=openai + OPENAI_API_KEY.
 """
 
-import os
 import re
 from typing import Callable, List, Literal, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
 from langgraph.graph import END, StateGraph
 
+import llm_provider
 from guardrails import check_length, detect_prompt_injection, mask_pii, _parse_json_safe
 from evidence_tags import EvidenceTag, EVIDENCE_TAG_LABELS, humanize_evidence
 from network_detection import (
@@ -116,34 +116,23 @@ class ChargebackState(TypedDict):
 
 def _make_llms() -> tuple:
     """
-    Create primary and fallback Groq LLM clients.
+    Create primary and fallback LLM clients for the configured provider.
 
-    Primary:  openai/gpt-oss-120b — best quality, used for all nodes.
-    Fallback: openai/gpt-oss-20b  — faster and cheaper, used if primary fails.
-
-    Model names checked live against Groq's /models list on 2026-08-17 —
-    Meta's llama-3.3-70b-versatile / llama-3.1-8b-instant (the original
-    choice here) were fully retired from Groq's catalog by that date, not
-    just renamed. If this raises model_not_found again later, re-check
-    https://console.groq.com/docs/models or `GET /openai/v1/models` for
-    whatever's currently active — Groq's free-tier lineup changes over time.
+    Delegates to llm_provider.py — the single source of truth for provider
+    selection (LLM_PROVIDER=groq|openai), model names, and API-key
+    resolution, shared with text_to_sql.py so the two callers can't drift
+    on model names the way this project's Groq model choice already did
+    once (Meta's llama-3.3-70b-versatile/llama-3.1-8b-instant were fully
+    retired from Groq's catalog as of 2026-08-17 — see llm_provider.py's
+    model table for whatever's currently configured).
 
     Returns:
         tuple: (primary_llm, fallback_llm)
 
     Raises:
-        ValueError: If GROQ_API_KEY is not set.
+        ValueError: If the configured provider's API key is not set.
     """
-    key = os.environ.get("GROQ_API_KEY")
-    if not key:
-        raise ValueError(
-            "GROQ_API_KEY is not set. "
-            "Get a free key at https://console.groq.com and run:\n"
-            "  export GROQ_API_KEY=your_key_here"
-        )
-    primary  = ChatGroq(model="openai/gpt-oss-120b", temperature=0, api_key=key)
-    fallback = ChatGroq(model="openai/gpt-oss-20b",  temperature=0, api_key=key)
-    return primary, fallback
+    return llm_provider.make_llms()
 
 
 # ---------------------------------------------------------------------------
@@ -1679,6 +1668,7 @@ def build_dispute_agent(store, embed_fn: Callable[[str], list]) -> DisputeAgent:
         DisputeAgent: Compiled and ready to process disputes.
 
     Raises:
-        ValueError: If GROQ_API_KEY is not set.
+        ValueError: If the configured LLM provider's API key is not set
+                   (see llm_provider.py).
     """
     return DisputeAgent(store=store, embed_fn=embed_fn)
