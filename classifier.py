@@ -10,6 +10,7 @@ Three functions replace LLM calls that were doing simple pattern matching:
 All functions are pure Python with no external dependencies.
 """
 
+import difflib
 import re
 from typing import Tuple
 
@@ -302,3 +303,163 @@ def detect_settlement_issue(text: str) -> bool:
     if any(phrase in t for phrase in _SETTLEMENT_NEGATIVE_PHRASES):
         return False
     return any(phrase in t for phrase in _SETTLEMENT_POSITIVE_PHRASES)
+
+
+# Generic filler/acknowledgement words that carry no dispute information on
+# their own. A merchant replying "nice" or "ok" to "please share the reason
+# code" is non-empty text — until this check existed, any non-empty
+# additional_context was treated as a real answer and let the flow proceed
+# straight into generate_node, once producing a fully-fabricated rebuttal
+# letter grounded in nothing but the original dispute description. Only
+# fires when the ENTIRE reply is built from these words (short filler plus
+# trivial punctuation) — a real answer that happens to contain one, e.g.
+# "no, it was a duplicate charge", is unaffected.
+_JUNK_REPLY_WORDS = {
+    "nice", "ok", "okay", "k", "kk", "fine", "cool", "sure", "alright",
+    "yes", "no", "yep", "nope", "yeah", "nah", "maybe", "none", "na",
+    "good", "great", "bad", "mad", "sad", "meh",
+    "whatever", "idk", "dunno", "lol", "lmao", "haha",
+    "fuck", "fuckyou", "fu", "wtf", "stfu", "shit", "damn", "hell",
+}
+
+# Real one-word dispute answers that must NOT be flagged as junk even
+# though they're a single short token with no recognizable network/code of
+# their own (extract_network_and_code doesn't know standalone reason words).
+_KNOWN_DISPUTE_WORDS = {
+    "fraud", "fraudulent", "duplicate", "duplicated", "refund", "refunded",
+    "cancelled", "canceled", "defective", "damaged", "counterfeit",
+    "unauthorized", "unauthorised", "unrecognized", "unrecognised",
+    "chargeback", "undelivered", "delivered", "disputed", "return",
+    "returned", "faulty", "incomplete", "late", "missing", "expired",
+}
+
+
+# A follow-up reply that echoes the original dispute description back
+# verbatim (or near-verbatim) reads as substantive text — real words,
+# often a real network name — but supplies literally nothing beyond what
+# was already known before the question was asked. Ratio threshold is
+# deliberately high: it must catch "retyped the same sentence", not
+# penalize a real elaboration that happens to reuse some of the same
+# domain words (e.g. repeating "Mastercard" and "fraud" while actually
+# adding the reason code and evidence details).
+_DUPLICATE_QUERY_SIMILARITY_THRESHOLD = 0.85
+
+
+def _is_junk_segment(text: str, query: str) -> bool:
+    """One turn's worth of reply — see is_junk_reply for the three checks."""
+    stripped = re.sub(r'[^\w\s]', ' ', text).strip().lower()
+    if not stripped:
+        return True
+
+    words = stripped.split()
+    if all(w in _JUNK_REPLY_WORDS for w in words):
+        return True
+
+    if len(words) == 1:
+        word = words[0]
+        if (
+            len(word) <= 20
+            and not any(ch.isdigit() for ch in word)
+            and word not in _KNOWN_DISPUTE_WORDS
+        ):
+            network, code = extract_network_and_code(text)
+            if network == "Unknown" and code == "Unknown":
+                return True
+
+    if query:
+        norm_query = re.sub(r'[^\w\s]', ' ', query).strip().lower()
+        if norm_query:
+            ratio = difflib.SequenceMatcher(None, stripped, norm_query).ratio()
+            if ratio >= _DUPLICATE_QUERY_SIMILARITY_THRESHOLD:
+                return True
+
+    return False
+
+
+def is_junk_reply(text: str, query: str = "") -> bool:
+    """
+    True if `text` carries no real dispute information beyond what was
+    already known.
+
+    additional_context can hold several turns' worth of replies joined by
+    blank lines (chat.html appends each new reply onto the last while the
+    agent keeps asking for more). The chat input is a single-line field, so
+    a literal blank-line break can only be that join — never part of one
+    reply — which makes it safe to split on and evaluate each turn on its
+    own. This matters because checking the joined blob as one string lets
+    a repeated junk/duplicate reply dilute itself: two or three copies of
+    the same sentence pasted back to back drop the whole-string similarity
+    ratio against the original query well below the threshold that catches
+    a single copy, even though every individual turn is still exactly as
+    uninformative. The whole context is junk only if EVERY turn is, by one
+    of:
+
+      1. every word in that turn is generic filler/acknowledgement (see
+         _JUNK_REPLY_WORDS: "nice", "ok mad"), or
+      2. it's a single short token that's neither a recognized network/code
+         (extract_network_and_code) nor a known dispute word
+         (_KNOWN_DISPUTE_WORDS) — i.e. likely gibberish such as a
+         mashed-keyboard test string ("funckuou") rather than a real, if
+         terse, answer, or
+      3. `query` is given and that turn is a near-duplicate of it — the
+         merchant retyped/echoed the original dispute description instead
+         of actually answering the follow-up question, so despite being
+         real, substantive-looking text it adds no new information.
+
+    A single turn anywhere in the history that's genuinely informative
+    (a real answer, even a terse one) makes the whole context non-junk —
+    matching the flow's existing "ask once, use whatever you get" design.
+
+    Branches 2 and 3 can false-positive on a genuine answer that happens to
+    look similar (an unlisted one-word synonym, or a real elaboration that
+    reuses a lot of the original wording) — an acceptable failure mode
+    here since it only causes one more clarifying question, never a
+    fabricated answer built from nothing.
+
+    Args:
+        text: A merchant's follow-up reply (additional_context) — may hold
+              multiple turns joined by blank lines.
+        query: The original dispute description, if available — used to
+               catch a reply that just echoes it back.
+
+    Returns:
+        True if the reply carries no real dispute information.
+    """
+    segments = [s for s in text.split('\n\n') if s.strip()]
+    if not segments:
+        return True
+    return all(_is_junk_segment(s, query) for s in segments)
+
+
+def is_confidently_substantive(text: str) -> bool:
+    """
+    True if the regex layer already has high confidence `text` is a real,
+    substantive reply — a recognized network/code (extract_network_and_code),
+    or a single word from the curated dispute vocabulary
+    (_KNOWN_DISPUTE_WORDS).
+
+    Used to skip chargeback_agent.py's LLM backstop for cases the
+    deterministic layer can already resolve with confidence. That backstop
+    exists to judge genuinely ambiguous replies (is_junk_reply already let
+    them through, but they could still be filler dressed as real text) — it
+    was observed to be unreliable specifically on short, bare single-word
+    answers ("fraud" alone, flakily rejected ~40% of the time across
+    repeated identical calls) even though those are exactly the terse
+    answers the follow-up question invites merchants to give. Routing this
+    class of input around the LLM call entirely removes that flakiness
+    where it matters most, since re-litigating an already-confident regex
+    match through a model call adds risk without adding value.
+
+    Args:
+        text: A merchant's follow-up reply (a single turn, already known
+              not to be junk).
+
+    Returns:
+        True if this reply is confidently real without needing an LLM call.
+    """
+    network, code = extract_network_and_code(text)
+    if network != "Unknown" or code != "Unknown":
+        return True
+    stripped = re.sub(r'[^\w\s]', ' ', text).strip().lower()
+    words = stripped.split()
+    return len(words) == 1 and words[0] in _KNOWN_DISPUTE_WORDS

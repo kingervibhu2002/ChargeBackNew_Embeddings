@@ -190,18 +190,74 @@ class DisputeAgent:
 
     # ── Nodes ─────────────────────────────────────────────────────────────
 
+    def _filter_substantive_context(self, query: str, context: str) -> str:
+        """
+        LLM backstop for classifier.is_junk_reply's regex layer.
+
+        Judges whether `context` (a merchant's follow-up reply, possibly
+        several turns joined) actually answers the dispute follow-up
+        question with real, new information — or is filler, gibberish, or
+        an echo of the original description that the regex checks didn't
+        happen to catch. Same contract as is_junk_reply: returns `context`
+        unchanged if substantive, "" otherwise, so the caller doesn't need
+        to know which layer made the call.
+
+        Fails open (returns `context` unchanged) on any LLM error — the
+        regex layer already ran and found nothing obviously wrong with this
+        reply, so a transient LLM/network failure should not block a real
+        merchant's answer.
+
+        Args:
+            query: The original dispute description (already PII-masked).
+            context: additional_context that survived the regex pre-filter.
+
+        Returns:
+            `context` if substantive, "" otherwise.
+        """
+        try:
+            response = self._invoke([
+                SystemMessage(content=(
+                    "You are a strict input-quality checker for a chargeback "
+                    "dispute assistant. A merchant was asked to provide a "
+                    "chargeback reason code, or describe what happened. "
+                    "Decide whether their reply actually answers that.\n\n"
+                    "Counts as substantive: any real, new detail — even one "
+                    "word, like a reason code, network name, or a word "
+                    "describing what happened (e.g. 'fraud', 'wrong item').\n"
+                    "Does NOT count: filler or acknowledgement words (e.g. "
+                    "'nice', 'ok', 'sure'), gibberish, or a reply that just "
+                    "repeats the original dispute description back with no "
+                    "new detail added.\n\n"
+                    'Respond ONLY with JSON: {"is_substantive": true or false}'
+                )),
+                HumanMessage(content=(
+                    f"Original dispute description: {query}\n\n"
+                    f"Merchant's reply: {context}"
+                )),
+            ])
+            data = _parse_json_safe(response.content, {"is_substantive": True})
+            if not data.get("is_substantive", True):
+                return ""
+        except Exception:
+            pass
+        return context
+
     def _validate_node(self, state: ChargebackState) -> dict:
         """
         Node 0 — Input guardrails + dispute intent check.
 
         Guardrails applied (in order, cheapest first):
-          1. Length check         — no LLM call, immediate
-          2. Prompt injection     — no LLM call, immediate
-          3. PII masking          — mask before LLM sees the text
-          4. Dispute intent check — one LLM call to verify it's a real dispute
+          1. Length check           — no LLM call, immediate
+          2. Prompt injection       — no LLM call, immediate
+          3. PII masking            — mask before anything downstream sees it
+          4. Intent classification  — no LLM call, regex/keyword (classifier.py)
+          5. Junk-reply filtering   — regex pre-filter, then an LLM backstop
+                                      only for replies the regex didn't
+                                      already rule out (see Guard 5 below)
 
-        Reads:  user_query
-        Writes: is_valid_query, user_query (PII-masked), final_answer
+        Reads:  user_query, additional_context
+        Writes: is_valid_query, user_query (PII-masked), final_answer,
+                additional_context (junk-filtered)
 
         Args:
             state (ChargebackState): Current graph state.
@@ -229,6 +285,40 @@ class DisputeAgent:
         # Guard 4 — deterministic intent classification (no LLM call)
         query_type = classifier.classify_query_type(masked_query)
 
+        # Guard 5 — junk-reply filtering. additional_context is a merchant's
+        # follow-up answer to a question like "please share the reason code
+        # or describe what happened" — until this check existed, ANY
+        # non-empty reply (including "nice", "ok", "mad", or mashed-keyboard
+        # gibberish) satisfied every downstream "not context" routing check
+        # identically to a real answer, letting the flow proceed straight to
+        # a confident generate step grounded in nothing. Normalized to ""
+        # here, once, so every downstream node/route (_route_after_extract_code,
+        # _route_after_detect_settlement, _extract_evidence_node's one-round
+        # cap, etc.) treats a junk reply exactly like no reply at all,
+        # without each needing its own check.
+        raw_context = state.get("additional_context", "")
+        context = (
+            "" if classifier.is_junk_reply(raw_context, query=masked_query)
+            else raw_context
+        )
+
+        # Guard 5b — LLM backstop for whatever escapes the regex filter
+        # above. "Is this reply actually informative" is an open-ended
+        # judgment call — every adversarial round so far ("nice"/"ok"/"mad",
+        # mashed-keyboard gibberish, retyping the original query once, then
+        # retyping it multiple times) found a pattern the regex layer didn't
+        # cover yet. Rather than keep enumerating patterns by hand, ask the
+        # LLM once the cheap layer has already ruled out the obvious cases —
+        # mirrors decision_rules.py's curated-table-first, LLM-fallback-for-
+        # the-long-tail pattern. Skipped entirely when the regex layer is
+        # already confident (is_confidently_substantive) — the LLM call was
+        # observed to be flaky specifically on short, bare single-word
+        # answers like "fraud", so those bypass it rather than risk a
+        # coin-flip rejection of exactly the terse answer the follow-up
+        # question invites.
+        if context and not classifier.is_confidently_substantive(context):
+            context = self._filter_substantive_context(masked_query, context)
+
         # Anaphoric follow-up fallback: a bare reference ("Are all of those
         # covered?", "What's the difference between those two?") carries no
         # payment-domain keyword of its own and classifies as "invalid" in
@@ -242,7 +332,6 @@ class DisputeAgent:
         # empty there). Confirmed via live 2-turn test: without this,
         # "Are all of those covered?" was rejected even with the correct
         # prior-turn context already attached.
-        context = state.get("additional_context", "")
         if query_type == "invalid" and context:
             query_type = classifier.classify_query_type(f"{masked_query} {context}")
 
@@ -269,10 +358,11 @@ class DisputeAgent:
             final_answer = ""
 
         return {
-            "is_valid_query": is_valid,
-            "query_type":     query_type,
-            "user_query":     masked_query,
-            "final_answer":   final_answer,
+            "is_valid_query":    is_valid,
+            "query_type":        query_type,
+            "user_query":        masked_query,
+            "final_answer":      final_answer,
+            "additional_context": context,
         }
 
     def _planner_node(self, state: ChargebackState) -> dict:
