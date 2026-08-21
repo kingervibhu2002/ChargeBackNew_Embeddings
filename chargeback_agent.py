@@ -821,6 +821,61 @@ class DisputeAgent:
         query = state["user_query"]
         cache_key = query.lower().strip()
 
+        # Personal-data intent: "list my open chargebacks", "how many
+        # chargebacks do I have", "what's the status of my disputes" — this
+        # asks for the caller's OWN chargeback records, not general policy.
+        # This node only ever does semantic search over
+        # chargeback-encyclopedia/ (policy documents) — it has no connection
+        # to the merchant's actual chargebacks.db rows and never did.
+        # Without this check, a query phrased this way matched list_intent
+        # below and got routed into the generic KB-listing path, where the
+        # LLM — having nothing relevant retrieved — fabricated a plausible-
+        # looking table of chargebacks (case IDs like "CB001", generic
+        # labels like "Unauthorized Transaction") that don't exist anywhere
+        # in this project's real schema (real case IDs look like
+        # "NPCI20260810M001013"; real reason codes are U001-U010, not
+        # generic Visa/Mastercard-style descriptions). Confirmed live: this
+        # produced 7 entirely fictional chargebacks presented with full
+        # confidence. Checked first, ahead of stage_intent/list_intent, so a
+        # data-lookup question can never be misrouted into the fabrication-
+        # prone generic path — real data or an honest "I don't have that
+        # here" only, never a guess.
+        personal_data_intent = bool(_re.search(
+            r'\b(my|i have|i\'ve got|do i have|how many)\b.{0,30}\b(chargeback|dispute|case)s?\b'
+            r'|\b(chargeback|dispute|case)s?\b.{0,30}\b(status|open|pending|outstanding|due)\b',
+            query, _re.IGNORECASE
+        ))
+        if personal_data_intent:
+            merchant_id = state.get("merchant_id", "")
+            if not merchant_id:
+                return {
+                    "final_answer": (
+                        "I don't have access to your specific chargeback "
+                        "records here. Select your merchant identity above "
+                        "(the same login used on the \"My Chargebacks\" tab) "
+                        "and ask again, or describe a specific case and I "
+                        "can help with that."
+                    ),
+                    "retrieved_docs":      [],
+                    "confidence_score":    0,
+                    "is_grounded":         True,
+                    "groundedness_issues": "",
+                }
+            from text_to_sql import query_chargebacks
+            result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
+            answer = (
+                result.get("answer")
+                or result.get("error")
+                or "No matching chargebacks found."
+            )
+            return {
+                "final_answer":        answer,
+                "retrieved_docs":      [],
+                "confidence_score":    8,
+                "is_grounded":         True,
+                "groundedness_issues": "",
+            }
+
         # Dispute-lifecycle questions ("which codes are at pre-arbitration stage?")
         # must NOT be routed into the generic list handler — codes don't map to
         # stages, every code can pass through any stage. Checked first so it
