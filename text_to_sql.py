@@ -143,8 +143,21 @@ _INJECTION_PATTERN = re.compile(
 # asking to see other merchants' data is an escalation attempt. For admin
 # roles this is exactly the legitimate use case, so it's checked separately
 # (in _is_safe_question) and only applied when role == "merchant".
+#
+# Vocabulary covers "merchant" plus the synonyms a real user actually types
+# ("user", "customer", "account") — confirmed live that "merchant"-only
+# vocabulary let "i mean for other users" and similar phrasing slip past
+# this check entirely. The underlying data was never at risk (merchant_id
+# is force-injected into the SQL regardless — see query_chargebacks()'s
+# _enforce_merchant_filter), but without this pattern catching the intent
+# up front, the vague follow-up reached SQL generation, the LLM produced
+# something that wasn't a clean SELECT, and the caller got a confusing
+# "Only SELECT queries are allowed" error instead of a clear, purpose-built
+# "you can only see your own data" message.
 _MERCHANT_ESCALATION_PATTERN = re.compile(
-    r"show\s+all\s+merchants|other\s+merchants?|every\s+merchant",
+    r"show\s+all\s+(merchants?|users?|customers?|accounts?)"
+    r"|other\s+(merchants?|users?|customers?|accounts?)"
+    r"|every\s+(merchant|user|customer|account)",
     re.IGNORECASE,
 )
 
