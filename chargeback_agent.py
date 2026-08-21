@@ -762,6 +762,17 @@ class DisputeAgent:
         # for settlement detection.
         needs_more_info = data.get("needs_more_info", False) and not context
 
+        # always_refund rules (e.g. RuPay U010) mean no evidence changes the
+        # outcome — decision_rules already knows that deterministically, so
+        # don't let the LLM's needs_more_info guess override it. Without
+        # this, evidence_missing correctly comes back empty (via the rule
+        # lookup above) but needs_more_info was still whatever the LLM's raw
+        # JSON said — observed asking for unrelated "refund transaction ID"
+        # evidence in roughly 2 of 3 identical live runs for U010, despite
+        # there being nothing to actually ask for.
+        if rule is not None and rule.always_refund:
+            needs_more_info = False
+
         return {
             "evidence_present":      evidence_present,
             "evidence_missing":      evidence_missing,

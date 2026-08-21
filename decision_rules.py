@@ -32,10 +32,21 @@ class DecisionRule:
                    refund regardless of required_any/required_all — used for
                    cases where the dispute is already moot (e.g. merchant
                    already refunded an item-not-received claim).
+    always_refund: for codes where NO evidence the merchant could supply
+                   changes the outcome — liability sits with a third party
+                   (e.g. the bank/PSP for a technical-failure code) by the
+                   reason code's own definition, not by anything the
+                   merchant did or didn't do. Checked before required_any/
+                   required_all (which default to "trivially satisfied" when
+                   empty and would otherwise resolve to "fight" — the
+                   opposite of what this represents). Distinct from asking
+                   for evidence and getting none: this is "don't ask," not
+                   "asked and found nothing."
     """
     required_any:  Set[str] = field(default_factory=set)
     required_all:  Set[str] = field(default_factory=set)
     disqualifying: Set[str] = field(default_factory=set)
+    always_refund: bool = False
     fight_reason:  str = ""
     refund_reason: str = ""
 
@@ -172,6 +183,23 @@ RULES: Dict[Tuple[str, str], DecisionRule] = {
         fight_reason="Records show only a single valid charge — the duplicate-transaction claim doesn't hold.",
         refund_reason="No proof on file that only one valid transaction occurred — a U002 claim cannot be rebutted without evidence the customer wasn't actually charged twice.",
     ),
+    ("RuPay", "U010"): DecisionRule(
+        # U010 is "Technical error / system failure" (merchant_db.NPCI_REASON_CODES).
+        # Per chargeback-encyclopedia/07_RuPay/NPCI_U010.md's own definition:
+        # "no party acted incorrectly — the failure is in the technology
+        # stack" and "the bank or PSP whose system failed bears the
+        # liability, not the customer [or merchant]." No evidence tag in
+        # this project's vocabulary bears on a technical failure the
+        # merchant wasn't party to, so this is always_refund rather than an
+        # evidence requirement — without this entry, U010 fell through to
+        # chargeback_agent.py's LLM fallback for both evidence-gathering and
+        # the fight/refund call, which proved unreliable in practice
+        # (observed asking for "refund transaction ID" — evidence that
+        # belongs to a different code, U009 "merchant not providing refund"
+        # — in roughly 2 of 3 identical live runs).
+        always_refund=True,
+        refund_reason="U010 is a technical/system failure — NPCI attributes liability to the bank or PSP whose system failed, not the merchant. No evidence the merchant can supply changes that; the customer should be made whole via auto-reversal or manual credit.",
+    ),
 }
 
 
@@ -212,6 +240,9 @@ def decide(
     rule = RULES.get(lookup_key)
     if rule is None:
         return None
+
+    if rule.always_refund:
+        return "refund", rule.refund_reason
 
     present = set(evidence_present)
 
