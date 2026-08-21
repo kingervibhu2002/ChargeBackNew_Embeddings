@@ -101,7 +101,7 @@ _DISPUTE_INCIDENT_TERMS = [
     "fraud", "unauthorized", "not received", "item not received",
     "never received", "bank reversed", "reversed my", "funds reversed",
     "settlement", "representment", "i got a", "i received a",
-    "they filed", "customer filed", "reason code", "notification",
+    "they filed", "customer filed",
     # Note: "visa 1", "mastercard 4", "amex c", "rupay u" were removed here
     # deliberately — they were meant to catch genuine code mentions like
     # "Visa 13.1", but as loose substrings they also matched innocent phrases
@@ -110,11 +110,36 @@ _DISPUTE_INCIDENT_TERMS = [
     # gathering flow. They were redundant anyway: extract_network_and_code()
     # below already catches every genuine code mention with an actual
     # decimal/digit-format regex, which these loose substrings can't validate.
+    #
+    # Same reasoning applies to "reason code" and "notification", removed
+    # for the same fix: both are neutral domain vocabulary that appears
+    # equally in informational lookups ("Visa reason code 13.2", "what's on
+    # a chargeback notification") as in genuine incident reports — neither
+    # implies an active dispute on its own. Confirmed live: "Visa reason
+    # code 13.2" (no incident language, no question phrasing) matched
+    # "reason code" here and got routed into the full dispute pipeline,
+    # which then fabricated a complete evidence checklist and rebuttal
+    # letter for a plain informational query.
     # Hinglish
     "paise nahi aaye", "paisa nahi aaya", "nahi mili raqam",
     "amount nahi aaya", "mera paisa", "meri payment", "bank ne wapas",
     "chargeback aaya", "dispute aaya",
 ]
+
+# A bare "[network] [reason code] [code]" mention with nothing else —
+# "Visa reason code 13.2", "Visa 13.2", "MC 4870", "RuPay U010" — reads as
+# a search-engine-style topic lookup (the natural way to type a Q&A query
+# without a "what is" prefix), not as someone describing an active dispute.
+# Anchored to the whole (stripped) query — a genuine incident description
+# that happens to name a code ("I received a Visa 13.1 chargeback") has
+# other words around it and won't match, so it's unaffected and still
+# falls through to has_dispute_incident / the code-presence check below.
+_BARE_CODE_MENTION_RE = re.compile(
+    r'^(visa|mastercard|mc|amex|american express|rupay)\s*'
+    r'(reason\s*code)?\s*(is)?\s*'
+    r'([\d.]+|[a-z]{1,2}\d{2,3}|u\d{3})\s*[?.]?$',
+    re.IGNORECASE
+)
 
 
 def classify_query_type(query: str) -> str:
@@ -171,11 +196,25 @@ def classify_query_type(query: str) -> str:
     if has_dispute_incident:
         return "dispute"
 
-    # A recognisable chargeback reason code is strong enough on its own —
-    # covers correction messages ("my bad it must be 4870"), bare-code retries
-    # ("MC 4870"), and any phrasing where no incident keyword appears but the
-    # specific code is present. extract_network_and_code already applies the
-    # Mastercard allow-list, so arbitrary 4-digit amounts won't match.
+    # A bare mention of just "[network] [reason code] [code]" — nothing
+    # else in the query — reads as a topic lookup, not an incident report.
+    # Checked before the code-presence fallback right below, which would
+    # otherwise treat ANY bare code mention as a dispute purely because a
+    # valid code pattern is present, regardless of whether the query has
+    # any other word implying an actual incident. Confirmed live without
+    # this: "Visa reason code 13.2" — a plain informational query — was
+    # classified "dispute" and the full pipeline fabricated a complete
+    # evidence checklist and rebuttal letter for it.
+    if _BARE_CODE_MENTION_RE.match(q):
+        return "question"
+
+    # A recognisable chargeback reason code elsewhere in otherwise-unmatched
+    # text is strong enough on its own to imply dispute intent — covers
+    # phrasing where no incident keyword from _DISPUTE_INCIDENT_TERMS
+    # appears but the specific code is present (e.g. a code embedded in a
+    # longer sentence that doesn't match the bare-mention pattern above).
+    # extract_network_and_code already applies the Mastercard allow-list,
+    # so arbitrary 4-digit amounts won't match.
     if extract_network_and_code(q)[1] != "Unknown":
         return "dispute"
 
