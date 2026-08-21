@@ -30,7 +30,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastembed import TextEmbedding
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -38,10 +38,10 @@ from pydantic import BaseModel
 
 import classifier
 import llm_provider
-from auth import DEMO_IDENTITIES, Identity, require_identity
+from auth import DEMO_IDENTITIES, Identity, require_identity, resolve_identity
 from chargeback_agent import build_dispute_agent
 from guardrails import AuditLogger, CostCircuitBreaker, RateLimiter
-from merchant_db import init_db, MERCHANTS
+from merchant_db import init_db, list_open_chargebacks, MERCHANTS
 from network_detection import DOMAIN_CANDIDATE_POOL_SIZE, detect_knowledge_domain, select_domain_chunk
 from text_to_sql import query_chargebacks
 from usermaster import get_auto_decision, set_auto_decision
@@ -554,7 +554,11 @@ def clear_documents():
 
 
 @app.post("/dispute", summary="Run the LangGraph dispute agent", response_model=DisputeResponse)
-def dispute(req: DisputeRequest, request: Request) -> DisputeResponse:
+def dispute(
+    req: DisputeRequest,
+    request: Request,
+    x_merchant_key: str = Header(default=""),
+) -> DisputeResponse:
     """
     Analyse a chargeback dispute and generate a rebuttal letter or refund advice.
 
@@ -570,12 +574,24 @@ def dispute(req: DisputeRequest, request: Request) -> DisputeResponse:
         Pass the same original query plus the merchant's reply. The agent
         skips asking again and returns the final letter or advice.
 
+    Authentication is OPTIONAL here, unlike /query — the Q&A tab also calls
+    this endpoint (for general knowledge-base questions) and must stay
+    usable with no login at all. Pass X-Merchant-Key to unlock case-specific
+    grounding: chargeback_agent.py's planner node already knows how to look
+    up a real chargeback (by UTR or case ID mentioned in the query) scoped
+    to the caller's own merchant_id and ground the answer in the real row
+    instead of guessing from free text — this was previously unreachable
+    since nothing ever resolved an identity for this route. An absent or
+    invalid key behaves exactly as before this existed: merchant_id="",
+    same as always.
+
     Requires an LLM provider to be configured — see llm_provider.py
     (LLM_PROVIDER=groq, default, + GROQ_API_KEY; or LLM_PROVIDER=openai +
     OPENAI_API_KEY).
 
     Args:
         req (DisputeRequest): JSON body with query and optional additional_context.
+        x_merchant_key (str): Optional caller identity — see above.
 
     Returns:
         DisputeResponse: Result containing the final answer, decision, reason code,
@@ -608,8 +624,14 @@ def dispute(req: DisputeRequest, request: Request) -> DisputeResponse:
     user_id    = request.client.host if request.client else "unknown"
     start_time = time.time()
 
+    # Optional identity — resolve_identity() returns None for a missing or
+    # invalid key rather than raising, unlike require_identity(), so an
+    # anonymous caller (e.g. the Q&A tab) is unaffected.
+    identity    = resolve_identity(x_merchant_key) if x_merchant_key else None
+    merchant_id = identity.merchant_id if identity and identity.merchant_id else ""
+
     try:
-        result = _agent.run(req.query, req.additional_context)
+        result = _agent.run(req.query, req.additional_context, merchant_id=merchant_id)
 
         # Record LLM calls made (~7 per full dispute run, 1 for rejected queries)
         calls_made = 1 if not result.get("is_valid_query") else 7
@@ -653,6 +675,43 @@ def dispute(req: DisputeRequest, request: Request) -> DisputeResponse:
                 ),
             ) from exc
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+class OpenChargebackSummary(BaseModel):
+    case_id:            str
+    utr:                str
+    reason_code:        str
+    reason_description: str
+    chargeback_amount:  float
+    response_deadline:  str
+
+
+class OpenChargebacksResponse(BaseModel):
+    total_open: int                          # total Open count, not just what's returned below
+    cases:      List[OpenChargebackSummary]
+
+
+@app.get("/my-open-chargebacks", summary="List the caller's own open chargebacks",
+         response_model=OpenChargebacksResponse)
+def my_open_chargebacks(identity: Identity = Depends(require_identity)) -> OpenChargebacksResponse:
+    """
+    Merchant-only. Powers the Dispute Assistant tab's case-picker: lets a
+    logged-in merchant reference one of their real open chargebacks instead
+    of needing to know its exact UTR/case ID, and see an at-a-glance count
+    of what's outstanding. Same merchant-only pattern as /auto-decision —
+    admins don't have a single merchant's cases to list.
+    """
+    if identity.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Open-chargeback listing is merchant-only.",
+        )
+    rows = list_open_chargebacks(identity.merchant_id, limit=10)
+    total_open = len(list_open_chargebacks(identity.merchant_id, limit=10_000))
+    return OpenChargebacksResponse(
+        total_open=total_open,
+        cases=[OpenChargebackSummary(**r) for r in rows],
+    )
 
 
 # ---------------------------------------------------------------------------

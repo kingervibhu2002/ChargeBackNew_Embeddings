@@ -135,6 +135,24 @@ def _make_llms() -> tuple:
     return llm_provider.make_llms()
 
 
+# classifier.py's extract_network_and_code() returns short canonical network
+# names ("RuPay", "Amex") — the form used everywhere else in this project
+# (state fields, decision_rules.RULES keys, evidence tag mappings). The
+# encyclopedia's frontmatter `network` field doesn't always match that
+# exactly (confirmed via `grep -h "^network:" chargeback-encyclopedia/*/*.md`):
+# RuPay docs are tagged "RuPay / NPCI" and Amex docs "American Express".
+# _planner_node's step 3 (below) filters Qdrant by exact payload match, so
+# without this translation that filter silently returns zero results for
+# every RuPay/Amex case — always falling through to fuzzier semantic search,
+# which can surface a wrong-but-adjacent reason code's document instead of
+# the actual one (e.g. a "U010" query pulling in "U009"'s evidence guidance).
+# Visa/Mastercard need no entry here — their frontmatter already matches.
+_FRONTMATTER_NETWORK_NAMES = {
+    "RuPay": "RuPay / NPCI",
+    "Amex":  "American Express",
+}
+
+
 # ---------------------------------------------------------------------------
 # DisputeAgent
 # ---------------------------------------------------------------------------
@@ -403,8 +421,9 @@ class DisputeAgent:
 
         # 3. Targeted supplemental retrieval when code is known
         if code != "Unknown" and network != "Unknown":
+            payload_network = _FRONTMATTER_NETWORK_NAMES.get(network, network)
             targeted = self._store.filter_by_payload(
-                {"network": network, "reason_code": code}, limit=3
+                {"network": payload_network, "reason_code": code}, limit=3
             )
             if not targeted:
                 focused_q = f"{network} {code} {query}"
@@ -467,15 +486,28 @@ class DisputeAgent:
                         f"Current status: {row['status']}, "
                         f"resolution: {row['resolution'] or 'not yet resolved'}."
                     )
+                    # insert(0, ...), not append(): downstream nodes only
+                    # look at the first 1-2 retrieved_docs entries
+                    # (_extract_evidence_node uses [:2], _decide_node's LLM
+                    # fallback uses [:1] — see those nodes) to keep prompts
+                    # small. This case's own DB-backed analysis is the single
+                    # most relevant thing in retrieved_docs for THIS dispute
+                    # — more so than any generic semantic-search hit — so it
+                    # must survive that truncation. Appending put it after
+                    # up to 8 generic hits from steps 2-3 above, meaning it
+                    # was silently invisible to both of those nodes: the
+                    # agent had already determined "Accept, no evidence can
+                    # help" here, but asked the merchant for evidence anyway
+                    # because neither node ever saw that determination.
                     if analysis.action:
-                        retrieved_contents.append(
+                        retrieved_contents.insert(0,
                             f"Case {row['case_id']} ({row['utr']}), reason code "
                             f"{row['reason_code']} ({row['reason_description']}): "
                             f"recommended action = {analysis.action}. {analysis.reason} "
                             f"{status_line}"
                         )
                     else:
-                        retrieved_contents.append(
+                        retrieved_contents.insert(0,
                             f"Case {row['case_id']} ({row['utr']}), reason code "
                             f"{row['reason_code']} ({row['reason_description']}): "
                             f"no automated recommendation available for this reason "

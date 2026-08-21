@@ -355,7 +355,7 @@
     document.getElementById('tabQuery').classList.toggle('active',    tab === 'query');
 
     const bar = document.getElementById('merchantBar');
-    bar.style.display = tab === 'query' ? 'flex' : 'none';
+    bar.style.display = (tab === 'query' || tab === 'dispute') ? 'flex' : 'none';
 
     const subtitles = {
       qa:      'Semantic search · Powered by Qdrant + FastEmbed',
@@ -399,11 +399,16 @@
           <h2>Dispute Assistant</h2>
           <p>Describe your chargeback. The agent will classify it, search policies,
              assess your evidence, and generate a rebuttal letter or advice.</p>
-          <div class="suggestions">
-            <span class="suggestion" onclick="ask(this)">I received a Visa chargeback for $500. Customer claims they never received the order but our tracking shows it was delivered to their address.</span>
-            <span class="suggestion" onclick="ask(this)">Mastercard chargeback — customer says the charge is fraudulent but they placed the order using our 3D Secure checkout.</span>
+          <div id="disputeWelcomeBody">
+            <div class="suggestions">
+              <span class="suggestion" onclick="ask(this)">I received a Visa chargeback for $500. Customer claims they never received the order but our tracking shows it was delivered to their address.</span>
+              <span class="suggestion" onclick="ask(this)">Mastercard chargeback — customer says the charge is fraudulent but they placed the order using our 3D Secure checkout.</span>
+            </div>
           </div>
         </div>`;
+      if (selectedMerchantId) {
+        loadOpenChargebackChips();
+      }
     } else {
       const mid = selectedMerchantId || '—';
       messagesEl.innerHTML = `
@@ -429,6 +434,52 @@
   function ask(el) {
     queryEl.value = el.textContent.trim();
     sendMessage();
+  }
+
+  // ── Dispute tab: case-picker chips for the logged-in merchant ──────────
+  // Replaces the two static example chips with one chip per real open
+  // chargeback, generated from /my-open-chargebacks. Each chip's text
+  // names the real case_id (always starts with "NPCI"), which
+  // chargeback_agent.py's planner node already recognizes via its own
+  // UTR/case-ID regex — clicking a chip goes through the exact same
+  // ask()/sendMessage() path as any other suggestion, no special-casing
+  // needed beyond generating the label text.
+  async function loadOpenChargebackChips() {
+    const body = document.getElementById('disputeWelcomeBody');
+    if (!body) return;
+    try {
+      const res = await fetch('/my-open-chargebacks', {
+        headers: { 'X-Merchant-Key': selectedMerchantKey },
+      });
+      if (!res.ok) return;   // e.g. an admin identity has no cases of its own — leave default chips
+      const data = await res.json();
+
+      // Tab may have been switched away, or a different merchant selected,
+      // while this request was in flight — don't clobber newer content.
+      if (currentTab !== 'dispute' || !document.getElementById('disputeWelcomeBody')) return;
+
+      if (!data.cases || data.cases.length === 0) {
+        body.innerHTML = `<p style="color:#888; font-size:13px; margin-bottom:8px;">No open chargebacks right now — describe a hypothetical or upcoming dispute below.</p>` + body.innerHTML;
+        return;
+      }
+
+      const dueSoon = data.cases.filter(c => {
+        const days = (new Date(c.response_deadline) - new Date()) / 86400000;
+        return days <= 7;
+      }).length;
+      const summary = `You have ${data.total_open} open chargeback${data.total_open === 1 ? '' : 's'}`
+        + (dueSoon ? ` — ${dueSoon} due within 7 days.` : '.');
+
+      const chips = data.cases.map(c => {
+        const amount = c.chargeback_amount.toLocaleString('en-IN');
+        const label  = `Help me with case ${c.case_id} — ${c.reason_code} chargeback, ₹${amount}, due ${c.response_deadline}.`;
+        return `<span class="suggestion" onclick="ask(this)">${label}</span>`;
+      }).join('');
+
+      body.innerHTML = `
+        <p style="color:#555; font-size:13px; margin-bottom:8px;">${summary}</p>
+        <div class="suggestions">${chips}</div>`;
+    } catch (e) { /* leave default example chips on any failure */ }
   }
 
   // ── Send message ─────────────────────────────────────────
@@ -547,7 +598,10 @@
 
     const res = await fetch('/dispute', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Merchant-Key': selectedMerchantKey,   // optional — server resolves merchant_id if present
+      },
       body:    JSON.stringify(body),
     });
     typing.remove();

@@ -186,6 +186,45 @@ def init_db(db_path: str = DB_PATH) -> None:
     conn.close()
 
 
+def list_open_chargebacks(
+    merchant_id: str, limit: int = 10, db_path: str = DB_PATH
+) -> list:
+    """
+    A merchant's own Open chargebacks, most urgent (soonest deadline) first.
+
+    Plain parameterized SQL rather than an LLM call — this is a fixed,
+    deterministic listing, not free-text reasoning, so it doesn't need
+    text_to_sql.py's NL→SQL path (matches this project's general pattern of
+    reserving LLM calls for genuinely open-ended tasks). Powers the Dispute
+    Assistant tab's case-picker chips and open-case summary line.
+
+    Args:
+        merchant_id: Caller's own merchant ID (server-resolved, never
+                     client-supplied — same trust boundary as text_to_sql.py).
+        limit: Max rows to return.
+        db_path: SQLite file path.
+
+    Returns:
+        list[dict]: rows with case_id, utr, reason_code, reason_description,
+                    chargeback_amount, response_deadline — ordered by
+                    response_deadline ascending.
+    """
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        """
+        SELECT case_id, utr, reason_code, reason_description,
+               chargeback_amount, response_deadline
+        FROM chargebacks
+        WHERE merchant_id = ? AND status = 'Open'
+        ORDER BY response_deadline ASC
+        LIMIT ?
+        """,
+        (merchant_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 if __name__ == "__main__":
     if Path(DB_PATH).exists():
         Path(DB_PATH).unlink()
