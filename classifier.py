@@ -80,6 +80,15 @@ _QUESTION_PAYMENT_TERMS = [
     "issuer", "timelines", "timeline", "evidence", "rebuttal",
     "pre-arbitration", "arbitration", "process", "procedure", "policy",
     "fight", "refund", "code",
+    # Also present in _DISPUTE_INCIDENT_TERMS below — deliberately duplicated,
+    # same as "chargeback"/"dispute"/"refund" above, so a question-form query
+    # naming one of these ("What is friendly fraud?", "What is an unauthorized
+    # transaction?", "What is a settlement issue?") wins the is_question_form
+    # check below before ever reaching has_dispute_incident. Confirmed live:
+    # without these three, all three examples above were misclassified as
+    # "dispute" and routed into the full evidence-gathering pipeline instead
+    # of answer_question_node.
+    "fraud", "unauthorized", "unauthorised", "settlement",
     # Hinglish
     "chargeback kya", "kya hota hai",
 ]
