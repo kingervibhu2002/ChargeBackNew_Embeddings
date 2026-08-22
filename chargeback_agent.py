@@ -800,10 +800,16 @@ class DisputeAgent:
         Returns:
             dict: final_answer set to the follow-up question.
         """
-        question = state.get(
-            "missing_info_question",
-            "Could you provide more details about the dispute?",
-        )
+        # `or`, not `.get(key, default)`: the fallback must also cover an
+        # EMPTY string, not just a missing key. missing_info_question is
+        # always set by the upstream node (never actually absent), but its
+        # value can come from the LLM's own raw JSON output (e.g.
+        # _extract_evidence_node's evidence-gathering step) — when that
+        # field comes back blank on a given call, needs_more_info is still
+        # True, and .get(key, default) returns the stored "" rather than
+        # falling back, leaving the merchant with only the static "I need a
+        # bit more information" banner and no actual question underneath it.
+        question = state.get("missing_info_question") or "Could you provide more details about the dispute?"
         return {"final_answer": question, "needs_more_info": True}
 
     def _answer_question_node(self, state: ChargebackState) -> dict:
