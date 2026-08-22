@@ -55,9 +55,9 @@ For U010 situations, NPCI has strict auto-reversal requirements:
 - **T+1 reversal**: Any transaction in an unresolved state (debit confirmed at issuer, credit not confirmed at beneficiary) must auto-reverse by end of the next working day
 - **No customer action required**: Auto-reversal is the bank's obligation, not the customer's right to claim
 - **NPCI monitoring**: NPCI monitors unresolved transactions in its switch and initiates reversals automatically for most cases
-- **If T+1 auto-reversal fails**: Customer files formal complaint with bank → bank raises with NPCI within 3 working days → NPCI resolves within 30 days
+- **If T+1 auto-reversal fails**: Customer files formal complaint with bank → bank raises with NPCI within 3 working days → NPCI resolves within 30 days <!-- NEEDS VERIFICATION: the "3 working days to raise with NPCI via UDIR portal" and "30 days to resolve" figures both need checking against real NPCI documentation -->
 
-## What Merchants Should Do
+## Recommended Merchant Practice: What Merchants Should Do
 
 For most U010 cases, **the merchant takes no direct action** — the failure is between the bank and NPCI. However:
 
@@ -106,7 +106,7 @@ RBI mandates resolution within 30 days
 | Bank resolution mandate | 30 days from complaint |
 | RBI Ombudsman if unresolved | If bank fails to resolve in 30 days |
 
-## Merchant Prevention Strategies
+## Recommended Merchant Practice: Prevention Strategies
 
 While merchants can't prevent NPCI or bank failures, they can reduce their exposure:
 

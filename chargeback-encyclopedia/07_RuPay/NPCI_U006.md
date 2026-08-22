@@ -41,7 +41,7 @@ NPCI has strict rules for U006 situations:
 
 - **T+1 reversal**: If a transaction is in an unresolved state (debit at issuer side, no credit at merchant side), NPCI mandates automatic reversal to the customer's account by end of the next working day (T+1)
 - **No customer action required for auto-reversal**: The bank is obligated to reverse automatically; the customer does not need to file a formal dispute for this
-- **If auto-reversal fails**: Customer should file a complaint with their bank. If unresolved in 30 days, escalate to the RBI Banking Ombudsman
+- **If auto-reversal fails**: Customer should file a complaint with their bank. If unresolved in 30 days, escalate to the RBI Banking Ombudsman <!-- NEEDS VERIFICATION: same 30-day mandate flagged in 000_RuPay_NPCI_Overview.md -->
 
 ## Required Evidence
 
@@ -62,7 +62,9 @@ Since this is a system failure, evidence requirements are minimal for the custom
 | Bank resolution mandate | 5 working days from complaint |
 | RBI Ombudsman escalation | If unresolved after 30 days |
 
-## What Merchants Should Do
+<!-- NEEDS VERIFICATION: this table's "5 working days" bank-resolution figure is inconsistent with the "30 days" resolution mandate stated in 000_RuPay_NPCI_Overview.md and every other RuPay/NPCI doc in this encyclopedia (U001-U004) — this is a genuine internal inconsistency, not just an unverified claim, and needs to be resolved one way or the other against real NPCI documentation before this corpus can be trusted as internally consistent -->
+
+## Recommended Merchant Practice
 
 1. **Monitor your payment gateway dashboard** for transactions stuck in "pending" or "unknown" state — these are likely U006 candidates
 2. **Contact your PSP immediately** for any transaction showing pending for more than 4 hours; request NPCI status check

@@ -19,7 +19,7 @@ This code focuses specifically on **refund disputes**, not delivery disputes (U0
 
 NPCI mandates specific refund timelines for UPI transactions. Merchants who miss these timelines risk U009 disputes even if they eventually intended to refund.
 
-## NPCI Mandated Refund Timelines
+## Network Rules: NPCI Mandated Refund Timelines
 
 Under NPCI guidelines and RBI directives:
 
@@ -29,6 +29,8 @@ Under NPCI guidelines and RBI directives:
 | Merchant-initiated refund for cancellation | 5–7 working days |
 | Refund for returned physical goods | 7 working days from return receipt |
 | Refund for cancelled services | 5 working days from cancellation confirmation |
+
+<!-- NEEDS VERIFICATION: every figure in this table needs checking against a real NPCI/RBI source — this table is the core factual claim this entire document rests on, so it's the highest-priority verification item in this file -->
 
 Customers can file a U009 dispute with their bank if the refund is not received within these windows.
 
@@ -71,7 +73,7 @@ Customers can file a U009 dispute with their bank if the refund is not received 
 - CRM records showing no refund was agreed upon
 - Proof that goods were not returned (if return is required for refund)
 
-## How to Avoid U009 Disputes
+## Recommended Merchant Practice: How to Avoid U009 Disputes
 
 **Process refunds immediately**: As soon as a refund is agreed upon — whether through customer service, a return portal, or a cancellation — process it in your payment system the same day. A same-day or next-day refund virtually eliminates U009 risk.
 
@@ -112,7 +114,7 @@ Not necessarily — if your return policy clearly states the conditions and time
 Honor it. If a CRM record or chat transcript shows your agent promised a refund, NPCI will see that as a binding commitment. Process the refund immediately to avoid escalation to NPCI/RBI.
 
 **Q: Can I be penalized for multiple U009 disputes?**
-Yes — repeated U009 disputes against the same merchant VPA can result in your acquiring bank flagging your account, increasing reserve requirements, or potentially flagging for NPCI review. Maintain a clean dispute record.
+Yes — repeated U009 disputes against the same merchant VPA can result in your acquiring bank flagging your account, increasing reserve requirements, or potentially flagging for NPCI review. <!-- NEEDS VERIFICATION: confirm this specific consequence (reserve requirement increases) against real documentation --> Maintain a clean dispute record.
 
 ## Key Takeaways
 

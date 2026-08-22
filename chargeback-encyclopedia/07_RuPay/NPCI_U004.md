@@ -95,7 +95,7 @@ For multi-debits caused by system failures (not merchant retry configuration), N
 When auto-reversal fails:
 - Customer files a formal U004 complaint with their bank
 - Bank investigates using NPCI records
-- Bank has 30 days to resolve
+- Bank has 30 days to resolve <!-- NEEDS VERIFICATION: same 30-day mandate flagged in 000_RuPay_NPCI_Overview.md -->
 - If unresolved, customer can escalate to the RBI Banking Ombudsman
 
 ---
@@ -115,7 +115,7 @@ Even if the multi-debit is not directly your fault, proactive communication help
 
 ---
 
-## Preventing U004 Disputes
+## Recommended Merchant Practice: Preventing U004 Disputes
 
 **Configure intelligent retry logic.** Work with your PSP to implement retry logic that first checks the status of the original transaction before initiating a new request. "Check-then-retry" prevents sending duplicate payment requests on transactions that already succeeded.
 
@@ -135,7 +135,7 @@ Even if the multi-debit is not directly your fault, proactive communication help
 A: No. You received one payment and that is your legitimate revenue. The customer's bank is responsible for reversing the two excess debits. Provide evidence of your single credit received to support the bank's investigation.
 
 **Q: Our retry configuration caused the multi-debit. Are we liable for penalties beyond the refund?**
-A: NPCI can impose penalties on PSPs and merchants for technical practices that cause systemic multi-debits. Repeated U004 complaints linked to your retry configuration may trigger a review by your PSP and potentially by NPCI. Beyond refunding excess credits, work with your PSP immediately to fix the retry logic. Voluntary disclosure to your PSP — before NPCI flags the pattern — is better for your standing.
+A: NPCI can impose penalties on PSPs and merchants for technical practices that cause systemic multi-debits. <!-- NEEDS VERIFICATION: confirm this specific NPCI penalty mechanism against real documentation --> Repeated U004 complaints linked to your retry configuration may trigger a review by your PSP and potentially by NPCI. Beyond refunding excess credits, work with your PSP immediately to fix the retry logic. Voluntary disclosure to your PSP — before NPCI flags the pattern — is better for your standing.
 
 **Q: Can we fight a U004 dispute by arguing the customer initiated multiple payments themselves?**
 A: If the customer deliberately submitted multiple payment attempts and each was a new authorized transaction (different UTRs, time gaps, and customer actions for each), it may not be a U004 dispute. However, this is difficult to establish, and NPCI will look at the UTR timestamps and system logs. If multiple UTRs were generated within seconds of each other, it is system retry behavior, not deliberate customer action.

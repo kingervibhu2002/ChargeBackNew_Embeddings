@@ -40,8 +40,8 @@ This overview addresses both RuPay card disputes and UPI transaction disputes, a
 NPCI functions as both the network operator and the dispute arbitrator for transactions on its rails — similar in some ways to American Express's closed-loop structure. Unlike Visa and Mastercard, which set rules that member banks implement, NPCI directly mandates dispute resolution timelines and processes that all participating banks must follow.
 
 **Banks are obligated to:**
-- Resolve disputes within **30 days** of the complaint being filed
-- Process auto-reversals within **T+0 or T+1** (same day or next business day) for failed transactions that meet auto-reversal criteria
+- Resolve disputes within **30 days** of the complaint being filed <!-- NEEDS VERIFICATION: confirm this 30-day resolution mandate against an actual NPCI circular/RBI notification; this figure recurs throughout this document and the U00x docs, so an error here propagates widely -->
+- Process auto-reversals within **T+0 or T+1** (same day or next business day) for failed transactions that meet auto-reversal criteria <!-- NEEDS VERIFICATION: confirm T+0/T+1 auto-reversal mandate against real NPCI documentation -->
 - Report unresolved disputes to NPCI through the NPCI dispute management system
 
 Merchants are less directly involved in NPCI's dispute framework than in Visa/Mastercard disputes. In most NPCI dispute scenarios, the dispute is between the customer's bank (issuing bank) and the merchant's bank (acquiring bank), with NPCI arbitrating. The merchant's role is primarily to provide settlement records, transaction confirmation, or delivery evidence to their bank.
@@ -66,7 +66,7 @@ Not every customer complaint about a Google Pay, PhonePe, or other UPI app payme
 
 ## Merchant Response Window
 
-For RuPay card disputes that reach the merchant acquiring bank, merchants typically have **30 days** to respond — consistent with NPCI's broader 30-day resolution mandate for banks. However, acquirers may impose tighter internal deadlines.
+For RuPay card disputes that reach the merchant acquiring bank, merchants typically have **30 days** to respond — consistent with NPCI's broader 30-day resolution mandate for banks. <!-- NEEDS VERIFICATION: same 30-day figure as above; confirm this is the actual merchant-facing response window and not just an inference from the bank-to-bank resolution mandate --> However, acquirers may impose tighter internal deadlines.
 
 For UPI disputes (U001–U010), the dispute mechanism is primarily bank-to-bank via NPCI's chargeback/dispute system. Merchants are usually involved only if the dispute reaches the stage where the acquiring bank needs evidence of the transaction (delivery confirmation, service records, or settlement data).
 
@@ -118,7 +118,7 @@ Understanding these differences is critical for merchants operating in India alo
 
 **4. Fraud disputes have different authentication.** UPI transactions are authenticated by a 6-digit UPI PIN known only to the customer. When fraud occurs on UPI (U001, U005), it typically involves social engineering — criminals trick customers into sharing OTPs or UPI PINs, or into approving collect requests. This is different from CNP card fraud where card data is compromised without the customer's involvement.
 
-**5. NPCI dispute timelines are shorter.** The 30-day overall resolution mandate (from complaint to resolution) is more aggressive than Visa/Mastercard's multi-round process that can extend 4–6 months including arbitration.
+**5. NPCI dispute timelines are shorter.** The 30-day overall resolution mandate (from complaint to resolution) is more aggressive than Visa/Mastercard's multi-round process that can extend 4–6 months including arbitration. <!-- NEEDS VERIFICATION: the "4-6 months" Visa/Mastercard comparison figure specifically — confirm against this encyclopedia's own Visa/Mastercard lifecycle docs rather than assuming it's consistent -->
 
 ---
 
@@ -154,15 +154,19 @@ A UTR proves a payment happened. It proves nothing about whether the merchant di
 
 ---
 
-## Merchant Obligations Under the NPCI Framework
+## Network Rules: Merchant Obligations Under the NPCI Framework
 
 Merchants processing UPI and RuPay payments have specific obligations:
 
 - **Accept payments and issue acknowledgment**: Every successful payment must be acknowledged with a receipt or order confirmation
-- **Process refunds within NPCI timelines**: For UPI, refunds should be processed within 5–7 business days of the refund request
-- **Maintain transaction records**: Transaction logs must be retained for at least 6 months (and practically for 18–24 months to respond to late disputes)
+- **Process refunds within NPCI timelines**: For UPI, refunds should be processed within 5–7 business days of the refund request <!-- NEEDS VERIFICATION: confirm this 5-7 day figure against real NPCI documentation — it's a different, more specific window than the 30-day figure used elsewhere in this document, so it needs its own check rather than being assumed consistent -->
+- **Maintain transaction records**: Transaction logs must be retained for at least 6 months <!-- NEEDS VERIFICATION: confirm this minimum retention period against real NPCI/RBI documentation -->
 - **Cooperate with bank disputes**: When an acquiring bank requests transaction evidence to respond to an NPCI dispute, provide it within the requested timeframe
 - **Display refund policies**: Refund and return policies must be accessible to customers at point of sale or on the merchant website
+
+## Recommended Merchant Practice
+
+- **Retain records longer than the minimum**: Even though the mandated minimum is 6 months, keep transaction logs for 18–24 months in practice — late-filed disputes and escalations can surface well after the regulatory minimum window closes, and having the record on hand is far easier than trying to reconstruct it after the fact.
 
 ---
 
@@ -187,4 +191,4 @@ A: A RuPay chargeback follows a card-network dispute process similar to (but sim
 A: NPCI does track merchant dispute rates and works with acquiring banks to address merchants with elevated dispute or fraud activity. High-risk merchants may face additional compliance requirements, increased settlement reserves, or termination of payment acceptance privileges.
 
 **Q: Are UPI transactions covered by the same consumer protection as card transactions?**
-A: Yes — RBI regulations provide consumer protection for UPI transactions equivalent to card transactions. Banks are obligated to resolve disputes, process auto-reversals, and compensate customers for bank-error disputes. The regulatory framework may vary slightly from the network-rule framework of Visa/Mastercard, but the consumer protection outcomes are broadly similar.
+A: Yes — RBI regulations provide consumer protection for UPI transactions equivalent to card transactions. Banks are obligated to resolve disputes, process auto-reversals, and compensate customers for bank-error disputes. The regulatory framework may vary slightly from the network-rule framework of Visa/Mastercard, but the consumer protection outcomes are broadly similar. <!-- NEEDS VERIFICATION: this is a cross-network equivalence claim ("equivalent to card transactions") — exactly the kind of assertion that should be checked against an actual RBI notification rather than treated as established fact -->

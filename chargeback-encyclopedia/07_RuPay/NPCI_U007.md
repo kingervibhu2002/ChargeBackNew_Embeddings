@@ -59,7 +59,7 @@ Unlike U003 (technical failure) or U005 (fraud), U007 is typically an operationa
 
 ## Resolution Process
 
-1. Customer reports U007 to their bank within 30 days of transaction
+1. Customer reports U007 to their bank within 30 days of transaction <!-- NEEDS VERIFICATION: same 30-day mandate flagged in 000_RuPay_NPCI_Overview.md; recurs 2 more times below in this same file -->
 2. Bank raises with NPCI; NPCI queries the merchant's PSP/acquiring bank
 3. Merchant receives notification and must respond within 30 days
 4. If merchant error confirmed: merchant must refund the difference (excess amount charged)
@@ -74,7 +74,7 @@ Unlike U003 (technical failure) or U005 (fraud), U007 is typically an operationa
 - Provide the order details (items, prices, total) to prove correct amount
 - If you made an error, refund the difference immediately — this resolves the dispute before NPCI escalation
 
-## Preventing U007
+## Recommended Merchant Practice: Preventing U007
 
 - Always use **dynamic QR codes** that generate a new QR for each transaction with the exact order amount (not static QR codes with fixed amounts)
 - Build **amount confirmation screens** in your checkout flow before sending the collect request
@@ -90,6 +90,8 @@ Unlike U003 (technical failure) or U005 (fraud), U007 is typically an operationa
 | Merchant response window | 30 days from NPCI notification |
 | Bank resolution mandate | 30 days from complaint |
 | Refund for merchant error | 5-7 working days after confirmation |
+
+<!-- NEEDS VERIFICATION: confirm this 5-7 working day refund figure against real documentation -->
 
 ## FAQs
 

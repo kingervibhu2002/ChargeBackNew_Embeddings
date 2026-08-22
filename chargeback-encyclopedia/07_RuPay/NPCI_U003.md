@@ -45,7 +45,7 @@ In all of these cases, the customer's bank has already debited the account. NPCI
 
 ## NPCI's T+0 Settlement Mandate
 
-One of NPCI's most important rules for UPI is the **T+0 settlement mandate** — UPI transactions should settle to the merchant's account on the same day as the transaction. This near-real-time settlement is one of UPI's core advantages over older NEFT-based payment systems.
+One of NPCI's most important rules for UPI is the **T+0 settlement mandate** — UPI transactions should settle to the merchant's account on the same day as the transaction. <!-- NEEDS VERIFICATION: confirm the T+0 settlement mandate against real NPCI documentation --> This near-real-time settlement is one of UPI's core advantages over older NEFT-based payment systems.
 
 However, T+0 settlement assumes all system components are functioning correctly. Network outages, PSP failures, bank core banking system maintenance windows, and high-volume periods (festival seasons, year-end) can cause settlement delays that trigger U003 complaints.
 
@@ -103,17 +103,17 @@ U003 is frequently confused with other codes. The distinctions matter for unders
 
 Under NPCI's framework, when a customer files a U003 complaint:
 
-1. The customer's bank acknowledges the complaint within 24 hours
+1. The customer's bank acknowledges the complaint within 24 hours <!-- NEEDS VERIFICATION: confirm this 24-hour acknowledgment SLA against real NPCI/bank documentation -->
 2. The bank investigates the settlement chain using the UTR and NPCI transaction records
 3. If the credit can be confirmed as pending (stuck in the system), the bank coordinates with NPCI and the merchant's bank to release the pending credit
-4. If the credit cannot be confirmed (transaction genuinely failed), the bank initiates an auto-reversal to the customer within 30 days
+4. If the credit cannot be confirmed (transaction genuinely failed), the bank initiates an auto-reversal to the customer within 30 days <!-- NEEDS VERIFICATION: same 30-day mandate flagged in 000_RuPay_NPCI_Overview.md -->
 5. The merchant's bank simultaneously confirms with the merchant whether the credit was received
 
 The merchant is not expected to initiate or manage this process — it is a bank-level investigation. However, the merchant's prompt response when their bank requests information significantly accelerates resolution.
 
 ---
 
-## What Merchants Should Do Operationally When a U003 Occurs
+## Recommended Merchant Practice: Operational Response to a U003
 
 **For the customer:** Do not dispatch goods for an order flagged as payment-pending due to a U003. The payment has not been confirmed. Contact the customer, explain the situation, and advise them to check with their bank. Do not assume the payment will eventually arrive.
 

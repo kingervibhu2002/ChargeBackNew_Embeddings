@@ -79,7 +79,9 @@ Under U008, **the merchant is the primary liable party** if delivery cannot be p
 | Refund if delivery unproven | Within 5-7 working days of resolution |
 | RBI Ombudsman escalation | If unresolved after 30 days |
 
-## Winning Strategy
+<!-- NEEDS VERIFICATION: the 30-day figures match the mandate flagged in 000_RuPay_NPCI_Overview.md, but the "7 days" (NPCI-to-bank notification) and "5-7 working days" (refund timing) figures are additional, more specific claims not covered by that flag — confirm both against real documentation -->
+
+## Recommended Merchant Practice: Winning Strategy
 
 1. **Provide complete delivery documentation** matched to the UTR/transaction: tracking number, customer address, delivery timestamp
 2. **Correlate with order records**: show the UTR matches a specific order that was fulfilled — item ordered, quantity, shipping date

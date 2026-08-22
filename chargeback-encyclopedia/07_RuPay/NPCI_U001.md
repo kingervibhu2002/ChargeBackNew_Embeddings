@@ -115,7 +115,7 @@ If a fraudulent UPI transaction funded an order and the merchant shipped goods t
 
 When multiple U001 disputes involve the same fraud pattern (same VPA, same fraud mechanism, same timeframe), NPCI wants to know. Merchants and their acquirers can report fraud patterns to NPCI through their PSP's fraud reporting mechanism. This helps NPCI identify compromised VPAs and alert other PSPs.
 
-Banks investigating U001 complaints are required to file NPCI fraud reports and coordinate with law enforcement. The RBI's cybercrime coordination cell (CERT-In) and local police cybercrime units handle UPI fraud investigations.
+Banks investigating U001 complaints are required to file NPCI fraud reports and coordinate with law enforcement. The RBI's cybercrime coordination cell (CERT-In) and local police cybercrime units handle UPI fraud investigations. <!-- NEEDS VERIFICATION: confirm CERT-In's specific role in UPI fraud investigation against real RBI/CERT-In documentation — this names a specific government body with a specific claimed function -->
 
 ---
 
@@ -131,7 +131,7 @@ A: No. If the customer approved a collect request sent by your business through 
 A: If you delivered goods or services in good faith on a properly authenticated UPI payment, and the payment was subsequently reversed due to a fraud claim, consult your acquiring bank about your recovery options. In some cases, delivery evidence supporting your position can be submitted to prevent the reversal. If the reversal occurs, your loss may be partially covered by transaction insurance if you carry it.
 
 **Q: How quickly does NPCI investigate U001 disputes?**
-A: Banks are required to resolve UPI disputes within 30 days of the complaint. For clear technical failures, resolution may be faster. For complex fraud investigations, the full 30-day window is typically used.
+A: Banks are required to resolve UPI disputes within 30 days of the complaint. <!-- NEEDS VERIFICATION: same 30-day mandate flagged in 000_RuPay_NPCI_Overview.md; verifying it once there covers this repetition too --> For clear technical failures, resolution may be faster. For complex fraud investigations, the full 30-day window is typically used.
 
 **Q: What should merchants do if they see a suspicious UPI payment pattern — many transactions from the same VPA, unusual amounts or timing?**
 A: Flag these immediately with your PSP and do not dispatch goods until you have verified the orders. Suspicious patterns may indicate a compromised account being used for mule transactions. Report the pattern to your PSP for escalation to NPCI's fraud monitoring team.

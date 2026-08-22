@@ -73,7 +73,7 @@ The merchant received payment twice and must refund the duplicate. Under NPCI ru
 - Provide the refund UTR to the acquiring bank as evidence
 - Document the refund in your order management system
 
-Retaining a duplicate UPI credit without issuing a refund is a violation of NPCI's merchant obligations and will result in a forced reversal plus potential penalties.
+Retaining a duplicate UPI credit without issuing a refund is a violation of NPCI's merchant obligations and will result in a forced reversal plus potential penalties. <!-- NEEDS VERIFICATION: confirm the specific "forced reversal plus potential penalties" consequence against real NPCI merchant-obligation documentation -->
 
 ---
 
@@ -102,7 +102,7 @@ Retaining a duplicate UPI credit without issuing a refund is a violation of NPCI
 
 For U002 disputes where the duplicate debit did not result in a duplicate credit to the merchant (Scenario A), NPCI's auto-reversal mandate applies. The customer's bank should automatically detect the duplicate debit through their reconciliation systems and initiate a reversal within T+1 (the next business day). If the auto-reversal mechanism works correctly, the customer never needs to file a formal U002 dispute — they simply see the reversal appear on their account.
 
-When auto-reversal fails, the customer files a formal complaint with their bank, triggering the NPCI dispute process. The bank then has 30 days to investigate and resolve.
+When auto-reversal fails, the customer files a formal complaint with their bank, triggering the NPCI dispute process. The bank then has 30 days to investigate and resolve. <!-- NEEDS VERIFICATION: same 30-day mandate flagged in 000_RuPay_NPCI_Overview.md -->
 
 ---
 
@@ -133,4 +133,4 @@ A: This is not a U002 — it is a legitimate two-order scenario. Provide your or
 A: Check your bank settlement statement directly. Two UTRs may have been generated but only one may have settled to your account. Reconcile your gateway report against your bank statement — the bank statement is authoritative. If both UTRs appear in your bank credits, you received two payments and must refund one.
 
 **Q: Is there a time limit for a customer to file a U002 complaint?**
-A: Customers must typically file transaction complaints within 30–90 days (depending on the bank's complaint policy). However, NPCI's broader dispute window and the Banking Ombudsman's jurisdiction extend protection for longer periods. For this reason, maintain transaction records for at least 18–24 months.
+A: Customers must typically file transaction complaints within 30–90 days (depending on the bank's complaint policy). <!-- NEEDS VERIFICATION: this 30-90 day range is wider and less specific than the 30-day figure used elsewhere in this encyclopedia's RuPay docs — confirm against real bank/NPCI complaint-window policy rather than assuming consistency --> However, NPCI's broader dispute window and the Banking Ombudsman's jurisdiction extend protection for longer periods. For this reason, maintain transaction records for at least 18–24 months.

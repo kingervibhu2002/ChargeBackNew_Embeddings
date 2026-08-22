@@ -81,6 +81,8 @@ NPCI's fraud investigation under U005 typically examines:
 | Bank resolution mandate | 30 days from complaint filing |
 | Escalation to RBI Ombudsman | If unresolved after 30 days |
 
+<!-- NEEDS VERIFICATION: every figure in this table needs checking against real NPCI documentation — the "3 days for zero-liability protection" framing in particular reads as an analogy to card-network zero-liability provisions rather than a confirmed NPCI-specific rule, and should not be treated as established fact without a source check -->
+
 ## FAQs
 
 **Q: If a fraudster used a fake QR code impersonating my business, am I liable?**
