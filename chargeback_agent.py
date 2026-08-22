@@ -165,16 +165,23 @@ class DisputeAgent:
     Reused for every /dispute request.
     """
 
-    def __init__(self, store, embed_fn: Callable[[str], list], checkpointer=None):
+    def __init__(self, store, embed_fn: Callable[[str], list], rerank_fn=None, checkpointer=None):
         """
         Args:
             store:       VectorStore instance already connected to Qdrant.
             embed_fn:    Callable (str) → list[float] that embeds text.
+            rerank_fn:   Optional callable (query: str, documents: list[str])
+                         → list[float], a cross-encoder reranker (see
+                         api_server.py's _rerank). None disables reranking —
+                         _answer_question_node falls back to plain
+                         vector-similarity selection, so this stays a
+                         backward-compatible, purely additive parameter.
             checkpointer: Optional LangGraph checkpointer (e.g. SqliteSaver) for
                           session persistence across server restarts.
         """
         self._store         = store
         self._embed         = embed_fn
+        self._rerank        = rerank_fn
         self._checkpointer  = checkpointer
         self._llm, self._fallback_llm = _make_llms()
         self._graph         = self._build_graph()
@@ -982,26 +989,38 @@ class DisputeAgent:
             # breadth via filter_by_title() and stay on the whole-doc
             # collection unchanged; only an open-ended question benefits from
             # chunk-level precision.
-            chunk_hits = self._store.search_chunks(embedding, top_k=6)
-
-            # Domain boost — chunking substantially reduced the old whole-doc
-            # dilution problem (the RuPay/NPCI overview doc's best section
-            # rose from a 0.554 whole-document score to 0.670 once split out)
-            # but didn't eliminate the need for this entirely: a generic FAQ
-            # chunk phrased as a question ("What happens if I don't
-            # respond...") can still outscore a topically-correct but more
-            # narrative chunk on question-form similarity alone, regardless
-            # of topic — confirmed for the exact query that motivated this
-            # migration (~0.80 for the generic FAQ vs 0.67 for the correct
-            # NPCI chunk). Unlike the old whole-doc title-boost, this is
-            # ranked by real cosine similarity throughout at chunk
-            # granularity, so it can't resurface the old bug of an arbitrary
-            # wrong-code chunk winning by luck — it just gives the right
-            # network's genuinely-best chunks a chance to be seen at all.
-            chunk_hits = [r for r in chunk_hits if r["score"] >= 0.65]
+            # Cross-encoder rerank when available: widen the candidate pool
+            # (cosine similarity alone is the weakest link for an open-ended
+            # question with no specific code named — a generic FAQ chunk
+            # phrased as a question can outscore a topically-correct but more
+            # narrative chunk on similarity alone, regardless of topic) and
+            # let the reranker — which jointly reads query+chunk rather than
+            # comparing independent embeddings — pick the real top 6.
+            # rerank_score is a NEW field, kept separate from `score` (raw
+            # unbounded cross-encoder logits, e.g. ~+11/-11 — not a 0-1 value
+            # comparable to cosine similarity): nothing below this block
+            # reads rerank_score, so the domain-boost/promoted/parent-doc
+            # logic that follows is completely unaffected either way.
+            # Falls back to plain top-6-by-similarity (today's behavior) if
+            # no rerank_fn was configured, or if reranking itself errors.
+            wide_candidates = self._store.search_chunks(embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE)
+            chunk_hits = None
+            if wide_candidates and self._rerank is not None:
+                try:
+                    docs   = [c["content"] for c in wide_candidates]
+                    scores = self._rerank(query, docs)
+                    for c, s in zip(wide_candidates, scores):
+                        c["rerank_score"] = s
+                    wide_candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
+                    chunk_hits = wide_candidates[:6]
+                except Exception:
+                    chunk_hits = None
+            if chunk_hits is None:
+                chunk_hits = [r for r in wide_candidates[:6] if r["score"] >= 0.65]
 
             domain = detect_knowledge_domain(query, state.get("additional_context", ""))
             promoted = None
+            parent_entry = None
             if domain:
                 domain_hits = self._store.search_chunks(
                     embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE, knowledge_domain=domain
@@ -1923,7 +1942,7 @@ class DisputeAgent:
 # Factory
 # ---------------------------------------------------------------------------
 
-def build_dispute_agent(store, embed_fn: Callable[[str], list]) -> DisputeAgent:
+def build_dispute_agent(store, embed_fn: Callable[[str], list], rerank_fn=None) -> DisputeAgent:
     """
     Create a DisputeAgent sharing the given store and embed function.
 
@@ -1931,8 +1950,13 @@ def build_dispute_agent(store, embed_fn: Callable[[str], list]) -> DisputeAgent:
     opening a second Qdrant connection (local mode allows only one).
 
     Args:
-        store:    A VectorStore already connected to Qdrant.
-        embed_fn: A callable (str) → list[float].
+        store:     A VectorStore already connected to Qdrant.
+        embed_fn:  A callable (str) → list[float].
+        rerank_fn: Optional callable (query: str, documents: list[str]) →
+                   list[float] — see DisputeAgent.__init__. Defaults to
+                   None (no reranking) so existing callers (e.g.
+                   test_qa_stress.py) that don't pass this keep working
+                   unmodified.
 
     Returns:
         DisputeAgent: Compiled and ready to process disputes.
@@ -1941,4 +1965,4 @@ def build_dispute_agent(store, embed_fn: Callable[[str], list]) -> DisputeAgent:
         ValueError: If the configured LLM provider's API key is not set
                    (see llm_provider.py).
     """
-    return DisputeAgent(store=store, embed_fn=embed_fn)
+    return DisputeAgent(store=store, embed_fn=embed_fn, rerank_fn=rerank_fn)

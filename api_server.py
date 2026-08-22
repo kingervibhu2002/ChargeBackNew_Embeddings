@@ -33,6 +33,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastembed import TextEmbedding
+from fastembed.rerank.cross_encoder import TextCrossEncoder
 from langgraph.checkpoint.sqlite import SqliteSaver
 from pydantic import BaseModel
 
@@ -65,8 +66,9 @@ def _is_llm_quota_error(exc: Exception) -> bool:
 # Initialised once at startup and reused for every incoming request.
 # ---------------------------------------------------------------------------
 
-_model: Optional[TextEmbedding] = None
-_store: Optional[VectorStore]   = None
+_model: Optional[TextEmbedding]       = None
+_reranker: Optional[TextCrossEncoder] = None
+_store: Optional[VectorStore]         = None
 _agent = None   # DisputeAgent — built in lifespan after _store and _model are ready
 
 # Guardrail singletons — shared across all requests
@@ -94,9 +96,11 @@ async def lifespan(app: FastAPI):
     Yields:
         None: Control is returned to FastAPI to start serving requests.
     """
-    global _model, _store, _agent
+    global _model, _reranker, _store, _agent
     print("Loading embedding model (BAAI/bge-small-en-v1.5)...")
     _model = TextEmbedding("BAAI/bge-small-en-v1.5")
+    print("Loading reranker model (Xenova/ms-marco-MiniLM-L-6-v2)...")
+    _reranker = TextCrossEncoder(model_name="Xenova/ms-marco-MiniLM-L-6-v2")
     _store = VectorStore(persist_path="./qdrant_data")
     print(f"Server ready. Knowledge base has {len(_store)} document(s).")
 
@@ -111,7 +115,7 @@ async def lifespan(app: FastAPI):
     # that case.
     if llm_provider.is_configured():
         try:
-            _agent = build_dispute_agent(store=_store, embed_fn=_embed)
+            _agent = build_dispute_agent(store=_store, embed_fn=_embed, rerank_fn=_rerank)
             print(f"Dispute agent (LangGraph, provider={llm_provider.get_provider_name()}) ready.")
         except Exception as exc:
             print(f"Dispute agent not available: {exc}")
@@ -275,6 +279,34 @@ def _embed(text: str) -> List[float]:
     return next(_model.embed([text])).tolist()
 
 
+def _rerank(query: str, documents: List[str]) -> List[float]:
+    """
+    Score how relevant each document is to the query using a local
+    cross-encoder (loaded at server startup, same lifecycle as _model).
+
+    Unlike cosine similarity (comparing two independent embeddings), a
+    cross-encoder reads the query and each document together, which makes
+    it a stronger — but slower — relevance signal. Used to improve chunk
+    selection specifically for open-ended questions with no confidently
+    identified reason code (see chargeback_agent.py's _answer_question_node
+    and this file's search_documents()) — the one case where cosine
+    similarity is the only ranking signal available.
+
+    Returns raw, unbounded logits (e.g. ~+11 for a strong match, ~-11 for
+    an unrelated one) — NOT a 0-1 score comparable to cosine similarity.
+    Callers must not compare this against the existing similarity
+    thresholds (>= 0.65 etc.) used elsewhere in this codebase.
+
+    Args:
+        query: The user's question.
+        documents: Candidate chunk contents to score against the query.
+
+    Returns:
+        List[float]: One relevance score per document, same order as input.
+    """
+    return list(_reranker.rerank(query, documents))
+
+
 def _doc_id(title: str) -> str:
     """
     Generate a stable, deterministic 8-character document ID from a title.
@@ -367,7 +399,7 @@ async def add_document(req: AddDocumentRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-def search_documents(store: VectorStore, embed_fn, query: str, top_k: int = 3) -> List[dict]:
+def search_documents(store: VectorStore, embed_fn, query: str, top_k: int = 3, rerank_fn=None) -> List[dict]:
     """
     Core retrieval logic for GET /search, factored out of the route handler so
     it can be called directly (in-process, no HTTP, no rate limiting) by
@@ -414,10 +446,15 @@ def search_documents(store: VectorStore, embed_fn, query: str, top_k: int = 3) -
       Below 0.65 — filtered out.
 
     Args:
-        store:    Connected VectorStore.
-        embed_fn: Callable (str) -> list[float].
-        query:    Natural-language question or search phrase.
-        top_k:    Number of results to return.
+        store:     Connected VectorStore.
+        embed_fn:  Callable (str) -> list[float].
+        query:     Natural-language question or search phrase.
+        top_k:     Number of results to return.
+        rerank_fn: Optional callable (query, documents) -> list[float] — a
+                   cross-encoder reranker (see _rerank). When given, replaces
+                   plain cosine-similarity selection for the general
+                   candidate pool with reranked order; None falls back to
+                   today's behavior unchanged.
 
     Returns:
         List[dict]: Ranked list of matching chunks with scores. Empty list
@@ -425,8 +462,27 @@ def search_documents(store: VectorStore, embed_fn, query: str, top_k: int = 3) -
                     clears the relevance threshold.
     """
     embedding = embed_fn(query)
-    results = store.search_chunks(embedding, top_k=top_k)
-    results = [r for r in results if r["score"] >= 0.65]
+
+    # Cross-encoder rerank when available — see chargeback_agent.py's
+    # _answer_question_node for the identical pattern and full reasoning
+    # (kept in sync deliberately: both this route and that node build their
+    # general candidate pool the same way, independently of each other).
+    # rerank_score is additive only; nothing below reads it, so the
+    # domain-boost logic that follows is unaffected either way.
+    wide_candidates = store.search_chunks(embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE)
+    results = None
+    if wide_candidates and rerank_fn is not None:
+        try:
+            docs   = [c["content"] for c in wide_candidates]
+            scores = rerank_fn(query, docs)
+            for c, s in zip(wide_candidates, scores):
+                c["rerank_score"] = s
+            wide_candidates.sort(key=lambda c: c["rerank_score"], reverse=True)
+            results = wide_candidates[:top_k]
+        except Exception:
+            results = None
+    if results is None:
+        results = [r for r in wide_candidates[:top_k] if r["score"] >= 0.65]
 
     domain = detect_knowledge_domain(query)
     promoted = None
@@ -499,7 +555,7 @@ async def search(query: str, top_k: int = 3):
             detail="Knowledge base is empty. POST /add some documents first."
         )
 
-    results = search_documents(_store, _embed, query, top_k=min(top_k, 10))
+    results = search_documents(_store, _embed, query, top_k=min(top_k, 10), rerank_fn=_rerank)
 
     if not results:
         raise HTTPException(
