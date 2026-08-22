@@ -235,14 +235,31 @@ def classify_query_type(query: str) -> str:
 # ---------------------------------------------------------------------------
 
 # Visa decimal codes: 10.1, 10.2, 10.3, 10.4, 12.6.1, 13.1–13.9 etc.
-_VISA_CODE_RE   = re.compile(r'\b(1[0-9]\.\d{1,2}(?:\.\d)?)\b')
+#
+# Each of these four code regexes has an optional network-name prefix
+# ("visa", "mastercard"/"mc", "amex", "rupay"/"npci") glued directly onto
+# the leading \b. A plain \b can't fire between the network name and an
+# immediately-following code with no separator ("npciu001", "visa13.1",
+# "mastercard4853") — both the last letter of the name and the first digit
+# of the code are \w characters, so there's no boundary for \b to match at
+# all, and the whole regex fails to match anywhere in the string. Confirmed
+# live: a Q&A-tab query for "npciu001" (no space) returned classify_query_type
+# "question" correctly (has_payment_topic already matches on "npci" as a
+# keyword), but extract_network_and_code() came back completely empty
+# ("Unknown", "Unknown") — so downstream domain-chunk selection had no code
+# to key off, fell through to plain semantic search, and surfaced U010
+# content instead of U001. The optional prefix lets the match start at the
+# network name itself when the two are glued together, while a normal
+# space/punctuation-separated mention ("NPCI U001", "Visa 13.1") still
+# matches exactly as before via the same \b before the code.
+_VISA_CODE_RE   = re.compile(r'\b(?:visa)?(1[0-9]\.\d{1,2}(?:\.\d)?)\b', re.IGNORECASE)
 
 # Amex alpha-numeric codes (checked before MC to avoid 4-digit collision)
-_AMEX_CODE_RE   = re.compile(r'\b(C\d{2,3}|F\d{2,3}|FR\d{1,2}|M\d{2,3})\b', re.IGNORECASE)
+_AMEX_CODE_RE   = re.compile(r'\b(?:amex)?(C\d{2,3}|F\d{2,3}|FR\d{1,2}|M\d{2,3})\b', re.IGNORECASE)
 
 # Mastercard 4-digit codes (closed allow-list to exclude Visa BINs starting with 4)
 # Sourced from chargeback-encyclopedia/05_Mastercard/ + load_chargeback_docs.py.
-_MC_CODE_RE     = re.compile(r'\b(4[0-9]{3})\b')
+_MC_CODE_RE     = re.compile(r'\b(?:mastercard|mc)?(4[0-9]{3})\b', re.IGNORECASE)
 _VALID_MC_CODES = {
     "4807", "4808", "4812", "4831", "4834", "4835", "4837", "4840", "4841",
     "4842", "4846", "4849", "4850", "4853", "4854", "4855", "4857", "4859",
@@ -250,7 +267,7 @@ _VALID_MC_CODES = {
 }
 
 # RuPay / NPCI codes: U001–U010
-_RUPAY_CODE_RE  = re.compile(r'\b(U\d{3})\b', re.IGNORECASE)
+_RUPAY_CODE_RE  = re.compile(r'\b(?:rupay|npci)?(U\d{3})\b', re.IGNORECASE)
 
 # "mc" is a common Mastercard abbreviation but too short to substring-match
 # safely (would false-positive inside unrelated words), so it gets its own
