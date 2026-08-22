@@ -339,6 +339,51 @@ class VectorStore:
             for hit in result.points
         ]
 
+    def get_document_by_id(self, doc_id: str) -> Optional[Dict]:
+        """
+        Direct point-ID lookup of one whole document — not a similarity
+        search. Used for parent-document retrieval: once a chunk-level
+        search confidently identifies which document a query is about
+        (see chargeback_agent.py's _answer_question_node), this fetches
+        that document's full content instead of relying on the matched
+        chunk plus a small radius of neighbors.
+
+        A chunk's `document_id` payload field and its parent's `doc_id`
+        field are the same value — both add_document() and add_chunk()
+        derive it identically via the same _doc_id(title) hash (see
+        rag_server.py / load_encyclopedia.py) — so this can be called
+        directly with a chunk's `document_id`.
+
+        Args:
+            doc_id (str): The document's stable ID (matches a chunk's
+                          `document_id` field).
+
+        Returns:
+            Optional[Dict]: Same shape as search()'s results (id, title,
+                            content, summary, knowledge_domain, network,
+                            reason_code), or None if not found.
+        """
+        try:
+            points = self.client.retrieve(
+                collection_name=_COLLECTION,
+                ids=[self._str_id_to_int(doc_id)],
+                with_payload=True,
+            )
+        except Exception:
+            return None
+        if not points:
+            return None
+        payload = points[0].payload
+        return {
+            "id":               payload["doc_id"],
+            "title":            payload["title"],
+            "content":          payload["content"],
+            "summary":          payload.get("summary", ""),
+            "knowledge_domain": payload.get("knowledge_domain", ""),
+            "network":          payload.get("network", ""),
+            "reason_code":      payload.get("reason_code", ""),
+        }
+
     def search_chunks(
         self, query_embedding: List[float], top_k: int = 6, knowledge_domain: Optional[str] = None
     ) -> List[Dict]:

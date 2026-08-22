@@ -1061,10 +1061,51 @@ class DisputeAgent:
                 if promoted:
                     chunk_hits = [promoted] + [r for r in chunk_hits if r["chunk_id"] != promoted["chunk_id"]]
 
+                # Parent-document retrieval: fires whenever select_domain_chunk()
+                # is confident which single document the query is about — its
+                # "strong" tier (score >= 0.65), matched against that chunk's
+                # own reason_code payload field when a code was detected.
+                # Deliberately keyed off `tier`/`best` directly rather than
+                # `promoted`: promoted only gets set when best["chunk_id"]
+                # wasn't already present in the plain (non-domain-scoped)
+                # search above — a highly relevant document routinely turns
+                # up there too, in which case `promoted` stays None even
+                # though `tier` is still "strong". Using `tier`/`best`
+                # catches that case too, since the confidence signal itself
+                # doesn't depend on which search first happened to surface it.
+                #
+                # Rather than trust one chunk (+radius-1 neighbors) to
+                # contain "enough" of the answer, fetch the whole document —
+                # removes the need for that guess entirely once the document
+                # itself is no longer in doubt. Falls through to the existing
+                # chunk+neighbor behavior if the lookup finds nothing, so
+                # this can only improve the confident case, never regress
+                # the general one.
+                if tier == "strong" and best and detected_code != "Unknown":
+                    parent_doc = self._store.get_document_by_id(best["document_id"])
+                    if parent_doc:
+                        # Drop every chunk_hits entry from this same document
+                        # (not just `best`/`promoted` specifically) — the
+                        # full document supersedes all of them, and leaving
+                        # others in would duplicate content already covered.
+                        chunk_hits = [r for r in chunk_hits if r["document_id"] != best["document_id"]]
+                        parent_entry = {
+                            "chunk_id":       f"parent:{parent_doc['id']}",
+                            "document_id":    parent_doc["id"],
+                            "document_title": parent_doc["title"],
+                            "content":        parent_doc["content"][:4000],
+                            "network":        parent_doc.get("network", ""),
+                            "reason_code":    parent_doc.get("reason_code", ""),
+                            "chunk_index":    -1,
+                            "score":          best["score"],
+                        }
+
             # Narrow expansion: pull each matched chunk's immediate document-
             # local neighbors so the LLM prompt gets a fuller section of
             # context than one isolated chunk, without pulling in the whole
             # document — small-to-big retrieval, not small-then-everything.
+            # Skipped for parent_entry (added back in below) since it
+            # already carries the whole document.
             seen_chunk_ids = {r["chunk_id"] for r in chunk_hits}
             expanded = list(chunk_hits)
             for r in chunk_hits:
@@ -1072,6 +1113,8 @@ class DisputeAgent:
                     if n["chunk_id"] not in seen_chunk_ids:
                         expanded.append(n)
                         seen_chunk_ids.add(n["chunk_id"])
+            if parent_entry:
+                expanded = [parent_entry] + expanded
             results = expanded
 
         # Deduplicate by title (encyclopedia indexed twice with different
@@ -1156,10 +1199,15 @@ class DisputeAgent:
             doc_parts = []
             for r in results:
                 network_label = r.get("network") or "general / not network-specific"
-                doc_parts.append(
-                    f"[Source: {r.get('document_title', '')} — network: {network_label}]\n"
-                    f"{r['content'][:1000]}"
-                )
+                # A parent-document entry (chunk_id prefixed "parent:") was
+                # already capped to its own, larger budget when assembled
+                # above — re-truncating it to [:1000] here would silently
+                # undo the whole point of fetching the full document instead
+                # of a chunk.
+                is_parent = r.get("chunk_id", "").startswith("parent:")
+                content   = r["content"] if is_parent else r["content"][:1000]
+                label     = "Full document" if is_parent else "Source"
+                doc_parts.append(f"[{label}: {r.get('document_title', '')} — network: {network_label}]\n{content}")
             docs_text = "\n\n".join(doc_parts)
 
         if not results:
