@@ -322,27 +322,55 @@ class DisputeAgent:
         # cap, etc.) treats a junk reply exactly like no reply at all,
         # without each needing its own check.
         raw_context = state.get("additional_context", "")
-        context = (
-            "" if classifier.is_junk_reply(raw_context, query=masked_query)
-            else raw_context
-        )
 
-        # Guard 5b — LLM backstop for whatever escapes the regex filter
-        # above. "Is this reply actually informative" is an open-ended
-        # judgment call — every adversarial round so far ("nice"/"ok"/"mad",
-        # mashed-keyboard gibberish, retyping the original query once, then
-        # retyping it multiple times) found a pattern the regex layer didn't
-        # cover yet. Rather than keep enumerating patterns by hand, ask the
-        # LLM once the cheap layer has already ruled out the obvious cases —
-        # mirrors decision_rules.py's curated-table-first, LLM-fallback-for-
-        # the-long-tail pattern. Skipped entirely when the regex layer is
-        # already confident (is_confidently_substantive) — the LLM call was
-        # observed to be flaky specifically on short, bare single-word
-        # answers like "fraud", so those bypass it rather than risk a
-        # coin-flip rejection of exactly the terse answer the follow-up
-        # question invites.
-        if context and not classifier.is_confidently_substantive(context):
-            context = self._filter_substantive_context(masked_query, context)
+        # A genuine clarifying question ("what is authorization evidence?")
+        # is neither a real answer nor junk/filler — it's a third category
+        # the checks below were never designed to recognize, and both were
+        # confirmed live to misjudge one as "not substantive" and silently
+        # discard it before _detect_clarification_node (which exists
+        # specifically to handle this case, routing to
+        # _answer_clarification_node) ever saw it — the merchant's question
+        # vanished and the flow proceeded as if no reply had been given at
+        # all. Checked first and treated as authoritative: a question is
+        # never junk, full stop, so it skips both the regex filter and the
+        # LLM backstop entirely rather than trusting either to also learn
+        # this distinction.
+        if classifier.is_clarifying_question(raw_context):
+            context = raw_context
+        else:
+            # Guard 5 — junk-reply filtering. additional_context is a
+            # merchant's follow-up answer to a question like "please share
+            # the reason code or describe what happened" — until this check
+            # existed, ANY non-empty reply (including "nice", "ok", "mad",
+            # or mashed-keyboard gibberish) satisfied every downstream "not
+            # context" routing check identically to a real answer, letting
+            # the flow proceed straight to a confident generate step
+            # grounded in nothing. Normalized to "" here, once, so every
+            # downstream node/route (_route_after_extract_code,
+            # _route_after_detect_settlement, _extract_evidence_node's
+            # one-round cap, etc.) treats a junk reply exactly like no reply
+            # at all, without each needing its own check.
+            context = (
+                "" if classifier.is_junk_reply(raw_context, query=masked_query)
+                else raw_context
+            )
+
+            # Guard 5b — LLM backstop for whatever escapes the regex filter
+            # above. "Is this reply actually informative" is an open-ended
+            # judgment call — every adversarial round so far ("nice"/"ok"/"mad",
+            # mashed-keyboard gibberish, retyping the original query once, then
+            # retyping it multiple times) found a pattern the regex layer didn't
+            # cover yet. Rather than keep enumerating patterns by hand, ask the
+            # LLM once the cheap layer has already ruled out the obvious cases —
+            # mirrors decision_rules.py's curated-table-first, LLM-fallback-for-
+            # the-long-tail pattern. Skipped entirely when the regex layer is
+            # already confident (is_confidently_substantive) — the LLM call was
+            # observed to be flaky specifically on short, bare single-word
+            # answers like "fraud", so those bypass it rather than risk a
+            # coin-flip rejection of exactly the terse answer the follow-up
+            # question invites.
+            if context and not classifier.is_confidently_substantive(context):
+                context = self._filter_substantive_context(masked_query, context)
 
         # Anaphoric follow-up fallback: a bare reference ("Are all of those
         # covered?", "What's the difference between those two?") carries no
@@ -627,21 +655,16 @@ class DisputeAgent:
         If yes, _answer_clarification_node answers it.
         If no, _extract_evidence_node extracts evidence tags.
 
+        Delegates to classifier.is_clarifying_question() — the same check
+        _validate_node uses to exempt a genuine clarifying question from
+        the junk-reply/substantive-context filters, so the two can't drift
+        on what counts as "the merchant is asking a question."
+
         Reads:  additional_context
         Writes: merchant_is_asking_question
         """
-        context  = state.get("additional_context", "")
-        segments = [s.strip() for s in context.split("\n\n") if s.strip()]
-        latest   = segments[-1] if segments else context
-
-        is_question = bool(latest) and (
-            latest.strip().endswith("?")
-            or any(latest.lower().strip().startswith(w) for w in [
-                "how", "where", "what", "why", "which", "can i", "do i",
-                "is there", "who",
-            ])
-        )
-        return {"merchant_is_asking_question": is_question}
+        context = state.get("additional_context", "")
+        return {"merchant_is_asking_question": classifier.is_clarifying_question(context)}
 
     def _answer_clarification_node(self, state: ChargebackState) -> dict:
         """

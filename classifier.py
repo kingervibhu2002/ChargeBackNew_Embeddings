@@ -502,3 +502,46 @@ def is_confidently_substantive(text: str) -> bool:
     stripped = re.sub(r'[^\w\s]', ' ', text).strip().lower()
     words = stripped.split()
     return len(words) == 1 and words[0] in _KNOWN_DISPUTE_WORDS
+
+
+_QUESTION_STARTER_WORDS = (
+    "how", "where", "what", "why", "which", "can i", "do i",
+    "is there", "who",
+)
+
+
+def is_clarifying_question(text: str) -> bool:
+    """
+    True if the LATEST turn in `text` (accumulated follow-up replies are
+    joined by blank lines — see is_junk_reply) reads as the merchant asking
+    a question back, rather than answering one.
+
+    Single source of truth for this heuristic — chargeback_agent.py's
+    _detect_clarification_node uses this same check to decide whether to
+    route to _answer_clarification_node, and _validate_node uses it to
+    exempt a genuine clarifying question from the junk-reply/substantive-
+    context filters below. Those filters only distinguish "real answer" vs
+    "filler/gibberish/duplicate" — a clarifying question is neither, and
+    both the regex layer and the LLM backstop were confirmed live to
+    misjudge one as "not substantive" and silently discard it before
+    _detect_clarification_node (which exists specifically to handle this
+    case) ever saw it. Keeping this check first and authoritative avoids
+    relying on the LLM to also learn a distinction it was shown not to
+    make reliably.
+
+    Args:
+        text: additional_context — may hold multiple turns joined by
+              blank lines; only the last one is checked, matching
+              _detect_clarification_node's own semantics (only the
+              merchant's most recent reply is a candidate for "this turn
+              is a question").
+
+    Returns:
+        True if the latest turn looks like a question.
+    """
+    segments = [s.strip() for s in text.split('\n\n') if s.strip()]
+    latest = segments[-1] if segments else text
+    return bool(latest) and (
+        latest.strip().endswith("?")
+        or any(latest.lower().strip().startswith(w) for w in _QUESTION_STARTER_WORDS)
+    )
