@@ -780,11 +780,29 @@ class DisputeAgent:
         if rule is not None and rule.always_refund:
             needs_more_info = False
 
+        # The LLM authors missing_info_question freely regardless of
+        # whether a deterministic rule matched — observed live (RuPay U005,
+        # no rule at the time) coming back completely blank on some calls
+        # despite needs_more_info correctly being True, leaving the
+        # merchant with only _ask_user_node's generic "could you provide
+        # more details" fallback instead of anything specific. When a rule
+        # matched and evidence_missing is already known deterministically
+        # (not derived from the LLM), build the question from that instead
+        # of trusting the LLM to also freely author good text for the same
+        # information a second time. Only steps in when the LLM's own text
+        # is empty — its phrasing is usually fine when present, this is a
+        # backstop for when it isn't, not a replacement for it.
+        missing_info_question = data.get("missing_info_question", "") if needs_more_info else ""
+        if needs_more_info and not missing_info_question and rule is not None and evidence_missing:
+            missing_info_question = (
+                "Please provide: " + ", ".join(humanize_evidence(evidence_missing)) + "."
+            )
+
         return {
             "evidence_present":      evidence_present,
             "evidence_missing":      evidence_missing,
             "needs_more_info":       needs_more_info,
-            "missing_info_question": data.get("missing_info_question",  "") if needs_more_info else "",
+            "missing_info_question": missing_info_question,
         }
 
     def _ask_user_node(self, state: ChargebackState) -> dict:

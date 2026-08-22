@@ -167,9 +167,32 @@ RULES: Dict[Tuple[str, str], DecisionRule] = {
         refund_reason="No authentication evidence on file — card-not-present fraud claims are very difficult to rebut without it.",
     ),
     ("RuPay", "U001"): DecisionRule(
-        required_any={"client_acknowledgement", "cardholder_communication"},
-        fight_reason="Customer acknowledgement or communication confirming the goods/service matched what was offered supports fighting.",
-        refund_reason="No documentation showing the goods/service matched the description — hard to win without it.",
+        # U001 is "Transaction Not Done by Customer (Fraud)" — pure
+        # unauthorized access (OTP vishing, SIM swap, screen-share fraud);
+        # the customer had ZERO involvement in the transaction itself. Per
+        # chargeback-encyclopedia/07_RuPay/NPCI_U001.md: a correctly
+        # PIN-authenticated UPI transaction is "presumptively authorized"
+        # under NPCI's framework, shifting liability to the bank/PSP to
+        # investigate how the PIN was compromised — the merchant is
+        # "generally not liable" once authentication is confirmed. The
+        # document's own worked FAQ example also treats delivery to the
+        # customer's own registered address as evidence undermining the
+        # fraud claim (a fraudster would ship elsewhere).
+        #
+        # Previously required client_acknowledgement/cardholder_communication
+        # — evidence for a "goods matched what was offered" dispute, a
+        # completely different claim type unrelated to what this code's
+        # actual merchant defense depends on. That mismatch meant a real
+        # U001 case could never be correctly resolved by this rule at all
+        # (the merchant's real evidence, e.g. authentication status, had no
+        # matching tag), silently falling through to free-form LLM
+        # reasoning every time.
+        required_any={
+            "upi_pin_authenticated", "delivery_confirmation",
+            "tracking_number", "signature_confirmation",
+        },
+        fight_reason="The UPI PIN was correctly verified — under NPCI's framework a properly authenticated transaction is presumptively authorized, shifting liability to the bank/PSP to investigate how the PIN was compromised. Delivery to the customer's own registered address further undermines the fraud claim.",
+        refund_reason="No authentication or delivery evidence on file — without confirmation the UPI PIN was verified, or that goods reached the customer's own registered address, a U001 fraud claim is very difficult to rebut.",
     ),
     ("RuPay", "U002"): DecisionRule(
         # U002 is "Duplicate transaction" (see merchant_db.NPCI_REASON_CODES) —
@@ -182,6 +205,30 @@ RULES: Dict[Tuple[str, str], DecisionRule] = {
         disqualifying={"refund_already_issued"},
         fight_reason="Records show only a single valid charge — the duplicate-transaction claim doesn't hold.",
         refund_reason="No proof on file that only one valid transaction occurred — a U002 claim cannot be rebutted without evidence the customer wasn't actually charged twice.",
+    ),
+    ("RuPay", "U005"): DecisionRule(
+        # U005 is NPCI's broad fraud classification for cases where the
+        # customer DID initiate/approve the payment but was deceived by a
+        # third party (fake merchant QR code, marketplace impersonation,
+        # collect-request scam) — distinct from U001's zero-involvement
+        # fraud (see that rule's comment). Per
+        # chargeback-encyclopedia/07_RuPay/NPCI_U005.md: liability is low
+        # for a "legitimate merchant" when the receiving VPA is confirmed
+        # KYC-compliant and goods/services were actually delivered — NPCI's
+        # investigation centers on beneficiary VPA ownership.
+        #
+        # Deliberately NOT modeled on Visa 10.4/Mastercard 4837/Amex F29's
+        # avs_match/cvv_match/three_ds_authentication tags — those are
+        # card-network authentication concepts that don't exist in UPI at
+        # all. The LLM fallback path was observed live suggesting exactly
+        # those tags for a U005 case (fabricating card-scheme evidence for
+        # a UPI dispute) before this rule existed.
+        required_any={
+            "beneficiary_vpa_confirmed", "merchant_kyc_verified",
+            "delivery_confirmation", "service_completion_record",
+        },
+        fight_reason="The receiving VPA is confirmed to belong to a genuine, KYC-compliant merchant and the order was fulfilled — NPCI's U005 investigation centers on beneficiary VPA legitimacy, and liability for a fraudster's impersonation doesn't typically fall on the real merchant who actually delivered.",
+        refund_reason="No proof on file that the beneficiary VPA belongs to this registered merchant, or that the order was fulfilled — without it, a U005 claim (which centers on VPA/beneficiary legitimacy) is difficult to rebut.",
     ),
     ("RuPay", "U010"): DecisionRule(
         # U010 is "Technical error / system failure" (merchant_db.NPCI_REASON_CODES).

@@ -184,11 +184,46 @@ def test_amex_f29_refund_without_auth() -> bool:
     )
 
 
-def test_rupay_u001_fight_with_acknowledgement() -> bool:
+def test_rupay_u001_fight_with_authentication() -> bool:
+    # U001 = pure unauthorized-access fraud (customer had zero involvement).
+    # Evidence corrected to match its real merchant defense (UPI PIN
+    # authentication status / delivery to the customer's own registered
+    # address) — cardholder_communication was never the right tag for this
+    # code (that's evidence for a "goods didn't match description" claim).
+    result = decide("RuPay", "U001", ["upi_pin_authenticated"], [])
+    return _check(
+        "RuPay U001 + UPI PIN authenticated → fight",
+        result is not None and result[0] == "fight",
+        detail=str(result),
+    )
+
+
+def test_rupay_u001_refund_without_authentication() -> bool:
     result = decide("RuPay", "U001", ["cardholder_communication"], [])
     return _check(
-        "RuPay U001 + cardholder communication → fight",
+        "RuPay U001 + irrelevant evidence (cardholder_communication) → refund",
+        result is not None and result[0] == "refund",
+        detail=str(result),
+    )
+
+
+def test_rupay_u005_fight_with_confirmed_vpa() -> bool:
+    # U005 = fraudster impersonation (customer participated, but was
+    # deceived) — evidence is UPI-specific (beneficiary VPA/KYC), never
+    # card-scheme concepts like AVS/CVV/3-D Secure, which don't exist in UPI.
+    result = decide("RuPay", "U005", ["beneficiary_vpa_confirmed"], [])
+    return _check(
+        "RuPay U005 + confirmed beneficiary VPA → fight",
         result is not None and result[0] == "fight",
+        detail=str(result),
+    )
+
+
+def test_rupay_u005_refund_without_evidence() -> bool:
+    result = decide("RuPay", "U005", [], [])
+    return _check(
+        "RuPay U005 + no evidence → refund",
+        result is not None and result[0] == "refund",
         detail=str(result),
     )
 
@@ -265,7 +300,10 @@ def main() -> None:
         test_mc_4871_refund_without_emv_data,
         test_amex_c08_fight_with_delivery,
         test_amex_f29_refund_without_auth,
-        test_rupay_u001_fight_with_acknowledgement,
+        test_rupay_u001_fight_with_authentication,
+        test_rupay_u001_refund_without_authentication,
+        test_rupay_u005_fight_with_confirmed_vpa,
+        test_rupay_u005_refund_without_evidence,
         test_rupay_u002_disqualified_by_refund,
         test_unmapped_code_returns_none,
         test_unmapped_network_returns_none,

@@ -36,6 +36,9 @@ EvidenceTag = Literal[
     "cardholder_communication",
     "duplicate_charge_proof",
     "single_credit_confirmed",
+    "upi_pin_authenticated",
+    "beneficiary_vpa_confirmed",
+    "merchant_kyc_verified",
 ]
 
 EVIDENCE_TAG_LABELS: dict = {
@@ -60,6 +63,9 @@ EVIDENCE_TAG_LABELS: dict = {
     "cardholder_communication":         "Communication with cardholder",
     "duplicate_charge_proof":           "Proof of duplicate charge",
     "single_credit_confirmed":          "Confirmed only one credit was issued",
+    "upi_pin_authenticated":            "UPI transaction log confirms PIN was verified",
+    "beneficiary_vpa_confirmed":        "NPCI/UTR record confirms funds received into the correct merchant VPA",
+    "merchant_kyc_verified":            "Merchant registration/KYC documents (GST, NPCI onboarding)",
 }
 
 
