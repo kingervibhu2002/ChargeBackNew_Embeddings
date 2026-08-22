@@ -1,137 +1,380 @@
 ---
 title: "NPCI UPI Dispute Code U001 — Transaction Not Done by Customer (Fraud)"
-description: "Complete merchant guide to NPCI UPI dispute code U001: unauthorized UPI transactions, OTP fraud, SIM swap attacks, merchant evidence requirements, and merchant liability framework."
+description: "Reference guide to NPCI UPI dispute code U001: unauthorized-transaction dispute reasons (vishing, SIM swap, screen-sharing, collect-request fraud), merchant evidence requirements, UPI authentication, and RBI customer-liability considerations."
 category: RuPay / NPCI
 reason_code: "U001"
 chargeback_type: "Transaction Not Done by Customer — Unauthorized UPI Transaction"
-win_rate: High for merchant (liability typically with bank/PSP in authenticated transactions)
-last_updated: 2026-06-29
-tags: [NPCI, UPI, U001, fraud, unauthorized-transaction, OTP-fraud, SIM-swap, vishing, merchant-guide, India]
+last_updated: 2026-08-22
+tags: [NPCI, UPI, U001, fraud, unauthorized-transaction, OTP-fraud, SIM-swap, vishing, screen-sharing, collect-request-fraud, merchant-guide, India]
 ---
 
 # NPCI U001 — Transaction Not Done by Customer (Fraud)
 
 ## What This Dispute Code Means
 
-NPCI UPI dispute code U001 is filed when a customer reports that a UPI transaction was made without their knowledge or authorization. The customer is asserting that they did not initiate or approve the transaction and that the money that left their account was taken without their consent.
+NPCI UPI dispute code **U001 — Transaction Not Done by Customer (Fraud)** relates to a customer's claim that the disputed transaction was not initiated by them.
 
-In the UPI ecosystem, "unauthorized" typically means one of several fraud mechanisms was used to access the customer's UPI account and extract funds. Unlike card fraud where a criminal can use stolen card numbers remotely, UPI fraud almost always involves some form of social engineering — the customer is manipulated into taking an action that facilitates the fraudulent transfer.
+The important distinction is between the **reason for the dispute** and the **ultimate outcome of the dispute**.
 
----
+U001 identifies the nature of the customer's claim. It does not, by itself, establish that:
 
-## How UPI Fraud Happens: The Mechanics of U001
+* fraud definitely occurred;
+* the merchant caused the fraud;
+* the customer is liable;
+* the merchant is liable; or
+* the transaction must ultimately be reversed.
 
-Understanding UPI fraud mechanisms is essential for merchants to assess their evidence position.
+The applicable UPI dispute process, participant responsibilities, transaction records, and other relevant circumstances determine how the dispute is handled.
 
-### OTP-Based Vishing (Voice Phishing)
-
-A criminal calls the customer impersonating a bank official, NPCI employee, or government representative. The criminal claims the customer's account needs "verification," their card will expire, they won a lottery, or their account was compromised. During the call, the criminal asks the customer to:
-- Share the OTP sent to their registered mobile number
-- Enter the UPI PIN on their phone while the criminal watches via screen share
-- Approve a "collect request" sent to their UPI app (framed as a "refund" or "prize")
-
-The customer complies, the criminal completes the transfer, and the customer only realizes what happened when they see the transaction on their bank statement.
-
-### Screen Sharing Fraud
-
-The criminal convinces the customer to install a remote access application (AnyDesk, TeamViewer, Quick Support) under the guise of providing technical support. Once screen sharing is active, the criminal watches the customer's UPI app, guides them to open a UPI app, and captures the UPI PIN as the customer enters it. The criminal then executes transactions directly.
-
-### SIM Swap Fraud
-
-A criminal obtains a duplicate SIM card by bribing a mobile carrier employee or submitting fraudulent documentation at a carrier store. With the duplicate SIM, the criminal receives all OTPs sent to the customer's registered mobile number. The criminal then uses these OTPs to authorize UPI transactions or reset UPI credentials.
-
-### Collect Request Fraud
-
-UPI allows one party to send a "collect request" to another requesting payment. Criminals send collect requests framed as "refund confirmation" or "verification credit" — when the customer approves the collect request, funds are transferred to the criminal.
-
-### Malicious UPI App
-
-Fake or compromised UPI applications capture UPI PINs and transaction data. These are less common but represent a growing fraud vector.
+For a chargeback investigation, U001 should therefore be understood as an **unauthorized-transaction dispute reason**, rather than as an automatic liability determination.
 
 ---
 
-## Merchant's Position in U001 Disputes
+## UPI Fraud and Unauthorized Transactions
 
-The merchant's liability position in a U001 dispute depends critically on whether the UPI transaction was properly authenticated.
+A customer may report a UPI transaction as unauthorized for a number of reasons.
 
-**Standard UPI authentication flow:**
-1. Customer initiates payment (or approves a collect request)
-2. UPI app sends a request to the bank with the customer's VPA and amount
-3. Customer enters UPI PIN (6-digit PIN known only to the customer)
-4. Bank verifies the PIN and authorizes the transaction
-5. NPCI processes the settlement
-6. Merchant receives funds
+Examples include:
 
-**If the UPI PIN was correctly entered:** The transaction was authenticated. The PIN is the customer's personal authentication factor — similar to a bank's view of a card PIN. Under NPCI's framework, a correctly authenticated UPI transaction is presumptively authorized. The bank's obligation shifts to investigating how the PIN was compromised (through the fraud types above).
+* credentials or authentication information being compromised;
+* social-engineering attacks;
+* phishing or vishing;
+* SIM-swap or mobile-number compromise;
+* malicious or compromised applications;
+* remote-access or screen-sharing attacks; or
+* other forms of account or device compromise.
 
-**The merchant's position:** Merchants receiving funds from a properly authenticated UPI transaction are **generally not liable** for fraud disputes — they received payment through the legitimate payment infrastructure with all required authentication steps completed. The fraud liability typically sits with:
-- The customer's bank (for failing to detect unusual transaction patterns)
-- The PSP/UPI app provider (for inadequate fraud controls)
-- The customer (if they knowingly shared their PIN or approved a collect request)
+These are examples of possible fraud mechanisms. They are not separate meanings of the U001 reason code.
 
----
-
-## Evidence the Merchant Should Maintain
-
-While merchants are typically not directly liable in U001 disputes, they may be asked by their acquiring bank to provide evidence of the transaction:
-
-**Transaction log showing:**
-- UPI transaction reference number (UTR — Unique Transaction Reference)
-- Amount and timestamp
-- Customer's VPA (Virtual Payment Address) used for payment
-- Merchant's VPA
-- Authentication status (whether UPI PIN was verified successfully)
-- NPCI transaction ID
-
-**Order records:**
-- The order or service that the UPI payment corresponds to
-- Order confirmation sent to the customer
-- Delivery records (if goods were dispatched)
-- Service completion records (if services were rendered)
-
-**NPCI and PSP communication:**
-- Confirmation from your payment service provider that the transaction was processed normally
-- NPCI settlement record confirming the funds were received
+The actual mechanism involved in a particular transaction must be established from the available investigation and transaction records.
 
 ---
 
-## Merchant's Obligation When Goods Were Delivered to a Fraudster
+## OTP-Based Vishing
 
-If a fraudulent UPI transaction funded an order and the merchant shipped goods to the address provided — and the cardholder's fraud claim is valid — the merchant faces a difficult situation:
+In a vishing attack, a fraudster impersonates a bank employee, government representative, payment provider, merchant, or another trusted organization.
 
-- The UPI transaction may be reversed, debiting the merchant's settlement account
-- The shipped goods are unlikely to be recovered
-- The merchant must file a claim with their acquirer/PSP for the loss
+The customer may be persuaded to disclose information or perform actions that enable a fraudulent transaction.
 
-**Best practices to minimize this exposure:**
-- For high-value orders, verify delivery address against customer contact information
-- Implement velocity checks: multiple high-value orders from the same VPA in a short window are suspicious
-- For digital goods, implement delivery logging that can demonstrate the goods were delivered to the account associated with the VPA
-- For physical goods, use signature-required delivery for orders above a threshold
+Examples of social-engineering approaches include claims that:
+
+* an account requires verification;
+* a payment or refund needs confirmation;
+* a bank account or card is about to expire;
+* a reward or prize is available; or
+* suspicious activity has been detected on the account.
+
+The presence of an OTP or other authentication event in a transaction record does not, by itself, describe how the customer interacted with the fraudster. The investigation must consider the circumstances surrounding the transaction.
 
 ---
 
-## NPCI Fraud Reporting
+## Screen-Sharing and Remote-Access Fraud
 
-When multiple U001 disputes involve the same fraud pattern (same VPA, same fraud mechanism, same timeframe), NPCI wants to know. Merchants and their acquirers can report fraud patterns to NPCI through their PSP's fraud reporting mechanism. This helps NPCI identify compromised VPAs and alert other PSPs.
+A fraudster may persuade a customer to install or use a remote-access application while pretending to provide technical assistance.
 
-Banks investigating U001 complaints are required to file NPCI fraud reports and coordinate with law enforcement. The RBI's cybercrime coordination cell (CERT-In) and local police cybercrime units handle UPI fraud investigations. <!-- NEEDS VERIFICATION: confirm CERT-In's specific role in UPI fraud investigation against real RBI/CERT-In documentation — this names a specific government body with a specific claimed function -->
+The fraudster may then observe activity on the customer's device or manipulate the device while the customer performs actions in a banking or UPI application.
+
+Applications commonly associated with remote-access scams have included tools such as AnyDesk, TeamViewer, and other remote-support software.
+
+For a U001 investigation, the existence of a remote-access application is a possible fraud indicator, not a definition of the reason code.
+
+---
+
+## SIM-Swap Fraud
+
+In a SIM-swap attack, a fraudster obtains control of the victim's mobile number through an unauthorized SIM replacement or another form of mobile-number compromise.
+
+Depending on the authentication and account-recovery mechanisms involved, control of the mobile number may assist a fraudster in accessing accounts or receiving transaction-related communications.
+
+A SIM swap is therefore one possible mechanism behind an unauthorized-transaction complaint. It is not required for a transaction to fall under U001.
+
+---
+
+## Collect-Request Fraud
+
+UPI supports payment requests in which a payer is asked to approve a transaction.
+
+Fraudsters may attempt to manipulate customers into approving a payment request by presenting it as:
+
+* a refund;
+* a reward;
+* an account-verification transaction;
+* a service request; or
+* another legitimate-looking payment.
+
+A customer later reporting such a transaction may still describe the transaction as unauthorized or fraudulent.
+
+The investigation should distinguish between the technical transaction event and the circumstances under which the customer interacted with the request.
+
+---
+
+## UPI Authentication
+
+Authentication information is an important part of investigating disputed UPI transactions.
+
+A transaction record may contain information indicating that the applicable UPI authentication process was successfully completed.
+
+However, authentication and customer intent should not automatically be treated as identical concepts.
+
+For example, an unauthorized-transaction investigation may need to consider whether:
+
+* authentication credentials were compromised;
+* the customer's device was compromised;
+* the customer was deceived into performing an action;
+* a third party controlled or accessed the device; or
+* other circumstances affected how the transaction was initiated.
+
+The applicable NPCI and banking rules should be used when determining the consequences of the authentication information.
+
+---
+
+## Merchant's Position in a U001 Dispute
+
+A merchant receiving a U001 dispute should treat it as a formal claim that the customer did not initiate the transaction.
+
+The merchant's response should be based on the transaction and order records available through its payment infrastructure and internal systems.
+
+Relevant records may include:
+
+* merchant transaction records;
+* UPI transaction references;
+* order records;
+* payment status;
+* fulfillment records;
+* delivery records;
+* refund records;
+* customer communications; and
+* records obtained from the merchant's PSP or acquiring institution.
+
+The merchant should not assume that the reason code alone determines the outcome.
+
+Similarly, a customer allegation alone should not be interpreted as proof that the merchant acted fraudulently.
+
+---
+
+## Transaction Records
+
+A merchant may maintain transaction information such as:
+
+* merchant transaction ID;
+* order ID;
+* UPI transaction reference;
+* RRN or other transaction reference;
+* transaction amount;
+* transaction timestamp;
+* merchant VPA;
+* payer information where legitimately available;
+* transaction status;
+* payment response;
+* refund status; and
+* settlement information.
+
+The exact information available depends on the merchant's PSP, acquiring arrangement, payment gateway, and UPI integration.
+
+---
+
+## Order and Fulfillment Records
+
+Where a UPI transaction is associated with a commercial order, the merchant should retain appropriate records showing the relationship between the payment and the underlying order.
+
+Examples include:
+
+* order creation time;
+* order amount;
+* products or services purchased;
+* order status;
+* cancellation status;
+* fulfillment status;
+* refund status; and
+* customer account information maintained as part of the merchant's normal business process.
+
+These records can help establish what transaction or service was associated with the disputed payment.
+
+---
+
+## Delivery Records
+
+For physical goods, merchants may maintain:
+
+* shipment tracking information;
+* carrier delivery confirmation;
+* proof of delivery;
+* delivery timestamp;
+* recipient information where legitimately collected;
+* delivery address; and
+* failed-delivery or re-attempt records.
+
+For digital products or services, relevant records may include:
+
+* account activation;
+* download or access events;
+* service-consumption records;
+* fulfillment logs; and
+* other records showing delivery of the service.
+
+Delivery or fulfillment records are evidence relating to the underlying commercial transaction. They do not, by themselves, establish that the customer personally initiated the disputed UPI payment.
+
+---
+
+## Merchant and PSP Records
+
+Some transaction information may be available only through the merchant's PSP, payment gateway, acquiring institution, or other payment participant.
+
+Depending on the integration, these records may contain information relevant to:
+
+* transaction processing;
+* authentication;
+* transaction status;
+* payment response;
+* settlement;
+* reversal;
+* refund; and
+* dispute processing.
+
+The merchant should obtain and preserve the records required by its applicable payment-provider and dispute process.
+
+---
+
+## Customer Liability and RBI Framework
+
+NPCI dispute processing and RBI's customer-protection framework should not be treated as the same set of rules.
+
+RBI's framework for unauthorized electronic banking transactions establishes circumstances in which a customer's liability may be zero, limited, or otherwise determined according to the circumstances of the transaction and the timing of the customer's notification.
+
+For example, RBI states that zero customer liability can arise in certain cases involving bank negligence or deficiency, and in certain third-party-breach situations where the customer reports the unauthorized transaction within the prescribed period. RBI also addresses cases where customer negligence, such as sharing payment credentials, contributes to the loss. <!-- NEEDS VERIFICATION: confirm the exact prescribed reporting window and these liability categories against the actual current RBI circular on customer protection in unauthorised electronic banking transactions -->
+
+The RBI framework also states that the burden of proving customer liability in an unauthorized electronic banking transaction lies with the bank. <!-- NEEDS VERIFICATION: confirm this burden-of-proof statement against the actual current RBI circular text -->
+
+These customer-protection provisions should not be simplified into a general rule that successful UPI authentication automatically makes the customer liable, or that a U001 dispute automatically makes the merchant liable.
+
+The applicable regulatory and network rules must be applied to the circumstances of the individual transaction.
+
+---
+
+## Reporting an Unauthorized Transaction
+
+Customers who identify an unauthorized transaction should report it to their bank or relevant payment provider through the applicable fraud-reporting mechanism.
+
+RBI requires banks to provide channels for reporting unauthorized electronic transactions and to take immediate steps to prevent further unauthorized transactions after receiving a report.
+
+The timing of the customer's report can be relevant to the applicable customer-liability framework.
+
+---
+
+## NPCI Dispute Processing
+
+NPCI maintains dispute and chargeback procedures for UPI transactions, including reason codes, dispute flags, participants, response responsibilities, and applicable processing timelines.
+
+These procedures may be modified through NPCI circulars, addenda, and other operating instructions. NPCI publications contain structured information such as transaction type, dispute flag, reason code, reason-code description, TAT, parties that can raise or respond, fund movement, and adjustment reporting.
+
+Consequently, the meaning and processing requirements applicable to a historical transaction should be determined using the NPCI rules applicable to the relevant transaction and dispute date.
+
+A current rule should not automatically be applied to an older transaction if NPCI subsequently changed the applicable procedure.
+
+---
+
+## TAT and Resolution
+
+A U001 dispute should not be assumed to have a single universal resolution period for every unauthorized UPI transaction.
+
+Different timelines can apply to different parts of the overall process, including customer reporting, bank investigation, NPCI dispute processing, participant response, settlement or adjustment, and customer compensation.
+
+RBI's unauthorized-electronic-transaction framework states that a bank's complaint-resolution and customer-liability determination process must operate within the bank's board-approved policy and not exceed 90 days from receipt of the complaint. <!-- NEEDS VERIFICATION: confirm this 90-day figure and "board-approved policy" framing against the actual current RBI circular -->
+
+This RBI customer-complaint timeline should not be confused with an NPCI-specific dispute-processing TAT, which is separately governed by NPCI's own operating rules. <!-- NEEDS VERIFICATION: same 30-day NPCI dispute-processing figure flagged in 000_RuPay_NPCI_Overview.md applies here if a specific NPCI TAT for U001 is asserted elsewhere -->
+
+---
+
+## Merchant Fulfillment After a Disputed Transaction
+
+A common scenario is:
+
+1. A customer makes or receives a UPI payment.
+2. The merchant receives confirmation of payment.
+3. The merchant fulfills the order.
+4. The customer subsequently reports the transaction as unauthorized.
+5. A U001 dispute is raised.
+
+In such cases, the merchant should preserve the records associated with both the payment and the underlying order.
+
+For physical goods, this may include shipment and delivery records.
+
+For digital goods or services, this may include activation, access, download, or service-completion records.
+
+The existence of fulfillment records does not independently establish that the customer initiated the payment. Their relevance depends on the circumstances and the applicable dispute process.
+
+---
+
+## Fraud Patterns and Merchant Monitoring
+
+Merchants may encounter recurring fraud patterns involving:
+
+* unusual transaction velocity;
+* repeated high-value transactions;
+* unusual order timing;
+* abnormal account activity;
+* unusual delivery patterns;
+* suspicious refund activity; or
+* transactions that do not correspond normally with customer or order behaviour.
+
+Merchants may use appropriate fraud-monitoring and risk-management controls to identify such patterns.
+
+These controls are merchant risk-management practices and should not be interpreted as NPCI requirements unless an applicable NPCI rule explicitly establishes such a requirement.
 
 ---
 
 ## Frequently Asked Questions
 
-**Q: A customer filed U001 claiming fraud, but our records show the goods were delivered to their registered address. What do we do?**
-A: Submit delivery records (carrier POD or tracking confirmation showing delivery to the VPA-registered address) along with the UTR and transaction log. Delivery to the customer's own address undermines the fraud claim — a fraudster would have shipped to an alternate address. Your acquirer will use this evidence in the NPCI dispute response.
+**Q: What does U001 mean?**
+U001 represents the Transaction Not Done by Customer (Fraud) scenario in the UPI dispute context — a customer's assertion that they did not initiate the disputed transaction.
 
-**Q: The fraud happened through a collect request the customer approved. Are we at fault?**
-A: No. If the customer approved a collect request sent by your business through standard UPI channels, you are a legitimate payee. However, if your VPA or collect request mechanism was compromised and fraudulent collect requests were sent impersonating your business, contact your PSP immediately and report the incident to NPCI.
+**Q: Does U001 automatically mean that the merchant is liable?**
+No. U001 identifies the dispute reason. It does not, by itself, establish the final liability outcome. The applicable NPCI dispute process, transaction records, participant responsibilities, and relevant regulatory requirements must be considered.
 
-**Q: Our customer's funds were reversed after a U001 dispute was upheld. How do we recover?**
-A: If you delivered goods or services in good faith on a properly authenticated UPI payment, and the payment was subsequently reversed due to a fraud claim, consult your acquiring bank about your recovery options. In some cases, delivery evidence supporting your position can be submitted to prevent the reversal. If the reversal occurs, your loss may be partially covered by transaction insurance if you carry it.
+**Q: Does U001 automatically mean that the bank or PSP is liable?**
+No. The ultimate allocation of responsibility depends on the applicable rules and the circumstances established during the investigation. The reason code itself should not be treated as a complete liability determination.
 
-**Q: How quickly does NPCI investigate U001 disputes?**
-A: Banks are required to resolve UPI disputes within 30 days of the complaint. <!-- NEEDS VERIFICATION: same 30-day mandate flagged in 000_RuPay_NPCI_Overview.md; verifying it once there covers this repetition too --> For clear technical failures, resolution may be faster. For complex fraud investigations, the full 30-day window is typically used.
+**Q: Does successful UPI authentication prove that the customer authorized the transaction?**
+Successful authentication is important transaction evidence, but the chargeback investigation should distinguish technical authentication from the broader question of how the transaction was initiated and whether the customer intended the transaction. The applicable NPCI and regulatory rules determine how authentication information should be treated in the dispute.
 
-**Q: What should merchants do if they see a suspicious UPI payment pattern — many transactions from the same VPA, unusual amounts or timing?**
-A: Flag these immediately with your PSP and do not dispatch goods until you have verified the orders. Suspicious patterns may indicate a compromised account being used for mule transactions. Report the pattern to your PSP for escalation to NPCI's fraud monitoring team.
+**Q: Can a U001 dispute involve OTP fraud?**
+Yes. OTP-related social engineering can be one mechanism through which a customer's account or payment credentials become compromised. However, OTP fraud is not itself the definition of U001.
+
+**Q: Can a U001 dispute involve SIM-swap fraud?**
+Yes. SIM-swap or mobile-number compromise can be associated with unauthorized electronic transactions. It is one possible fraud mechanism rather than a requirement for U001.
+
+**Q: Can a U001 dispute involve screen-sharing fraud?**
+Yes. A compromised device or remote-access session can be involved in an unauthorized transaction. The actual circumstances should be established through the available investigation and transaction records.
+
+**Q: Does delivery to the customer's address prove that the customer made the UPI payment?**
+No. Delivery records can establish that the merchant fulfilled an order, but they do not independently establish who initiated or authorized the payment.
+
+**Q: What should a merchant retain for a U001 dispute?**
+The merchant should retain records that establish the payment and the associated commercial transaction, including transaction records, order records, fulfillment records, delivery records where applicable, refund information, and relevant PSP/acquirer records. The exact information required depends on the applicable dispute process and the merchant's payment arrangement.
+
+**Q: Is there a universal 30-day resolution requirement for U001?**
+Not as a general statement. NPCI dispute-processing timelines and RBI customer-complaint/customer-liability timelines are different concepts and should be sourced from the applicable rule or regulation. RBI's framework for unauthorized electronic banking transactions provides a maximum 90-day period for complaint resolution and customer-liability determination under the bank's applicable board-approved policy framework. <!-- NEEDS VERIFICATION: same 90-day figure as flagged above -->
+
+**Q: Should a merchant assume that a U001 dispute will be lost if no additional information is available?**
+The reason code alone is insufficient to predict the outcome. The dispute should be evaluated using the applicable NPCI process and the transaction information available from the merchant, PSP, acquiring institution, and other relevant participants.
+
+**Q: Is U001 the same as every type of UPI fraud?**
+No. U001 identifies a particular dispute reason concerning a transaction that the customer says they did not initiate. Other UPI dispute codes can represent different transaction or dispute circumstances and should not be treated as interchangeable with U001.
+
+---
+
+## Important Interpretation Notes
+
+U001 should be read as a **reason for dispute**, not as a standalone conclusion about liability or fraud.
+
+In particular:
+
+* A customer's U001 claim is an allegation that the customer did not initiate the transaction.
+* Authentication information is part of the transaction evidence but should be interpreted within the applicable rules.
+* Fraud mechanisms such as vishing, SIM swap, remote access, and malicious applications are possible scenarios rather than definitions of U001.
+* Merchant fulfillment records describe what happened after the payment and do not independently establish who authorized the payment.
+* NPCI dispute-processing rules and RBI customer-protection rules address different aspects of the overall dispute.
+* TATs should be taken from the applicable NPCI or RBI rule rather than inferred from the reason code.
+* Historical transactions should be evaluated using the NPCI rules applicable to the relevant transaction/dispute period.
+
+The deterministic fight/refund assessment for U001 is maintained separately from this encyclopedia document, in `decision_rules.py`. This document explains the domain concept; the application's decision engine determines the operational response using its own controlled evidence vocabulary and rules.
