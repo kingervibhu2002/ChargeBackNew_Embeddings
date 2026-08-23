@@ -674,11 +674,30 @@ class DisputeAgent:
 
     def _answer_clarification_node(self, state: ChargebackState) -> dict:
         """
-        Node 3d — Answer the merchant's question about how/where to get evidence.
+        Node 3d — Answer the merchant's question, grounding in case-specific
+        facts first when available, before falling back to generic policy
+        guidance.
 
         Single responsibility: one LLM call that answers the merchant's LATEST
-        question using retrieved policy docs. Router always sends the result
-        to ask_user so the merchant can read the answer and reply with evidence.
+        question using retrieved docs. Router always sends the result to
+        ask_user so the merchant can read the answer and reply with evidence.
+
+        retrieved_docs[0] can be a case-specific fact string inserted by
+        _planner_node's step 4b (e.g. "Case NPCI... : recommended action =
+        refund. No proof on file that only one valid transaction occurred...
+        Current status: Open...") when the merchant's query named a real
+        case/UTR. Found live: with the old prompt ("answer practically —
+        which dashboard/report/party holds that data"), the LLM defaulted to
+        generic "go check your bank statement" procedural advice even when
+        this exact case's real status/recommendation was sitting right there
+        in the prompt — e.g. "can you check my transaction data and tell me
+        if two amounts were credited?" got zero mention of the system's own
+        on-file status, despite it being retrieved_docs[0] verbatim. Fixed by
+        explicitly instructing the LLM to check for and lead with
+        case-specific facts before falling back to procedural guidance for
+        whatever those facts don't cover — and to say plainly when something
+        asked isn't covered by what's on file, rather than answering as if
+        it had been checked.
 
         Reads:  user_query, additional_context, reason_code, card_network,
                 retrieved_docs
@@ -695,11 +714,23 @@ class DisputeAgent:
         response = self._invoke([
             SystemMessage(content=(
                 "You are a chargeback evidence analyst. The merchant is asking a "
-                "clarifying QUESTION about how or where to obtain a piece of evidence "
-                "— they have NOT yet provided the evidence itself.\n"
-                "Answer ONLY their LATEST question directly and practically (e.g. which "
-                "dashboard, report, or party holds that data), using the policy context "
-                "provided. Use the earlier conversation only as background.\n"
+                "clarifying QUESTION about their dispute — they have NOT yet "
+                "provided the evidence itself.\n"
+                "First check whether the 'Relevant context' below includes a "
+                "case-specific record (a line starting with \"Case <id>\" — the "
+                "system's own on-file status/recommendation for this exact "
+                "dispute) that answers or partially answers their question. If "
+                "so, lead with those specific facts by name (status, recommended "
+                "action, what evidence is or isn't on file) — the merchant is "
+                "often asking you to check something the system already knows, "
+                "not asking how to look it up themselves.\n"
+                "Only fall back to generic procedural guidance (which dashboard, "
+                "report, or party holds that data) for whatever the case record "
+                "does NOT cover. Never imply you checked something the record "
+                "doesn't actually contain — if what they're asking is outside "
+                "what's on file (e.g. no full transaction ledger exists to "
+                "verify a duplicate charge from the payment side), say that "
+                "plainly rather than answering as if you looked it up.\n"
                 "End with one short sentence reminding them to come back with the "
                 "actual evidence once they have it.\n"
                 "Respond ONLY with JSON: {\"answer\": \"...\"}"
@@ -709,7 +740,7 @@ class DisputeAgent:
                 f"Earlier conversation: {context}\n"
                 f"Merchant's LATEST question: {latest}\n"
                 f"Reason code: {card_network} {reason_code}\n\n"
-                f"Relevant policy:\n{docs_text}"
+                f"Relevant context:\n{docs_text}"
             )),
         ])
         answer = _parse_json_safe(response.content, {"answer": ""}).get("answer", "").strip()
