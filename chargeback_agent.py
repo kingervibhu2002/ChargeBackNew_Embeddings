@@ -817,8 +817,13 @@ class DisputeAgent:
             required = set(rule.required_any) | set(rule.required_all)
             present_set = set(evidence_present)
             evidence_missing = [t for t in required if t not in present_set]
+            # Whether the rule's own required_any is satisfied by what's
+            # present so far — used below to force needs_more_info=True
+            # deterministically rather than trusting the LLM's own guess.
+            rule_evidence_satisfied = bool(rule.required_any) and bool(rule.required_any & present_set)
         else:
             evidence_missing = data.get("evidence_missing", [])
+            rule_evidence_satisfied = True  # no rule to be unsatisfied by
 
         # Deterministic cap: one evidence follow-up round, max. The LLM has no
         # memory of having asked before, so on a follow-up turn (context already
@@ -839,21 +844,43 @@ class DisputeAgent:
         # there being nothing to actually ask for.
         if rule is not None and rule.always_refund:
             needs_more_info = False
+        elif rule is not None and not rule_evidence_satisfied and not context:
+            # First turn, a real evidence-based rule matched, and current
+            # evidence doesn't satisfy it — force the ask rather than
+            # trusting the LLM's own needs_more_info guess, which was
+            # observed flaky here too: for the identical first-turn RuPay
+            # U002 query with zero evidence supplied, roughly 1 in 3 live
+            # runs skipped straight to a full "recommend accepting the
+            # refund" generated letter instead of asking for the evidence
+            # this rule actually requires — purely because the LLM's own
+            # needs_more_info field came back False that time despite there
+            # being nothing on file to decide with. decide()'s own
+            # no-evidence-present fallback would still correctly land on
+            # "refund" as the eventual outcome either way — this only
+            # ensures the merchant actually gets the one chance to provide
+            # evidence first, same as every other evidence-gathering step
+            # in this graph already guarantees.
+            needs_more_info = True
 
         # The LLM authors missing_info_question freely regardless of
-        # whether a deterministic rule matched — observed live (RuPay U005,
-        # no rule at the time) coming back completely blank on some calls
-        # despite needs_more_info correctly being True, leaving the
-        # merchant with only _ask_user_node's generic "could you provide
-        # more details" fallback instead of anything specific. When a rule
-        # matched and evidence_missing is already known deterministically
-        # (not derived from the LLM), build the question from that instead
-        # of trusting the LLM to also freely author good text for the same
-        # information a second time. Only steps in when the LLM's own text
-        # is empty — its phrasing is usually fine when present, this is a
-        # backstop for when it isn't, not a replacement for it.
+        # whether a deterministic rule matched. Originally this deterministic
+        # override only stepped in when the LLM's text came back completely
+        # blank (observed live for RuPay U005, no rule at the time), on the
+        # assumption its phrasing is "usually fine when present." That
+        # assumption didn't hold: the U010 comment above already documents
+        # the LLM asking for unrelated "refund transaction ID" evidence in
+        # ~2 of 3 identical live runs despite there being nothing to ask for
+        # — and the same hallucination was confirmed live for U002 too, this
+        # time with NON-empty text ("Can you provide the UPI refund
+        # transaction ID or UTR... to demonstrate that the refund was
+        # processed?") for a case whose actual required evidence is whether
+        # one or two credits were received, nothing about a refund UTR. A
+        # non-empty answer isn't the same as a correct one. Whenever a rule
+        # matched and evidence_missing is already known deterministically,
+        # that always wins now — no reason to trust the LLM to also guess
+        # correctly a second time for information the rule table already has.
         missing_info_question = data.get("missing_info_question", "") if needs_more_info else ""
-        if needs_more_info and not missing_info_question and rule is not None and evidence_missing:
+        if needs_more_info and rule is not None and evidence_missing:
             missing_info_question = (
                 "Please provide: " + ", ".join(humanize_evidence(evidence_missing)) + "."
             )
