@@ -64,6 +64,28 @@ def test_visa_12_6_1_refund_without_proof() -> bool:
     )
 
 
+def test_visa_12_6_1_fight_with_single_credit_confirmed() -> bool:
+    result = decide("Visa", "12.6.1", ["single_credit_confirmed"], [])
+    return _check(
+        "Visa 12.6.1 + single credit confirmed → fight",
+        result is not None and result[0] == "fight",
+        detail=str(result),
+    )
+
+
+def test_visa_12_6_1_refund_with_duplicate_charge_proof() -> bool:
+    # duplicate_charge_proof means a duplicate charge DID occur — that's
+    # evidence for the customer's claim, not against it. Previously
+    # mis-modeled in required_any (→ fight); now disqualifying (→ refund),
+    # regardless of any other evidence present.
+    result = decide("Visa", "12.6.1", ["duplicate_charge_proof", "single_credit_confirmed"], [])
+    return _check(
+        "Visa 12.6.1 + duplicate charge proof → refund even with single-credit evidence too",
+        result is not None and result[0] == "refund",
+        detail=str(result),
+    )
+
+
 def test_mc_4853_credit_not_processed_fight() -> bool:
     result = decide(
         "Mastercard", "4853", ["refund_transaction_record"], [],
@@ -237,11 +259,26 @@ def test_rupay_u002_disqualified_by_refund() -> bool:
     )
 
 
-def test_rupay_u002_fights_with_duplicate_charge_proof() -> bool:
-    result = decide("RuPay", "U002", ["duplicate_charge_proof"], [])
+def test_rupay_u002_fights_with_single_credit_confirmed() -> bool:
+    result = decide("RuPay", "U002", ["single_credit_confirmed"], [])
     return _check(
-        "RuPay U002 + duplicate charge proof → fight",
+        "RuPay U002 + single credit confirmed → fight",
         result is not None and result[0] == "fight",
+        detail=str(result),
+    )
+
+
+def test_rupay_u002_refunds_with_duplicate_charge_proof() -> bool:
+    # duplicate_charge_proof means a duplicate charge DID occur — per this
+    # code's own encyclopedia doc (NPCI_U002.md, "If the Merchant Received
+    # Two Credits... must refund the duplicate"), that's evidence FOR the
+    # customer's claim, not against it. Was wrongly in required_any (→
+    # fight) before this fix; now disqualifying (→ refund) regardless of
+    # any other evidence present, same as refund_already_issued.
+    result = decide("RuPay", "U002", ["duplicate_charge_proof", "single_credit_confirmed"], [])
+    return _check(
+        "RuPay U002 + duplicate charge proof → refund even with single-credit evidence too",
+        result is not None and result[0] == "refund",
         detail=str(result),
     )
 
@@ -288,6 +325,8 @@ def main() -> None:
         test_visa_13_1_disqualified_by_existing_refund,
         test_visa_10_4_fight_with_avs,
         test_visa_12_6_1_refund_without_proof,
+        test_visa_12_6_1_fight_with_single_credit_confirmed,
+        test_visa_12_6_1_refund_with_duplicate_charge_proof,
         test_mc_4853_credit_not_processed_fight,
         test_mc_4853_not_as_described_refund,
         test_mc_4853_fraud_3ds_fight,
@@ -305,6 +344,8 @@ def main() -> None:
         test_rupay_u005_fight_with_confirmed_vpa,
         test_rupay_u005_refund_without_evidence,
         test_rupay_u002_disqualified_by_refund,
+        test_rupay_u002_fights_with_single_credit_confirmed,
+        test_rupay_u002_refunds_with_duplicate_charge_proof,
         test_unmapped_code_returns_none,
         test_unmapped_network_returns_none,
         test_every_rule_table_entry_is_reachable,

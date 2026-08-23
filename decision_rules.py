@@ -111,7 +111,18 @@ RULES: Dict[Tuple[str, str], DecisionRule] = {
         refund_reason="No authentication evidence on file — fraud claims are very difficult to rebut without an AVS/CVV/3DS match.",
     ),
     ("Visa", "12.6.1"): DecisionRule(
-        required_any={"duplicate_charge_proof", "single_credit_confirmed"},
+        # duplicate_charge_proof ("Proof of duplicate charge") previously sat
+        # in required_any alongside single_credit_confirmed — but it means
+        # the opposite thing: evidence THAT a duplicate charge occurred, not
+        # evidence against one. As written, a merchant who could prove they
+        # were genuinely charged twice was told to fight, when that proof is
+        # exactly what should force a refund. Moved to disqualifying, same
+        # as refund_already_issued elsewhere in this table — forces refund
+        # regardless of required_any, matching a duplicate-processing code's
+        # own logic: proof of the duplicate settles the case, it doesn't
+        # argue against it.
+        required_any={"single_credit_confirmed"},
+        disqualifying={"duplicate_charge_proof"},
         fight_reason="Records show only a single valid charge/credit — the duplicate-processing claim doesn't hold.",
         refund_reason="Records don't clearly confirm only one valid transaction occurred — safer to refund than contest.",
     ),
@@ -201,8 +212,16 @@ RULES: Dict[Tuple[str, str], DecisionRule] = {
         # code like U008/C08/13.1), asking merchants for the wrong evidence
         # entirely. The correct evidence category is the same one Visa's
         # actual duplicate-processing code (12.6.1) uses.
-        required_any={"duplicate_charge_proof", "single_credit_confirmed"},
-        disqualifying={"refund_already_issued"},
+        #
+        # duplicate_charge_proof ("Proof of duplicate charge") was also
+        # wrongly in required_any here, same bug as 12.6.1 above and fixed
+        # the same way: it's evidence THAT a duplicate occurred, which per
+        # this exact reason code's own encyclopedia doc (NPCI_U002.md,
+        # "If the Merchant Received Two Credits... must refund the
+        # duplicate") means refund, not fight. Moved to disqualifying,
+        # alongside refund_already_issued.
+        required_any={"single_credit_confirmed"},
+        disqualifying={"refund_already_issued", "duplicate_charge_proof"},
         fight_reason="Records show only a single valid charge — the duplicate-transaction claim doesn't hold.",
         refund_reason="No proof on file that only one valid transaction occurred — a U002 claim cannot be rebutted without evidence the customer wasn't actually charged twice.",
     ),
