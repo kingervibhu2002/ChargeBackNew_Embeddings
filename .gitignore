@@ -26,8 +26,11 @@ env/
 # FastEmbed model cache (downloaded automatically on first run)
 .cache/
 
-# LangGraph checkpoints
+# LangGraph checkpoints — SqliteSaver runs in WAL mode, so the -shm/-wal
+# sidecar files need excluding alongside the main db file
 checkpoints.db
+checkpoints.db-shm
+checkpoints.db-wal
 
 # Audit log (contains query history — do not commit)
 audit.log

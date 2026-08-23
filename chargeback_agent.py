@@ -321,7 +321,13 @@ class DisputeAgent:
         # _route_after_detect_settlement, _extract_evidence_node's one-round
         # cap, etc.) treats a junk reply exactly like no reply at all,
         # without each needing its own check.
-        raw_context = state.get("additional_context", "")
+        # Masked immediately on read, same as user_query above — this is the
+        # field a merchant is most likely to paste sensitive detail into
+        # when asked "please provide evidence," and everything downstream
+        # (junk-reply filter, clarifying-question check, every node that
+        # reads state["additional_context"]) only ever sees the masked
+        # value once it's applied here, once.
+        raw_context = mask_pii(state.get("additional_context", ""))
 
         # A genuine clarifying question ("what is authorization evidence?")
         # is neither a real answer nor junk/filler — it's a third category
@@ -2037,7 +2043,8 @@ class DisputeAgent:
 # Factory
 # ---------------------------------------------------------------------------
 
-def build_dispute_agent(store, embed_fn: Callable[[str], list], rerank_fn=None) -> DisputeAgent:
+def build_dispute_agent(store, embed_fn: Callable[[str], list], rerank_fn=None,
+                         checkpointer=None) -> DisputeAgent:
     """
     Create a DisputeAgent sharing the given store and embed function.
 
@@ -2045,13 +2052,17 @@ def build_dispute_agent(store, embed_fn: Callable[[str], list], rerank_fn=None) 
     opening a second Qdrant connection (local mode allows only one).
 
     Args:
-        store:     A VectorStore already connected to Qdrant.
-        embed_fn:  A callable (str) → list[float].
-        rerank_fn: Optional callable (query: str, documents: list[str]) →
-                   list[float] — see DisputeAgent.__init__. Defaults to
-                   None (no reranking) so existing callers (e.g.
-                   test_qa_stress.py) that don't pass this keep working
-                   unmodified.
+        store:        A VectorStore already connected to Qdrant.
+        embed_fn:     A callable (str) → list[float].
+        rerank_fn:    Optional callable (query: str, documents: list[str]) →
+                      list[float] — see DisputeAgent.__init__. Defaults to
+                      None (no reranking) so existing callers (e.g.
+                      test_qa_stress.py) that don't pass this keep working
+                      unmodified.
+        checkpointer: Optional LangGraph checkpointer (e.g. SqliteSaver) for
+                      resuming a conversation via thread_id across calls.
+                      Defaults to None (today's stateless-per-call behavior)
+                      so existing callers keep working unmodified.
 
     Returns:
         DisputeAgent: Compiled and ready to process disputes.
@@ -2060,4 +2071,5 @@ def build_dispute_agent(store, embed_fn: Callable[[str], list], rerank_fn=None) 
         ValueError: If the configured LLM provider's API key is not set
                    (see llm_provider.py).
     """
-    return DisputeAgent(store=store, embed_fn=embed_fn, rerank_fn=rerank_fn)
+    return DisputeAgent(store=store, embed_fn=embed_fn, rerank_fn=rerank_fn,
+                         checkpointer=checkpointer)

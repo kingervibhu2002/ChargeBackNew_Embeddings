@@ -26,6 +26,7 @@ Then open http://localhost:8000/docs for the interactive Swagger UI.
 import hashlib
 import sqlite3
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -71,6 +72,15 @@ _reranker: Optional[TextCrossEncoder] = None
 _store: Optional[VectorStore]         = None
 _agent = None   # DisputeAgent — built in lifespan after _store and _model are ready
 
+# Checkpointer for /dispute conversation memory — a separate SQLite file
+# from chargebacks.db, kept apart from authoritative transaction data on
+# purpose (ephemeral conversation scratch state vs. the real chargeback
+# record). SqliteSaver.from_conn_string() is a generator-based context
+# manager, entered manually at startup and exited at shutdown since it
+# needs to live for the whole process, not just one call.
+_checkpointer_cm = None
+_checkpointer = None
+
 # Guardrail singletons — shared across all requests
 _rate_limiter    = RateLimiter(max_requests=20, window_seconds=3600, abuse_threshold=5)
 _audit_logger    = AuditLogger("audit.log")
@@ -96,7 +106,7 @@ async def lifespan(app: FastAPI):
     Yields:
         None: Control is returned to FastAPI to start serving requests.
     """
-    global _model, _reranker, _store, _agent
+    global _model, _reranker, _store, _agent, _checkpointer_cm, _checkpointer
     print("Loading embedding model (BAAI/bge-small-en-v1.5)...")
     _model = TextEmbedding("BAAI/bge-small-en-v1.5")
     print("Loading reranker model (Xenova/ms-marco-MiniLM-L-6-v2)...")
@@ -108,6 +118,10 @@ async def lifespan(app: FastAPI):
     init_db()
     print(f"Merchant DB ready ({len(MERCHANTS)} merchants).")
 
+    _checkpointer_cm = SqliteSaver.from_conn_string("checkpoints.db")
+    _checkpointer    = _checkpointer_cm.__enter__()
+    print("Conversation checkpointer ready (checkpoints.db).")
+
     # Build the LangGraph dispute agent — shares _store and _embed so only
     # one Qdrant connection is open in this process. Skipped gracefully when
     # the configured LLM provider's API key is absent (LLM_PROVIDER=groq|
@@ -115,7 +129,8 @@ async def lifespan(app: FastAPI):
     # that case.
     if llm_provider.is_configured():
         try:
-            _agent = build_dispute_agent(store=_store, embed_fn=_embed, rerank_fn=_rerank)
+            _agent = build_dispute_agent(store=_store, embed_fn=_embed, rerank_fn=_rerank,
+                                          checkpointer=_checkpointer)
             print(f"Dispute agent (LangGraph, provider={llm_provider.get_provider_name()}) ready.")
         except Exception as exc:
             print(f"Dispute agent not available: {exc}")
@@ -123,7 +138,9 @@ async def lifespan(app: FastAPI):
         print(f"{llm_provider.get_env_key_name()} not set — /dispute endpoint will return 503.")
 
     yield
-    # Nothing to clean up — Qdrant and FastEmbed handle their own teardown.
+
+    if _checkpointer_cm is not None:
+        _checkpointer_cm.__exit__(None, None, None)
 
 
 app = FastAPI(
@@ -227,9 +244,19 @@ class DisputeRequest(BaseModel):
         query              (str): Merchant's description of the chargeback dispute.
         additional_context (str): Merchant's answer to the agent's follow-up question.
                                   Empty string on the first call; filled on the second.
+        thread_id          (str): Conversation session id from a prior response's
+                                  thread_id field. Empty on the first call — the
+                                  server generates and returns a new one. Passing
+                                  it back on a follow-up lets the agent resume via
+                                  its LangGraph checkpointer instead of relying on
+                                  additional_context alone. Validated server-side
+                                  against the caller's own merchant scope (see the
+                                  dispute() handler below) — a mismatched thread_id
+                                  is rejected, never silently accepted.
     """
     query: str
     additional_context: str = ""
+    thread_id: str = ""
 
 
 class DisputeResponse(BaseModel):
@@ -245,6 +272,9 @@ class DisputeResponse(BaseModel):
         needs_more_info   (bool):      True when the agent returned a follow-up question
                                        instead of a final answer. Pass the merchant's reply
                                        as additional_context in the next request.
+        thread_id         (str):       This conversation's session id — new or resumed.
+                                       Pass back on the next request to resume via the
+                                       checkpointer.
     """
     final_answer:        str
     decision:            str
@@ -255,6 +285,7 @@ class DisputeResponse(BaseModel):
     confidence_score:    int
     is_grounded:         bool
     groundedness_issues: str
+    thread_id:           str
 
 
 # ---------------------------------------------------------------------------
@@ -686,8 +717,28 @@ def dispute(
     identity    = resolve_identity(x_merchant_key) if x_merchant_key else None
     merchant_id = identity.merchant_id if identity and identity.merchant_id else ""
 
+    # thread_id is prefixed with the resolving caller's own merchant scope
+    # ("anon" for no/invalid key) at creation time, and that prefix is
+    # checked on every resume — server-enforced, not just trusted from the
+    # client, same "resolve and enforce scope server-side" pattern
+    # text_to_sql.py already uses for cross-merchant query scoping. Without
+    # this, any caller who obtained/guessed another merchant's thread_id
+    # could resume that merchant's dispute conversation once checkpointing
+    # is real (today, with no checkpointer wired in, thread_id was inert —
+    # this only becomes a real risk once the agent actually resumes state).
+    owner_tag = merchant_id or "anon"
+    thread_id = req.thread_id
+    if thread_id and not thread_id.startswith(f"{owner_tag}:"):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid or mismatched conversation session.",
+        )
+    if not thread_id:
+        thread_id = f"{owner_tag}:{uuid.uuid4()}"
+
     try:
-        result = _agent.run(req.query, req.additional_context, merchant_id=merchant_id)
+        result = _agent.run(req.query, req.additional_context, merchant_id=merchant_id,
+                             thread_id=thread_id)
 
         # Record LLM calls made (~7 per full dispute run, 1 for rejected queries)
         calls_made = 1 if not result.get("is_valid_query") else 7
@@ -716,6 +767,7 @@ def dispute(
             confidence_score    = result.get("confidence_score",    0),
             is_grounded         = result.get("is_grounded",         True),
             groundedness_issues = result.get("groundedness_issues", ""),
+            thread_id           = result.get("thread_id", thread_id),
         )
 
     except Exception as exc:
