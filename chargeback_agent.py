@@ -1672,8 +1672,26 @@ class DisputeAgent:
             "C08": "Amex C08 — Goods / Services Not Received: Cardholder claims goods or services were not received. Merchant defence requires proof of delivery (tracking, signature, or carrier confirmation).",
             "F29": "Amex F29 — Card Not Present Fraud: Cardholder denies making the card-not-present transaction. Merchant defence requires AVS/CVV match or 3DS authentication.",
             # RuPay
-            "U001": "RuPay U001 — Goods / Services Not Provided: Cardholder did not receive purchased goods or services. Merchant defence requires delivery proof or cardholder acknowledgement.",
-            "U002": "RuPay U002 — Credit Not Processed: Refund promised but not credited to the cardholder. Merchant defence requires the refund transaction record.",
+            # Both entries below were previously wrong — confirmed live: a
+            # U002 rebuttal letter cited "RuPay U002 — Credit Not Processed"
+            # and argued about "a refund promised but not credited," neither
+            # of which is what U002 means. That definition is actually
+            # U009's ("Merchant Not Providing Refund") — U002 is a duplicate-
+            # DEBIT dispute, the opposite direction: the customer was charged
+            # twice, not promised a refund that never arrived. U001 had the
+            # same class of error, holding U008's definition ("Goods/
+            # Services Not Provided") instead of its own — U001 is
+            # "Transaction Not Done by Customer (Fraud)," an unauthorized-
+            # transaction dispute (OTP vishing, SIM swap, screen-sharing
+            # fraud), not a delivery dispute at all. Corrected against
+            # decision_rules.py's own RULES comments and
+            # chargeback-encyclopedia/07_RuPay/NPCI_U001.md /
+            # NPCI_U002.md — this dict has no automated check tying it back
+            # to either source, so a mismatch like this can sit
+            # undetected indefinitely; worth periodically spot-checking
+            # the rest of this table against the same sources.
+            "U001": "RuPay U001 — Transaction Not Done by Customer (Fraud): Cardholder claims they did not initiate the transaction — an unauthorized UPI transaction (OTP vishing, SIM swap, screen-sharing fraud, or a compromised collect request). Merchant defence requires proof the UPI PIN was correctly authenticated, or delivery to the customer's own registered address.",
+            "U002": "RuPay U002 — Duplicate Transaction: Cardholder's account was debited twice for the same UPI payment (system retry, network timeout, or bank-side processing duplication). Merchant defence requires proof only one valid credit was received; if the merchant actually received two credits, the duplicate must be refunded rather than contested.",
         }
 
         # Find definition for this reason code if available
