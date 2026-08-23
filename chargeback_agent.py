@@ -1413,59 +1413,66 @@ class DisputeAgent:
                 "Be concise — no long paragraphs. Do not repeat information."
             )
         else:
-            # UPI/NPCI transactions don't route through Visa/Mastercard at
-            # all — but the retrieved docs for a plain informational question
-            # are a MIX of generic card-ecosystem docs (which use issuing
-            # bank/card network/acquiring bank framing) and, when detected,
-            # the NPCI-specific doc (which explicitly has a different model:
-            # NPCI is both network AND arbitrator, disputes are primarily
-            # bank-to-bank, merchant involvement is indirect). Without this
-            # instruction the LLM tends to blend both framings into an
-            # incorrect hybrid — verified: it previously mislabeled a
-            # merchant's bank as the "issuing bank" by defaulting to the
-            # card model's roles instead of UPI's remitter/beneficiary model.
-            if is_upi_context(detected_networks):
-                system_prompt = (
-                    "You are a chargeback expert. Answer the question clearly and "
-                    "concisely using only the provided knowledge base documents. "
-                    "Explain in plain English. Do not use jargon without explaining it.\n\n"
-                    "IMPORTANT: this question is about a UPI/NPCI transaction, NOT a Visa/"
-                    "Mastercard one — UPI does not route through a card network at all. If "
-                    "the knowledge base documents include an NPCI/UPI-specific document, "
-                    "its model is authoritative here: NPCI itself is both the network AND "
-                    "the dispute arbitrator (unlike Visa/Mastercard, where these are "
-                    "separate), the dispute is primarily between the customer's bank "
-                    "(remitter bank) and the recipient's/merchant's bank (beneficiary "
-                    "bank), and the merchant's involvement is indirect. Do NOT use Visa/"
-                    "Mastercard terminology (issuing bank, card network, acquiring bank) "
-                    "even if other, more generic retrieved documents use that framing — "
-                    "those describe a different payment rail and do not apply here.\n\n"
-                    "This same caution applies to SPECIFIC FACTS, not just terminology. A "
-                    "dollar/rupee figure, a percentage, or a day-count from a generic or "
-                    "Visa/Mastercard-specific document does not automatically apply to UPI/"
-                    "NPCI — for example, a card-network 'chargeback fee' is not evidence "
-                    "that NPCI charges merchants an equivalent fee for a UPI dispute.\n\n"
-                    "Each source below is labeled with its network. Before stating any "
-                    "specific number, check which source it came from: if the ONLY source "
-                    "for that number is labeled a different network or 'general / not "
-                    "network-specific', do not present it as a UPI/NPCI fact. Say plainly "
-                    "that the knowledge base doesn't document a UPI-specific figure for "
-                    "that point, rather than substituting the other network's number — "
-                    "presenting another network's fact as if it were UPI-specific is a "
-                    "factual error, not a reasonable generalization, even if you name the "
-                    "source honestly."
-                )
-            else:
-                system_prompt = (
-                    "You are a chargeback expert. Answer the question clearly and "
-                    "concisely using only the provided knowledge base documents. "
-                    "Explain in plain English. Do not use jargon without explaining it.\n\n"
-                    "If the retrieved documents cover more than one card network, "
-                    "attribute network-specific facts (fees, deadlines, thresholds) to the "
-                    "network they actually describe — do not present one network's "
-                    "documented figure as if it applies to a different network the "
-                    "question is actually about."
-                )
+            system_prompt = (
+                "You are a chargeback expert. Answer the question clearly and "
+                "concisely using only the provided knowledge base documents. "
+                "Explain in plain English. Do not use jargon without explaining it.\n\n"
+                "If the retrieved documents cover more than one card network, "
+                "attribute network-specific facts (fees, deadlines, thresholds) to the "
+                "network they actually describe — do not present one network's "
+                "documented figure as if it applies to a different network the "
+                "question is actually about."
+            )
+
+        # UPI/NPCI transactions don't route through Visa/Mastercard at all —
+        # but the retrieved docs for an informational question are often a
+        # MIX of generic card-ecosystem docs (issuing bank/card network/
+        # acquiring bank framing) and, when detected, the NPCI-specific doc
+        # (a different model: NPCI is both network AND arbitrator, disputes
+        # are primarily bank-to-bank, merchant involvement is indirect).
+        # Originally only applied in the generic fallback branch above — but
+        # a lifecycle-STAGE question ("will this go to pre-arbitration?")
+        # hits stage_intent instead, which had zero protection against the
+        # same blending. Confirmed live: asked about escalation for a real
+        # UPI case, the answer described generic card-network chargeback →
+        # representment → pre-arbitration → arbitration terminology with no
+        # indication of whether NPCI's actual dispute workflow works the
+        # same way. Applied here, after all five branches, so every one of
+        # them gets this protection instead of duplicating it five times.
+        if is_upi_context(detected_networks):
+            system_prompt += (
+                "\n\nIMPORTANT: this question is about a UPI/NPCI transaction, NOT a Visa/"
+                "Mastercard one — UPI does not route through a card network at all. If "
+                "the knowledge base documents include an NPCI/UPI-specific document, "
+                "its model is authoritative here: NPCI itself is both the network AND "
+                "the dispute arbitrator (unlike Visa/Mastercard, where these are "
+                "separate), the dispute is primarily between the customer's bank "
+                "(remitter bank) and the recipient's/merchant's bank (beneficiary "
+                "bank), and the merchant's involvement is indirect. Do NOT use Visa/"
+                "Mastercard terminology (issuing bank, card network, acquiring bank, "
+                "representment, pre-arbitration, arbitration) even if other, more "
+                "generic retrieved documents use that framing — those describe a "
+                "different payment rail and do not apply here unless the NPCI-specific "
+                "documents explicitly confirm the same process/terminology applies.\n\n"
+                "This same caution applies to SPECIFIC FACTS and PROCESS CLAIMS, not "
+                "just terminology. A dollar/rupee figure, a percentage, a day-count, or "
+                "an escalation rule (e.g. what happens if a customer disputes again) "
+                "from a generic or Visa/Mastercard-specific document does not "
+                "automatically apply to UPI/NPCI — for example, a card-network "
+                "'chargeback fee' is not evidence that NPCI charges merchants an "
+                "equivalent fee, and a card network's representment/pre-arbitration "
+                "escalation trigger is not evidence NPCI's UPI dispute process has an "
+                "equivalent trigger.\n\n"
+                "Each source below is labeled with its network. Before stating any "
+                "specific number or process claim, check which source it came from: if "
+                "the ONLY source is labeled a different network or 'general / not "
+                "network-specific', do not present it as a UPI/NPCI fact. Say plainly "
+                "that the knowledge base doesn't document a UPI-specific answer for "
+                "that point, rather than substituting the other network's process or "
+                "figure — presenting another network's fact as if it were UPI-specific "
+                "is a factual error, not a reasonable generalization, even if you name "
+                "the source honestly."
+            )
 
         # Shared across every branch above: found live that a question about
         # evidence/proof for a specific reason code got answered from the
@@ -1790,7 +1797,18 @@ class DisputeAgent:
                 "ECI/CAVV value, protocol version, or similar detail that was never "
                 "provided). [Date of Transaction], [Transaction Amount], and [Transaction "
                 "ID] are the only fill-in-later placeholders allowed, for basic "
-                "transaction facts — that's different from inventing evidence."
+                "transaction facts — that's different from inventing evidence.\n\n"
+                "SCOPE OF EVIDENCE: the merchant's evidence describes the merchant's OWN "
+                "records only — do not claim it demonstrates something only the "
+                "customer's own bank account records could show. For example, 'confirmed "
+                "only one credit was issued' means the merchant's settlement/transaction "
+                "records show a single credit on the merchant's side — do NOT write that "
+                "this 'demonstrates the cardholder's account was not debited twice' (the "
+                "merchant has no visibility into the customer's bank account). Write "
+                "instead that the merchant's records show only one valid credit was "
+                "received for this transaction, and let the applicable rule/policy "
+                "establish what that means for the dispute — don't assert the underlying "
+                "customer-side fact directly."
             )
 
             prompt = (

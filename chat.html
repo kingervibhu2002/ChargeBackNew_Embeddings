@@ -838,12 +838,18 @@
     const decisionClass = data.decision;
     const decisionLabel = data.decision === 'fight' ? 'Fight the chargeback' : 'Accept the refund';
 
-    // Confidence badge
+    // Grounding-confidence badge — deliberately not labeled "Confidence"
+    // alone: this score (chargeback_agent.py's reflect_node) measures how
+    // many of the system's own internal grounding/quality checks passed
+    // (evidence found, rule matched, code present in retrieved docs,
+    // citations grounded, draft long enough) — not the probability of
+    // winning the dispute. A bare "Confidence 9/10" reads to a merchant as
+    // "90% chance I win," which this number was never designed to mean.
     const score = data.confidence_score || 0;
     const confClass = score >= 8 ? 'high' : score >= 5 ? 'medium' : 'low';
-    const confLabel = score > 0 ? `Confidence ${score}/10` : '';
+    const confLabel = score > 0 ? `Grounding confidence ${score}/10` : '';
     const confBadge = confLabel
-      ? `<span class="confidence-badge ${confClass}">${confLabel}</span>`
+      ? `<span class="confidence-badge ${confClass}" title="How many of the system's own grounding checks passed (evidence found, rule matched, citations verified) — not a prediction of whether you'll win the dispute.">${confLabel}</span>`
       : '';
 
     // Groundedness warning
