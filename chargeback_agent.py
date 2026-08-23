@@ -775,6 +775,38 @@ class DisputeAgent:
         reason_code  = state.get("reason_code",  "Unknown")
         card_network = state.get("card_network", "Unknown")
 
+        # Looked up BEFORE the LLM call (not just after, as before) — when a
+        # deterministic rule exists, it tells us exactly which of the ~30
+        # tags in EVIDENCE_TAG_LABELS are actually relevant to this reason
+        # code, which the LLM can be given directly instead of guessing from
+        # tag names alone against the full flat list. Confirmed live this
+        # was needed: for RuPay U002, a clear but terse merchant answer ("i
+        # checked i was credited only once") wasn't being recognized as
+        # single_credit_confirmed at all — evidence_present came back empty
+        # even though the rule already fully specifies that single-vs-
+        # duplicate credit is the only evidence category that matters here.
+        rule = decision_rules.RULES.get((card_network, reason_code))
+        if rule is None and reason_code == "4853":
+            subtype = decision_rules._detect_mc_4853_subtype(
+                f"{state.get('user_query', '')} {context}"
+            )
+            if subtype:
+                rule = decision_rules.RULES.get((card_network, f"4853#{subtype}"))
+
+        rule_guidance = ""
+        if rule is not None:
+            relevant_tags = sorted(set(rule.required_any) | set(rule.required_all))
+            if relevant_tags:
+                labeled = "; ".join(f"{t} ({EVIDENCE_TAG_LABELS.get(t, t)})" for t in relevant_tags)
+                rule_guidance = (
+                    "\n\nFor this specific reason code, ONLY these evidence tags "
+                    "actually matter — check the merchant's text carefully for "
+                    "anything matching them, even a short or informal statement "
+                    "(e.g. 'we checked and only one credit was received', 'yes, "
+                    "just the one payment went through' both count as "
+                    f"single_credit_confirmed): {labeled}"
+                )
+
         response = self._invoke([
             SystemMessage(content=(
                 "You are a chargeback evidence analyst.\n"
@@ -793,7 +825,8 @@ class DisputeAgent:
                 "Nice-to-have (do NOT ask for these):\n"
                 "  - Type of goods, cardholder communication, order date\n\n"
                 "evidence_present and evidence_missing MUST use ONLY these tags:\n"
-                f"  {', '.join(EVIDENCE_TAG_LABELS.keys())}\n\n"
+                f"  {', '.join(EVIDENCE_TAG_LABELS.keys())}"
+                f"{rule_guidance}\n\n"
                 "Respond ONLY with JSON:\n"
                 '{"evidence_present": ["tag", "..."], "evidence_missing": ["tag", "..."],\n'
                 ' "needs_more_info": false, "missing_info_question": ""}'
@@ -812,17 +845,10 @@ class DisputeAgent:
 
         evidence_present = data.get("evidence_present", [])
 
-        # If a deterministic rule exists for this code, replace the LLM's
-        # evidence_missing with only the tags that rule actually requires —
-        # prevents the LLM from flagging irrelevant tags (e.g. AVS/CVV/3DS
-        # as "missing" on a 4870 chip dispute where only emv_chip_data matters).
-        rule = decision_rules.RULES.get((card_network, reason_code))
-        if rule is None and reason_code == "4853":
-            subtype = decision_rules._detect_mc_4853_subtype(
-                f"{state.get('user_query', '')} {context}"
-            )
-            if subtype:
-                rule = decision_rules.RULES.get((card_network, f"4853#{subtype}"))
+        # Replace the LLM's evidence_missing with only the tags the rule
+        # actually requires — prevents the LLM from flagging irrelevant tags
+        # (e.g. AVS/CVV/3DS as "missing" on a 4870 chip dispute where only
+        # emv_chip_data matters).
         if rule is not None:
             required = set(rule.required_any) | set(rule.required_all)
             present_set = set(evidence_present)
