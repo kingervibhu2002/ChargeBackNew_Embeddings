@@ -1467,6 +1467,34 @@ class DisputeAgent:
                     "question is actually about."
                 )
 
+        # Shared across every branch above: found live that a question about
+        # evidence/proof for a specific reason code got answered from the
+        # WRONG side of the dispute — asked "what proofs do I need to submit
+        # at all three stages for U002" mid-way through actually defending a
+        # real U002 case, the answer listed "the customer's bank statements
+        # showing the duplicate debits... support the customer's claim for a
+        # refund" — evidence that argues FOR the customer, not the merchant
+        # this whole assistant exists to help. None of the branches above
+        # establish whose side evidence advice should be framed from, so the
+        # LLM defaulted to a neutral "how would you prove a duplicate
+        # transaction happened" framing instead. This tool's whole purpose
+        # (a chargeback dispute assistant for merchants) makes the answer
+        # unambiguous regardless of which branch fired, so it's appended
+        # once here rather than duplicated into every branch above.
+        system_prompt += (
+            "\n\nIMPORTANT: whenever evidence, proof, or documentation is "
+            "discussed for a reason code, frame it from the MERCHANT'S "
+            "defensive perspective — what the merchant should gather to "
+            "rebut/defend against the dispute — never from the perspective "
+            "of proving the underlying claim against the merchant. For "
+            "example, for a duplicate-transaction code, the relevant "
+            "evidence is the merchant's own settlement/transaction records "
+            "confirming only one credit was received (or a refund record if "
+            "a duplicate credit did occur) — not the customer's bank "
+            "statement showing they were debited twice, which supports the "
+            "customer's claim, not the merchant's defense."
+        )
+
         response = self._invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=(
