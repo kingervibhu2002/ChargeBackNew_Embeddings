@@ -277,6 +277,42 @@ class DisputeAgent:
             pass
         return context
 
+    def _filtered_open_cases(self, merchant_id: str, query: str) -> list:
+        """
+        The open-chargebacks list a case-list query should show/resolve
+        against — shared by _answer_question_node (rendering the list) and
+        _validate_node (resolving "the first one" on the next turn) so the
+        two can never drift apart and render one list while resolving
+        against a different one.
+
+        Applies an explicit reason-code filter from the query text itself
+        when present (e.g. "give me all U002 cases that are open") via
+        extract_network_and_code() — the same extraction already used
+        everywhere else in this file, not new logic. Found live: without
+        this, "Give me all U002 cases that are open" correctly matched
+        is_case_list_request() but the rendered list ignored the U002
+        filter entirely and showed every open case regardless of network/
+        code, and (before this method existed) the resolution step in
+        _validate_node would have derived a differently-filtered list than
+        whatever was actually rendered, silently resolving "the first one"
+        against the wrong set.
+
+        Args:
+            merchant_id: Server-resolved merchant scope.
+            query:       The case-list query text (e.g. state["user_query"]
+                         or masked_query) — checked for an explicit code.
+
+        Returns:
+            list[dict]: rows from merchant_db.list_open_chargebacks(),
+                       filtered to the mentioned reason code if any.
+        """
+        from merchant_db import list_open_chargebacks
+        cases = list_open_chargebacks(merchant_id, limit=100)
+        _, filter_code = classifier.extract_network_and_code(query)
+        if filter_code != "Unknown":
+            cases = [c for c in cases if c["reason_code"] == filter_code]
+        return cases
+
     def _validate_node(self, state: ChargebackState) -> dict:
         """
         Node 0 — Input guardrails + dispute intent check.
@@ -336,8 +372,7 @@ class DisputeAgent:
         raw_context_preview = state.get("additional_context", "")
         merchant_id_preview  = state.get("merchant_id", "")
         if raw_context_preview and merchant_id_preview and classifier.is_case_list_request(masked_query):
-            from merchant_db import list_open_chargebacks
-            shown = list_open_chargebacks(merchant_id_preview)
+            shown = self._filtered_open_cases(merchant_id_preview, masked_query)
             resolved = classifier.detect_case_selection(raw_context_preview, shown)
             if resolved:
                 masked_query = f"Help me with case {resolved}"
@@ -1073,18 +1108,30 @@ class DisputeAgent:
             # frontend changes needed. _validate_node's case-selection
             # resolution step reads that combination back on the next turn.
             if classifier.is_case_list_request(query):
-                from merchant_db import list_open_chargebacks
-                cases = list_open_chargebacks(merchant_id)
+                # Filtering (e.g. "give me all U002 cases that are open")
+                # and rendering both go through the same
+                # _filtered_open_cases() helper _validate_node's resolution
+                # step also uses — guarantees "the first one" on the next
+                # turn resolves against the exact same (possibly filtered)
+                # set that was actually shown here, never a different one.
+                cases = self._filtered_open_cases(merchant_id, query)
+                _, filter_code = classifier.extract_network_and_code(query)
+                case_label = f"open {filter_code} case(s)" if filter_code != "Unknown" else "open chargeback case(s)"
                 if not cases:
+                    no_match = (
+                        f"You have no open {filter_code} cases right now."
+                        if filter_code != "Unknown" else
+                        "You have no open chargeback cases right now."
+                    )
                     return {
-                        "final_answer":        "You have no open chargeback cases right now.",
+                        "final_answer":        no_match,
                         "retrieved_docs":      [],
                         "confidence_score":    8,
                         "is_grounded":         True,
                         "groundedness_issues": "",
                         "needs_more_info":     False,
                     }
-                lines = [f"I found {len(cases)} open chargeback case(s) for your account:\n"]
+                lines = [f"I found {len(cases)} {case_label} for your account:\n"]
                 for i, c in enumerate(cases, 1):
                     lines.append(
                         f"{i}. {c['case_id']} — RuPay {c['reason_code']} "
