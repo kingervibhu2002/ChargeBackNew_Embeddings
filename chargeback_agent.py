@@ -705,6 +705,16 @@ class DisputeAgent:
         # Guard 3 — PII masking (mask before anything downstream sees it)
         masked_query = mask_pii(query)
 
+        # Preserved separately from masked_query because the continuity
+        # block right below may overwrite masked_query entirely (e.g. to
+        # just the latest reply's bare text) — losing whatever case/
+        # reason-code reference the ORIGINAL pendingQuery carried. Kept
+        # around so the anaphoric follow-up fallback further down can
+        # re-attach that reference instead of operating on a completely
+        # contextless string. See that fallback's comment for the live
+        # failure this fixes.
+        original_masked_query = masked_query
+
         # Case-list continuity: chat.html always resends the ORIGINAL query
         # as pendingQuery on every follow-up turn (needs_more_info=True
         # keeps the same query in play until the conversation resolves) —
@@ -896,8 +906,35 @@ class DisputeAgent:
         # empty there). Confirmed via live 2-turn test: without this,
         # "Are all of those covered?" was rejected even with the correct
         # prior-turn context already attached.
+        # Confirmed live this rescue was incomplete: it fixed the
+        # classification verdict but not what actually gets answered.
+        # "what documentation is required for this?" (bare) is "invalid"
+        # in isolation, correctly flips to "question" once combined with
+        # context — but state["user_query"] stayed the bare text, so
+        # _answer_question_node ran with zero case/reason-code reference,
+        # its KB search matched a generic Visa/Mastercard/Amex/Discover
+        # "retrieval request" document, and it answered confidently from
+        # the wrong network entirely.
+        #
+        # Fix: when the rescue succeeds, also rewrite masked_query itself
+        # to carry the recovered topic — using original_masked_query (the
+        # untouched pendingQuery text, which may hold the real case/
+        # reason-code reference the continuity block above already
+        # discarded) plus only the LATEST segment of context, not the
+        # full multi-turn blob. Using the full blob here would risk
+        # reintroducing the case-list misrouting bug fixed earlier this
+        # session: an earlier stale segment (e.g. "show me my open
+        # chargebacks") would make _answer_question_node's own
+        # looks_like_data_lookup() check fire again and re-trigger the
+        # listing tool instead of answering the real question.
         if query_type == "invalid" and context:
-            query_type = classifier.classify_query_type(f"{masked_query} {context}")
+            segments = [s.strip() for s in context.split('\n\n') if s.strip()]
+            latest_context_segment = segments[-1] if segments else context
+            combined = f"{original_masked_query} {latest_context_segment}"
+            retried_type = classifier.classify_query_type(combined)
+            if retried_type != "invalid":
+                query_type = retried_type
+                masked_query = combined
 
         is_valid   = query_type not in ("invalid", "escalation")
 
