@@ -317,6 +317,31 @@ class DisputeAgent:
         # Guard 3 — PII masking (mask before anything downstream sees it)
         masked_query = mask_pii(query)
 
+        # Case-list continuity: chat.html always resends the ORIGINAL query
+        # as pendingQuery on every follow-up turn (needs_more_info=True
+        # keeps the same query in play until the conversation resolves) —
+        # so on a genuine follow-up to "show me my open chargebacks", this
+        # masked_query is still that same listing request, and
+        # additional_context holds whatever the merchant just replied (e.g.
+        # "the first one"). Re-derive the list fresh here — cheap,
+        # deterministic, always current — rather than trying to remember it
+        # from the prior turn, which the checkpointer can't yet do reliably
+        # (run() still rebuilds a full blank initial_state on every call;
+        # confirmed via a standalone test earlier this session that this
+        # overwrites rather than merges with any prior checkpoint). If the
+        # merchant's reply resolves to a specific case, rewrite the query to
+        # an explicit case reference so classify_query_type() below routes
+        # it as a normal dispute — _planner_node's existing step 4b case
+        # lookup (merchant_id-scoped) picks it up from there, unchanged.
+        raw_context_preview = state.get("additional_context", "")
+        merchant_id_preview  = state.get("merchant_id", "")
+        if raw_context_preview and merchant_id_preview and classifier.is_case_list_request(masked_query):
+            from merchant_db import list_open_chargebacks
+            shown = list_open_chargebacks(merchant_id_preview)
+            resolved = classifier.detect_case_selection(raw_context_preview, shown)
+            if resolved:
+                masked_query = f"Help me with case {resolved}"
+
         # Guard 4 — deterministic intent classification (no LLM call)
         query_type = classifier.classify_query_type(masked_query)
 
@@ -1015,6 +1040,60 @@ class DisputeAgent:
                     "is_grounded":         True,
                     "groundedness_issues": "",
                 }
+            # A plain "show me my open chargebacks" (as opposed to an
+            # aggregate question like "how much is outstanding") gets a
+            # deterministic list here instead of text_to_sql.py's free-form
+            # NL->SQL — that path has no guaranteed row order, and a
+            # follow-up like "tell me about the first one" needs "first" to
+            # mean the same case it meant when the list was rendered.
+            # list_open_chargebacks() is the same function already backing
+            # /my-open-chargebacks' case-picker chips (soonest deadline
+            # first), so this reuses the canonical ordering rather than
+            # introducing a second one. needs_more_info=True here (not the
+            # default False every other branch in this node relies on) is
+            # what makes chat.html's existing handleDispute treat this as
+            # an ongoing conversation — it already resends the original
+            # query as pendingQuery plus the merchant's reply as
+            # additional_context for any needs_more_info=True response, no
+            # frontend changes needed. _validate_node's case-selection
+            # resolution step reads that combination back on the next turn.
+            if classifier.is_case_list_request(query):
+                from merchant_db import list_open_chargebacks
+                cases = list_open_chargebacks(merchant_id)
+                if not cases:
+                    return {
+                        "final_answer":        "You have no open chargeback cases right now.",
+                        "retrieved_docs":      [],
+                        "confidence_score":    8,
+                        "is_grounded":         True,
+                        "groundedness_issues": "",
+                        "needs_more_info":     False,
+                    }
+                lines = [f"I found {len(cases)} open chargeback case(s) for your account:\n"]
+                for i, c in enumerate(cases, 1):
+                    lines.append(
+                        f"{i}. {c['case_id']} — RuPay {c['reason_code']} "
+                        f"({c['reason_description']}), ₹{c['chargeback_amount']:,.2f}, "
+                        f"due {c['response_deadline']}"
+                    )
+                if len(cases) > 1:
+                    lines.append(
+                        f"\nThe {cases[0]['case_id']} case has the earliest deadline "
+                        f"({cases[0]['response_deadline']}) — want to start with that "
+                        "one? Tell me which case (e.g. \"the first one\", \"#2\", or "
+                        "the case ID)."
+                    )
+                else:
+                    lines.append("\nWant me to walk you through this one?")
+                return {
+                    "final_answer":        "\n".join(lines),
+                    "retrieved_docs":      [],
+                    "confidence_score":    8,
+                    "is_grounded":         True,
+                    "groundedness_issues": "",
+                    "needs_more_info":     True,
+                }
+
             from text_to_sql import query_chargebacks
             result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
             answer = (

@@ -12,7 +12,7 @@ All functions are pure Python with no external dependencies.
 
 import difflib
 import re
-from typing import Tuple
+from typing import Dict, List, Optional, Tuple
 
 # A specific UTR (UPI Transaction Reference) or NPCI case ID, e.g.
 # "UTR20260802M002359516" / "NPCI20260818M002359516" (see merchant_db.py's
@@ -571,3 +571,159 @@ def is_clarifying_question(text: str) -> bool:
         latest.strip().endswith("?")
         or any(latest.lower().strip().startswith(w) for w in _QUESTION_STARTER_WORDS)
     )
+
+
+# ---------------------------------------------------------------------------
+# Case-list continuity: "show me my chargebacks" -> "tell me about the first
+# one". detect_case_selection() resolves the second turn back to a real
+# case_id so it can be rewritten into an explicit case reference and handed
+# to the existing case-lookup path (chargeback_agent.py's _planner_node step
+# 4b) — no new dispute-handling logic needed downstream of the resolution.
+# ---------------------------------------------------------------------------
+
+# Same regex chargeback_agent.py's _answer_question_node already uses to
+# detect a query about the caller's own chargeback records — duplicated
+# here (not imported, to avoid a chargeback_agent.py <-> classifier.py
+# circular import) so is_case_list_request() can reuse the identical
+# matching logic rather than drifting from it over time.
+_PERSONAL_DATA_RE = re.compile(
+    r'\b(my|i have|i\'ve got|do i have|how many)\b.{0,30}\b(chargeback|dispute|case)s?\b'
+    r'|\b(chargeback|dispute|case)s?\b.{0,30}\b(status|open|pending|outstanding|due)\b',
+    re.IGNORECASE
+)
+
+# A personal_data_intent match that also contains one of these is asking
+# for a number/total, not a list of cases to pick from afterward — "how
+# much is outstanding this month" doesn't invite a "tell me about the
+# first one" follow-up the way "show me my open chargebacks" does. Kept
+# separate from is_case_list_request's caller so aggregate questions keep
+# going through text_to_sql.py's flexible NL->SQL unchanged.
+_AGGREGATE_WORDS = (
+    "how much", "total", "win rate", "outstanding amount", "average",
+)
+
+
+def is_case_list_request(query: str) -> bool:
+    """
+    True if `query` is asking to see/list the caller's own open chargeback
+    cases specifically (not an aggregate question like a total or a win
+    rate) — the shape of query whose response should support a follow-up
+    like "tell me about the first one".
+
+    Args:
+        query: The merchant's query (PII-masked).
+
+    Returns:
+        True if this is a case-listing request.
+    """
+    q = query.lower()
+    return bool(_PERSONAL_DATA_RE.search(query)) and not any(w in q for w in _AGGREGATE_WORDS)
+
+
+# Ordinal words a merchant might use to refer back to one of the cases
+# just listed, mapped to a 0-based index into that list (in display order,
+# i.e. the same order list_open_chargebacks() already returns — soonest
+# deadline first). No such list existed anywhere in this codebase before
+# this — built fresh, not adapted from an existing constant.
+#
+# Deliberately ordinals only ("first", "1st") — NOT bare cardinal numbers
+# ("one", "two"). Confirmed live during testing: "the second one please"
+# was matching "one" (index 0) before the loop ever reached "second"
+# (index 1), because "one" is also the placeholder noun in "second one" /
+# "third one" phrasing, not just a synonym for "first". A cardinal number
+# word is too ambiguous to trust as an ordinal on its own.
+_ORDINAL_WORDS = {
+    "first": 0, "1st": 0,
+    "second": 1, "2nd": 1,
+    "third": 2, "3rd": 2,
+    "fourth": 3, "4th": 3,
+    "fifth": 4, "5th": 4,
+}
+
+_NUMBER_HASH_RE = re.compile(r'#\s*(\d+)|\bcase\s+(\d+)\b', re.IGNORECASE)
+
+# Bare confirmation with no other specific content — only trustworthy as a
+# case selection when exactly one case was shown (nothing else for "yes"
+# to disambiguate between). Deliberately a small, literal set rather than
+# reusing classifier._JUNK_REPLY_WORDS — that set exists to flag replies as
+# uninformative, the opposite intent from "these specific words DO count
+# as a valid selection when the context is unambiguous."
+_BARE_CONFIRM_WORDS = {"yes", "yeah", "yep", "sure", "ok", "okay", "that one"}
+
+
+def detect_case_selection(text: str, shown_cases: List[Dict]) -> Optional[str]:
+    """
+    Resolve a merchant's follow-up reply to one of the cases just listed
+    back to a real case_id, or None if it doesn't unambiguously resolve.
+
+    Deliberately conservative — every branch requires a specific, matched
+    signal; there is no "just guess the first one" fallback. A merchant
+    typing a genuinely new, unrelated question in this slot (e.g. "what
+    does U002 mean?") must resolve to None here so it falls through to
+    normal classification instead of being silently misread as a case
+    pick.
+
+    Args:
+        text:        The merchant's reply (PII-masked). May be the latest
+                     of several turns joined by blank lines, per this
+                     module's usual multi-turn convention — only the
+                     latest segment is checked, matching
+                     is_clarifying_question's own semantics.
+        shown_cases: The ordered list of case dicts (as returned by
+                     merchant_db.list_open_chargebacks(), soonest deadline
+                     first) that was actually rendered to the merchant —
+                     order here must match what was displayed, since an
+                     ordinal/number reference is resolved positionally.
+
+    Returns:
+        The resolved case_id, or None if nothing matched unambiguously.
+    """
+    if not shown_cases:
+        return None
+
+    segments = [s.strip() for s in text.split('\n\n') if s.strip()]
+    latest = (segments[-1] if segments else text).strip()
+
+    # A genuine question ("what does U002 mean?") is never a selection,
+    # even when it happens to name one of the shown cases' reason codes —
+    # confirmed live during testing: "what does U002 mean?" was matching
+    # the U002 case via the reason-code check below before this existed.
+    # Reuses the same check _validate_node already treats as authoritative
+    # for "is the merchant asking a question" elsewhere in this module.
+    if is_clarifying_question(latest):
+        return None
+
+    t = latest.lower()
+
+    m = _NUMBER_HASH_RE.search(t)
+    if m:
+        idx = int(m.group(1) or m.group(2)) - 1
+        if 0 <= idx < len(shown_cases):
+            return shown_cases[idx]["case_id"]
+
+    for word, idx in _ORDINAL_WORDS.items():
+        if re.search(rf'\b{re.escape(word)}\b', t) and idx < len(shown_cases):
+            return shown_cases[idx]["case_id"]
+
+    # A bare reason-code substring match is too loose on its own — "can you
+    # explain U001 to me" is a description request, not a selection, but
+    # would still match "u001" as a substring. Require the code to sit next
+    # to an actual selection cue (the/that/this before it, or one/case/
+    # dispute after it) — "the U008 one" or "U001 case" qualify, "explain
+    # U001" does not. Confirmed live: without this, "can you explain U001
+    # to me" incorrectly resolved to the U001 case.
+    matches = [
+        c for c in shown_cases
+        if c.get("reason_code") and re.search(
+            rf'\b(the|that|this)\s+{re.escape(c["reason_code"].lower())}\b'
+            rf'|\b{re.escape(c["reason_code"].lower())}\s+(one|case|dispute)\b',
+            t,
+        )
+    ]
+    if len(matches) == 1:
+        return matches[0]["case_id"]
+
+    if len(shown_cases) == 1 and t in _BARE_CONFIRM_WORDS:
+        return shown_cases[0]["case_id"]
+
+    return None
