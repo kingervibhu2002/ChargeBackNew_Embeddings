@@ -118,6 +118,81 @@ evidence_present = data.get("evidence_present", [])
 
 If the model's JSON is malformed, the merchant sees "no evidence identified yet" instead of the whole request crashing with a Python exception. Small detail, but it's the difference between a graceful degradation and a 500 error in production.
 
+### 1.6 Tool calling — letting the model ask for real data
+
+Everything above (`SystemMessage`/`HumanMessage`/JSON-parsing) is how most of this project's LLM calls work — but it has a real limit: the model can only reason about text you already put in front of it. It cannot look anything up itself.
+
+**Tool calling** solves that. You describe a set of functions to the model (name, arguments, a docstring explaining when to use it) via `.bind_tools([...])`. The model doesn't run those functions — it can't; it has no code execution ability — it can only reply "please call `get_case_details` with `case_id="NPCI2026..."`" and hand that decision back to you as structured data. Your own code then actually runs the real function, and feeds the result back to the model as a new message so it can continue reasoning with real information instead of guessing.
+
+This project added this pattern for exactly one class of problem: deciding what a merchant means by a message like *"what all U002 cases exist currently?"* or *"tell me about the first one."* Regex-based intent detection (`classifier.is_case_list_request()`, since removed) kept breaking on new phrasings — every fix caught one pattern and missed the next. Tool calling lets the model itself decide, in natural language, which real lookup (if any) a message is asking for.
+
+```python
+# chargeback_agent.py — the actual tool definitions
+from langchain_core.tools import tool
+
+@tool
+def list_merchant_cases(reason_code: str = "") -> str:
+    """List the merchant's own open chargeback cases so they can be shown
+    or picked from, optionally filtered to one reason code (e.g. U002).
+    Use this when the merchant wants to SEE or SELECT a case."""
+    return ""   # never executed — see below for why
+
+@tool
+def query_chargeback_data(question: str) -> str:
+    """Answer an analytical/aggregate question about the merchant's own
+    chargeback data (totals, counts, amounts due) by running it against
+    the database. Use this for computed numbers, not for listing cases."""
+    return ""
+```
+
+Notice the function **bodies are empty** and never run. `@tool` only uses the function's name, argument types, and docstring to build a schema the model reads — the docstring is literally the instructions the model uses to decide *when* to call this tool, so wording it precisely matters as much as wording a `SystemMessage` does. The real logic lives in this project's own code, dispatched manually once the model's decision comes back:
+
+```python
+# A trimmed version of _resolve_data_lookup_intent()
+ai_msg = self._invoke_with_tools(messages, [list_merchant_cases, query_chargeback_data])
+messages.append(ai_msg)
+
+if not ai_msg.tool_calls:
+    return None   # the model decided neither tool applies — not a data-lookup query
+
+tool_call = ai_msg.tool_calls[0]   # {"name": "list_merchant_cases", "args": {...}, "id": "..."}
+
+if tool_call["name"] == "list_merchant_cases":
+    reason_code = tool_call["args"].get("reason_code", "")
+    cases = self._filtered_open_cases(merchant_id, reason_code)   # the REAL lookup
+    messages.append(ToolMessage(
+        content=f"Found {len(cases)} matching case(s).",
+        tool_call_id=tool_call["id"],   # links this result back to that specific call
+    ))
+```
+
+Three new pieces beyond what Part 1 already covered:
+
+- **`.bind_tools([...])`** — attaches the tool schemas to a chat model before `.invoke()`. `_invoke_with_tools()` is this project's own thin wrapper mirroring `_invoke()`'s primary/fallback pattern, just with tools bound on both models.
+- **`AIMessage.tool_calls`** — when the model decides to use a tool instead of (or before) answering directly, its response (`ai_msg` above) carries a `tool_calls` list instead of, or alongside, plain text content. Each entry has the tool's `name`, the `args` the model chose to pass, and an `id`.
+- **`ToolMessage`** — the message type you append *after* actually running the real function, carrying the result back into the conversation and referencing which `tool_call_id` it's answering. This is what makes the model's next `.invoke()` call (if there is one) aware of what the tool actually returned.
+
+**Multi-round tool calling.** One case in this project needs more than one round: `_build_case_intro()` (built for "tell me about the first one" landing on a real case) gives the model two tools, `get_case_details` and `get_reason_code_info` — but `get_reason_code_info` needs a `reason_code` argument the model can't know until it's seen `get_case_details`' result. Confirmed live before writing this: given both tools in a single round, the model correctly calls only `get_case_details` first, rather than guessing. The fix is a capped loop, not a single call:
+
+```python
+# A trimmed version of _build_case_intro()'s loop
+for _ in range(4):                                            # capped, never unbounded
+    ai_msg = self._invoke_with_tools(messages, [get_case_details, get_reason_code_info])
+    messages.append(ai_msg)
+    if not ai_msg.tool_calls:
+        break                                                  # model is done — has its final answer
+    for tc in ai_msg.tool_calls:
+        result = <run the real function for tc["name"]>
+        messages.append(ToolMessage(content=result, tool_call_id=tc["id"]))
+# messages now holds: SystemMessage, HumanMessage, AIMessage(tool_calls=[get_case_details]),
+#                      ToolMessage(case details), AIMessage(tool_calls=[get_reason_code_info]),
+#                      ToolMessage(reason-code info), AIMessage(final prose answer, no more tool_calls)
+```
+
+Each iteration re-invokes the model with everything learned so far appended to the message list — invoke → execute whatever it asked for → append the result → invoke again — until it stops asking for tools (or the cap is hit, at which point one final tool-free call forces a synthesis rather than returning empty scaffolding).
+
+**Where this fits the project's "rule-based over LLM-based" philosophy** (see `README.md`'s Design principles): tool calling is still the *expensive, judgment-call* option, reserved for genuinely open-ended intent detection. It is not automatically trusted for every phrasing, either — a later fix added a narrow, deterministic **short-circuit** ahead of the tool-calling decision for financial-balance questions ("how much is outstanding," "what do I owe"), after live testing showed the model's tool-calling choice for that exact phrasing wasn't perfectly reproducible run to run (`classifier.looks_like_aggregate_question()`, checked before `_invoke_with_tools()` is ever called). The lesson generalizes: even inside an LLM-decision layer, carve out the well-defined slices back into plain code wherever you can — reserve the model's judgment for the genuinely ambiguous remainder.
+
 ## Part 2: LangGraph — orchestrating many steps
 
 ### 2.1 Why not just one big prompt?
@@ -234,11 +309,19 @@ result = self._graph.invoke(initial_state)
 
 You hand it a starting state (usually mostly blank), and LangGraph runs node after node — following plain edges automatically, calling routing functions wherever there's a conditional edge — until execution reaches `END`, then hands you back whatever the state looks like at that point.
 
-### 2.7 Checkpointers — an honest note
+### 2.7 Checkpointers — an honest note, updated
 
-LangGraph supports an optional **checkpointer**: a way to save the state after each node runs, so a *later* `.invoke()` call with the same `thread_id` can resume mid-conversation instead of starting over. `DisputeAgent` accepts one (`checkpointer=None` by default) and passes it into `.compile(checkpointer=self._checkpointer)`.
+LangGraph supports an optional **checkpointer**: a way to save the state after each node runs, so a *later* `.invoke()` call with the same `thread_id` can resume mid-conversation instead of starting over. `DisputeAgent` accepts one and passes it into `.compile(checkpointer=self._checkpointer)`.
 
-Worth knowing as a real-world lesson: this project's API layer (`api_server.py`) doesn't currently wire a `thread_id` through from the browser, so every `/dispute` call effectively starts a fresh graph run regardless. Multi-turn conversations still work — but through a *simpler* mechanism: the browser (`chat.html`) itself remembers the original question and re-sends it, along with the merchant's follow-up reply, as the `additional_context` field on the next call. The checkpointer machinery is there and correctly wired, but this particular app doesn't currently lean on it. A good reminder that a library offering a feature doesn't mean every project built with it uses that feature.
+This is a real, live piece of infrastructure now, not a hypothetical: `api_server.py` constructs an actual `SqliteSaver` on startup (`checkpoints.db`, in local file mode — see `.gitignore`, which excludes it and its WAL sidecar files as regenerable/runtime state) and passes it into `build_dispute_agent(checkpointer=_checkpointer)`. Every `/dispute` response includes a `thread_id`, generated server-side and scoped to the caller's identity (`{merchant_id}:{uuid4}` — checked on the way back in, so one merchant can't resume a session that belongs to another).
+
+**But it still isn't what makes multi-turn conversations work in this app.** Confirmed by reading `chat.html`: the browser never reads or resends the `thread_id` the server returns. Since `run()` generates a brand-new UUID whenever no `thread_id` is supplied (`if not thread_id: thread_id = str(uuid.uuid4())`), and the browser never supplies one, every single `/dispute` call is, from the checkpointer's point of view, the *first* message of a brand-new thread — there is never a second `.invoke()` call on the same `thread_id` for it to resume. The checkpointer faithfully writes a fresh entry to `checkpoints.db` on every call and none of them are ever read back.
+
+Multi-turn conversations work anyway, through a *completely separate*, simpler mechanism: `chat.html` itself remembers the original question (`pendingQuery`, set once and never touched again while the agent keeps asking follow-ups) and re-sends it verbatim on every subsequent call, along with every follow-up reply joined together as `additional_context`. `_validate_node` re-derives whatever it needs (which case was being discussed, whether a reply resolves to a specific case selection, etc.) fresh from that resent text on every single call — there is no persisted memory across calls at all, LangGraph-native or otherwise.
+
+Why this matters in practice: it's the reason a case-selection sub-conversation can lose context after several turns (see `README.md`'s note on the Dispute Assistant's known limitation) — nothing is actually "remembered" server-side; everything downstream is re-derived from whatever text the browser happens to resend, and that resending logic has its own edge cases (e.g. a "complete" answer resets `chat.html`'s state entirely, discarding `pendingQuery` even mid-topic).
+
+Two honest takeaways: (1) a library offering a feature doesn't mean a project actually exercises it — the checkpointer here is correctly wired but functionally inert; (2) `thread_id` earns its keep anyway, just for a different reason than resumption — it's a security-scoping token (so a guessed/leaked `thread_id` can't be replayed against another merchant's identity), independent of whether anything ever actually resumes on it.
 
 ## Part 3: Walking through one real request
 
@@ -286,6 +369,57 @@ Let's trace an actual message end-to-end: **"Mastercard chargeback — customer 
 
 `api_server.py` sends that `final_answer` back to the browser as the follow-up question. When the merchant replies (say, "fraud, and yes we have 3DS authentication"), the browser calls `/dispute` *again* — a brand-new `graph.invoke()` — but this time with `additional_context` filled in, so at step 8, `extract_code_node` finds a real code this time, `_route_after_extract_code` sends it to `"detect_clarification"` instead of back to `"ask_user"`, and the graph continues on into evidence extraction, the fight/refund decision, and (if fighting) drafting the actual letter — each of those exactly as described in Parts 1 and 2 above.
 
+### 3.1 A second trace: tool calling across several turns
+
+This one covers a different, newer path — the case-listing/case-intro conversation, entirely inside `_validate_node`, using the tool-calling pattern from Part 1.6. It never reaches `planner_node`/`decide_node` at all when it resolves cleanly.
+
+```
+Turn 1 — "show me my open chargebacks"
+
+1. validate_node runs. additional_context is empty (first turn), so the
+   continuity block is skipped entirely — nothing to resolve yet.
+2. classify_query_type(...) → "question"
+3. _route_after_validate → "answer_question" → _answer_question_node runs
+4. classifier.looks_like_data_lookup(query) → True (matches "chargebacks")
+5. _resolve_data_lookup_intent(merchant_id, query) runs:
+     - builds [SystemMessage(...), HumanMessage("show me my open chargebacks")]
+     - self._invoke_with_tools(messages, [list_merchant_cases, query_chargeback_data])
+     - model's AIMessage comes back with tool_calls=[{"name": "list_merchant_cases",
+       "args": {"reason_code": ""}, "id": "call_1"}]
+     - real function runs: merchant_db.list_open_chargebacks(merchant_id)
+     - ToolMessage(content="Found 7 matching case(s).", tool_call_id="call_1") appended
+     - returns {"type": "list", "reason_code": ""}
+6. _answer_question_node deterministically renders the 7 cases (soonest
+   deadline first) and asks which one — {"needs_more_info": True, ...}
+7. edge to END. api_server.py returns final_answer + needs_more_info=True.
+
+Turn 2 — chat.html resends {query: "show me my open chargebacks",
+          additional_context: "tell me about the first one"}
+
+1. validate_node runs. additional_context is non-empty this time, so the
+   continuity block DOES run:
+     - looks_like_data_lookup(masked_query) → True
+     - _resolve_data_lookup_intent(merchant_id, masked_query) → same
+       list-tool-call decision as turn 1 (this masked_query is still the
+       "show me my open chargebacks" text) → {"type": "list", "reason_code": ""}
+     - classifier.detect_case_selection("tell me about the first one",
+       shown_cases) → resolves to the real case_id (ordinal "first" +
+       shown_cases sorted soonest-deadline-first)
+2. _build_case_intro(merchant_id, resolved_case_id) runs — the
+   multi-round loop from Part 1.6: get_case_details, then
+   get_reason_code_info once the reason code is known, then a final
+   prose synthesis with no more tool_calls.
+3. _validate_node returns EARLY (mirrors the length-check/prompt-
+   injection guards from Part 2's step 2) with final_answer already set,
+   no query_type — so _route_after_validate sees query_type="" (the
+   TypedDict default), falls through its if/if chain, and returns "end".
+4. edge to END. The merchant sees a case summary + reason-code
+   explanation + evidence ask, in one turn — no separate trip through
+   planner_node/extract_evidence_node needed for this landing turn.
+```
+
+The interesting LangGraph point here: none of this needed a new node, edge, or state field. `_validate_node` — already the very first node in the graph — is where all of it lives, because an early `return {...}` with no `query_type` set is a pattern the graph already understood (`_route_after_validate` already treats a missing/empty `query_type` as "route to end"). The tool-calling loop itself is plain Python inside that one node's method body, not graph structure.
+
 ## Quick glossary
 
 | Term | Plain-English meaning | Where in this project |
@@ -302,12 +436,17 @@ Let's trace an actual message end-to-end: **"Mastercard chargeback — customer 
 | `END` | A sentinel meaning "this run is finished" | Used throughout `_build_graph()` |
 | `.compile()` | Validates the graph's wiring, returns a runnable object | `_build_graph()`'s last line |
 | `.invoke()` (on a graph) | Run the whole graph from the entry point to `END` | `DisputeAgent.run()` |
-| Checkpointer | Optional: save/resume state across separate `.invoke()` calls | Accepted by `DisputeAgent`, not currently exercised by `api_server.py` |
+| Checkpointer | Save/resume state across separate `.invoke()` calls, keyed by `thread_id` | Real `SqliteSaver` wired in `api_server.py` (`checkpoints.db`) — but functionally inert, since `chat.html` never resends the `thread_id` needed to resume (see §2.7) |
+| `@tool` | Decorator that turns a Python function into a tool schema the model can request — its body is never executed by the framework | `list_merchant_cases`, `query_chargeback_data`, `get_case_details`, `get_reason_code_info` in `chargeback_agent.py` |
+| `.bind_tools([...])` | Attaches tool schemas to a chat model before `.invoke()` | `DisputeAgent._invoke_with_tools()` |
+| `AIMessage.tool_calls` | The model's response, when it chooses to request a tool instead of/alongside answering directly — a list of `{name, args, id}` | Read in `_resolve_data_lookup_intent()` and `_build_case_intro()` |
+| `ToolMessage` | The message you append after actually running the real function, carrying its result back to the model, linked via `tool_call_id` | Same two methods |
 
 ## Where to look in the code
 
-- **`chargeback_agent.py`** — everything described in this document lives here. Search for `_build_graph` to see the whole graph wired up in one place; search for any `_route_after_*` function to see a routing decision; search for `self._invoke(` to find every LLM call in the project.
+- **`chargeback_agent.py`** — everything described in this document lives here. Search for `_build_graph` to see the whole graph wired up in one place; search for any `_route_after_*` function to see a routing decision; search for `self._invoke(` to find every plain LLM call, and `self._invoke_with_tools(` for every tool-calling one.
 - **`llm_provider.py`** — the LangChain chat-model construction (`ChatGroq`/`ChatOpenAI`), and the provider-switching logic from Part 1.
 - **`guardrails.py`** — `_parse_json_safe()`, the safe-JSON-parsing helper from Part 1.5.
-- **`classifier.py`** / **`decision_rules.py`** — the plain-Python (no LangChain, no LangGraph, no LLM) logic that several nodes call into, worth reading side-by-side with the nodes that use them to see the "rule-based over LLM-based" split in action.
+- **`classifier.py`** / **`decision_rules.py`** — the plain-Python (no LangChain, no LangGraph, no LLM) logic that several nodes call into, worth reading side-by-side with the nodes that use them to see the "rule-based over LLM-based" split in action — including `looks_like_data_lookup()` (a cheap pre-filter before spending a tool-calling round) and `looks_like_aggregate_question()` (a deterministic short-circuit that skips tool calling entirely for one narrow, well-defined phrasing — see Part 1.6's closing note).
+- **`_resolve_data_lookup_intent()`** and **`_build_case_intro()`** — the two real tool-calling call sites, single-round and multi-round respectively; read them side-by-side with Part 1.6.
 - **`README.md`** — the full project architecture and every module's purpose, one level up from this document's LangChain/LangGraph-specific focus.

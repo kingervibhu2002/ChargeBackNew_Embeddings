@@ -42,6 +42,8 @@ The app has three tabs in the chat UI, plus one background feature that runs wit
 
 2. **Dispute Assistant** — describe an actual chargeback you received ("Mastercard chargeback, customer says the charge is fraudulent, but they placed the order through our 3D Secure checkout") and the agent will ask a follow-up if it's missing information, extract what evidence you have, recommend fight or refund, and — if fighting — draft an actual rebuttal letter addressed to your acquiring bank. Login here is optional but adds real value: once you select your merchant identity (same selector as the "My Chargebacks" tab), the welcome screen shows a live summary of your open chargebacks and one clickable suggestion per case — picking one grounds the whole conversation in that case's real database row (actual reason code, actual amount) instead of whatever the agent can infer from free text, and skips straight to a recommendation when one is already available rather than asking you to re-describe a case the system already has on file.
 
+   You can also just talk to it conversationally instead of clicking: "show me my open chargebacks" lists them, "tell me about the first one" (or "#2", or the case ID) picks one and gets a real case summary + reason-code explanation before anything else, and a genuine follow-up question mid-conversation ("what does U002 mean?", "how much is outstanding?") gets answered without losing your place. Which of your own real cases/data a message is asking about is decided by the LLM itself via real tool calling (see [`LANGCHAIN_LANGGRAPH_GUIDE.md`](LANGCHAIN_LANGGRAPH_GUIDE.md#16-tool-calling--letting-the-model-ask-for-real-data)) rather than pattern-matched phrasing, since regex kept missing new ways of asking the same thing. One known limitation: this conversational memory lives entirely in the browser, re-sending the whole exchange on every turn (see [How a request actually flows](#2-describing-a-chargeback-dispute-assistant-tab) below) — a "complete" answer resets that memory, so a case you were just discussing can drop out of context a few turns later if the conversation branches into a fully-answered tangent first.
+
 3. **My Chargebacks** — ask questions about your own chargeback record history in plain English: "how many open chargebacks do I have?", "show me everything due this week." Converted to SQL behind the scenes, scoped so you can only ever see your own data (unless you're logged in as bank staff, who can see across all merchants).
 
 4. **Auto-decision automation** (no UI — runs as a scheduled job) — a merchant can opt in to having the same fight/refund logic the Dispute Assistant uses applied automatically to their open chargebacks on a schedule, instead of requiring them to describe each case manually. Merchants who don't opt in still get an advisory suggestion written onto their case, without anything being auto-applied.
@@ -139,7 +141,12 @@ Browser → POST /dispute {query, additional_context}
           just means an anonymous session, same as before this existed)
         → chargeback_agent.py: DisputeAgent.run(..., merchant_id=...)
             → validate_node       — is this really a dispute? filter
-                                     junk/non-informative follow-up replies
+                                     junk/non-informative follow-up replies;
+                                     also resolves case-listing/case-selection
+                                     conversations here via real LLM tool
+                                     calling (see below) — can return early
+                                     with a full answer, skipping the rest
+                                     of the pipeline entirely
             → planner_node        — regex-extract network + reason code,
                                      retrieve relevant policy chunks; if the
                                      query names a real UTR/case ID AND a
@@ -171,7 +178,35 @@ Browser → POST /dispute {query, additional_context}
         → return decision, confidence, evidence checklist, letter text
 ```
 
-The graph can pause and resume — if it doesn't yet have enough information (no reason code, or no evidence details), it ends early with a question for the merchant, and the next `/dispute` call carries their reply forward as `additional_context`.
+The graph can pause and resume — if it doesn't yet have enough information (no reason code, or no evidence details), it ends early with a question for the merchant, and the next `/dispute` call carries their reply forward as `additional_context`. Crucially, this "resume" is not a LangGraph checkpointer resuming saved state — it's the browser (`chat.html`) itself re-sending the original question plus every reply so far, and the server re-deriving everything it needs from that text on each call. See [`LANGCHAIN_LANGGRAPH_GUIDE.md`'s honest note on checkpointers](LANGCHAIN_LANGGRAPH_GUIDE.md#27-checkpointers--an-honest-note-updated) for why: a real checkpointer *is* wired up and actively saving state, but the one thing needed to actually resume from it — the browser resending the same `thread_id` — never happens.
+
+**Conversational case exploration** ("show me my open chargebacks" → "tell me about the first one" → a follow-up question) is handled entirely inside `validate_node`, before the rest of the pipeline above ever runs:
+
+```
+validate_node, when additional_context is present:
+    → classifier.looks_like_data_lookup() — cheap, loose pre-filter:
+      could this possibly be about the merchant's own data?
+    → if so: real LLM tool calling decides which of two tools applies
+      (list_merchant_cases / query_chargeback_data) — replaced an
+      earlier regex approach that kept missing new phrasings
+    → classifier.detect_case_selection() — does the merchant's reply
+      ("the first one", "#2", a case ID) resolve to one of the cases
+      just shown?
+    → if yes: _build_case_intro() — a SEPARATE, multi-round tool-calling
+      loop (get_case_details, then get_reason_code_info once the reason
+      code is known) builds a real case summary + reason-code
+      explanation + evidence ask, grounded in the actual database row
+      and knowledge base — then validate_node returns EARLY with the
+      full answer, skipping planner_node/decide_node/generate_node
+      entirely for this turn
+    → if no: promote the merchant's latest reply to be this turn's
+      query, so it gets classified and answered fresh — using only the
+      LATEST reply, never the whole accumulated conversation, so an
+      earlier turn's listing request can't bleed into and misroute a
+      later, unrelated question
+```
+
+Full explanation of the tool-calling mechanics (`@tool`, `.bind_tools()`, `AIMessage.tool_calls`, `ToolMessage`, and why some of this needs multiple rounds) is in [`LANGCHAIN_LANGGRAPH_GUIDE.md`'s tool-calling section](LANGCHAIN_LANGGRAPH_GUIDE.md#16-tool-calling--letting-the-model-ask-for-real-data), including a full second request trace through this exact path.
 
 A related endpoint, `GET /my-open-chargebacks`, powers the case-picker described above — merchant-only, backed by a plain SQL query (`merchant_db.list_open_chargebacks()`), no LLM involved.
 
@@ -217,6 +252,8 @@ A few decisions repeat throughout the codebase and are worth knowing before read
 
 - **Rule-based over LLM-based, deliberately.** Anywhere a task is really pattern matching rather than free-text reasoning — classifying what kind of message a user sent, extracting a network/reason code from text, deciding fight-vs-refund for a known code — the code uses plain Python regex/lookup tables (`classifier.py`, `decision_rules.py`, `network_detection.py`) instead of an LLM call. This is faster, free, deterministic, and testable with ordinary unit tests. LLM calls are reserved for genuinely open-ended tasks (writing prose, judging ambiguous free text) and are always given a rule-based fallback or backstop where practical.
 
+  This principle held up under a real test: detecting whether a message is asking to see/select the merchant's own chargebacks started as regex (`classifier.is_case_list_request()`), but kept breaking on new phrasings ("what all U002 cases exist currently?" missed both the intent and the filter). It was replaced with real LLM tool calling (`chargeback_agent.py`'s `_resolve_data_lookup_intent()` / `_build_case_intro()` — see [`LANGCHAIN_LANGGRAPH_GUIDE.md`](LANGCHAIN_LANGGRAPH_GUIDE.md#16-tool-calling--letting-the-model-ask-for-real-data)), a genuine exception to this principle for a genuinely open-ended surface. But the principle re-asserted itself one layer down: live testing then showed the model's tool-calling *decision itself* wasn't perfectly reproducible for one narrow, well-defined phrasing ("how much is outstanding") — the same request, sent unchanged, non-deterministically took different code paths across repeated calls. The fix wasn't to abandon tool calling, but to carve that specific, unambiguous slice back out into a deterministic short-circuit (`classifier.looks_like_aggregate_question()`) ahead of the LLM decision — reserving the model's judgment for the genuinely ambiguous remainder. The lesson: even inside a necessary LLM-decision layer, keep pulling well-defined subsets back into plain code wherever you can.
+
 - **Defense-in-depth for anything security-relevant.** Row-level data scoping (a merchant can only see their own chargebacks), SQL safety, and PII handling are never enforced only by "the LLM was told to behave" — there is always a second, code-level check that doesn't depend on the LLM obeying instructions. See `text_to_sql.py`'s forced `WHERE merchant_id = ...` injection and `guardrails.py`'s `_is_safe_sql()`.
 
 - **Single-responsibility nodes with routing kept separate from logic.** `chargeback_agent.py`'s LangGraph nodes each do exactly one thing (classify, extract, decide, write); which node runs next is decided only by dedicated `_route_after_*` functions, never by a node branching internally. This makes each step independently testable and the overall flow easy to trace.
@@ -232,6 +269,8 @@ A few decisions repeat throughout the codebase and are worth knowing before read
 ### The dispute agent
 
 - **`chargeback_agent.py`** — the largest file in the project. Defines the `DisputeAgent` class, a LangGraph state machine that runs the multi-turn dispute conversation described above. Each LLM-calling step gets its own narrow "persona" system prompt (e.g. "chargeback evidence analyst") rather than one general-purpose assistant character across the whole conversation, which keeps each step's output focused and easier to constrain. Also home to `_filter_substantive_context()`, the LLM backstop that catches follow-up replies which don't actually answer the question asked (see `classifier.is_junk_reply` below for the first, cheaper layer of that same check). Its knowledge-base-question handler (`_answer_question_node`) also recognizes when a question is actually asking for the caller's *own* chargeback data ("list my open chargebacks") rather than general policy, and routes that to a real database query instead of letting the model guess — earlier behavior here could fabricate a plausible-looking but entirely fictional list of chargebacks when asked this kind of question with no real data to draw on.
+
+  Also defines this project's only real LangChain **tool-calling** usage — four `@tool`-decorated functions (`list_merchant_cases`, `query_chargeback_data`, `get_case_details`, `get_reason_code_info`) whose bodies are never executed; they exist purely to give the model a schema to choose from. `_resolve_data_lookup_intent()` uses a single round of this to decide whether a message needs a data lookup at all and which one; `_build_case_intro()` uses a capped multi-round loop (verified live to be genuinely necessary — the model can't ask for a reason code's info before it knows the reason code, so it correctly refuses to guess in a single round) to build a full case summary + reason-code explanation before asking the merchant for evidence. Full mechanics in [`LANGCHAIN_LANGGRAPH_GUIDE.md`](LANGCHAIN_LANGGRAPH_GUIDE.md#16-tool-calling--letting-the-model-ask-for-real-data).
 
 ### Deterministic rule engines (no LLM calls)
 
@@ -255,7 +294,7 @@ A few decisions repeat throughout the codebase and are worth knowing before read
 
 ### Natural-language database queries
 
-- **`text_to_sql.py`** — turns a plain-English question about a merchant's chargebacks into SQL, runs it, and formats the result. Enforces role-based scoping at the code level (not just via the LLM's prompt): a `merchant` role always gets `WHERE merchant_id = <their own id>` force-injected regardless of what SQL the LLM generated or what the question asked about; admin roles are not scoped. Also enforces that only `SELECT` statements can ever run. A separate, earlier check recognizes an escalation attempt ("show me other merchants'/users'/customers' data") in plain language before SQL generation even runs, so a merchant gets a clear "you can only query your own data" message rather than the SQL-generation step failing on an ambiguous request and surfacing a confusing, unrelated-looking error — the row-level scoping itself is unconditional either way.
+- **`text_to_sql.py`** — turns a plain-English question about a merchant's chargebacks into SQL, runs it, and formats the result. Enforces role-based scoping at the code level (not just via the LLM's prompt): a `merchant` role always gets `WHERE merchant_id = <their own id>` force-injected regardless of what SQL the LLM generated or what the question asked about; admin roles are not scoped. Also enforces that only `SELECT` statements can ever run. A separate, earlier check recognizes an escalation attempt ("show me other merchants'/users'/customers' data") in plain language before SQL generation even runs, so a merchant gets a clear "you can only query your own data" message rather than the SQL-generation step failing on an ambiguous request and surfacing a confusing, unrelated-looking error — the row-level scoping itself is unconditional either way. If the underlying LLM call itself fails (e.g. a provider rate limit), the error surfaced back to the caller is a generic, merchant-safe message — never the raw provider exception, which for some providers includes internal account/billing details that have no business reaching an end user.
 
 - **`merchant_db.py`** — defines and seeds the `chargebacks` table in `chargebacks.db`: the actual NPCI/UPI dispute records merchants and admins query against. Also provides `list_open_chargebacks(merchant_id)`, a small direct SQL helper (no LLM) that powers the Dispute Assistant's case-picker.
 
@@ -331,6 +370,8 @@ export OPENAI_API_KEY=your_key_here
 ```
 
 Restart the server after changing `LLM_PROVIDER` — it's read once at startup. Without a valid key for whichever provider is configured, the server still starts, but the Dispute Assistant and natural-language query endpoints return 503.
+
+`export` only affects the current shell session, not `~/.zshrc`/`~/.bashrc` — if you `export LLM_PROVIDER=openai` in one terminal and start the server from a *different* shell (a new terminal tab, a background process launched some other way), it won't see that value and silently falls back to the `groq` default. If the server seems to be using the wrong provider, confirm what the actual running process has by checking its environment directly (e.g. `ps eww <pid>`, checking variable *names* are present — never print the actual key values), not just what your current terminal has set. Add the export to your shell profile if you want it to persist across sessions.
 
 ## Running
 
