@@ -450,6 +450,22 @@ class DisputeAgent:
                                                                  data-lookup
                                                                  query
         """
+        # Deterministic short-circuit for financial-balance-shaped
+        # questions ("how much is outstanding", "what do I owe") —
+        # bypasses the LLM tool-calling decision below entirely. Confirmed
+        # live this was necessary: the identical query sent unchanged
+        # non-deterministically produced three different outcomes across
+        # repeated calls, one of which fell through to a plain KB search
+        # that surfaced a Visa/Mastercard arbitration-fee document (wrong
+        # card network, USD amounts) as the merchant's own account
+        # balance. See classifier.looks_like_aggregate_question()'s
+        # docstring for the full detail.
+        if classifier.looks_like_aggregate_question(query):
+            from text_to_sql import query_chargebacks
+            result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
+            answer = result.get("answer") or result.get("error") or "No matching data found."
+            return {"type": "aggregate", "answer": answer}
+
         messages = [
             SystemMessage(content=(
                 "You are a chargeback assistant for a merchant. Decide "

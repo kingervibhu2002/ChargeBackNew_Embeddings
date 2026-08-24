@@ -642,6 +642,43 @@ def looks_like_data_lookup(query: str) -> bool:
     return bool(_DATA_LOOKUP_HINT_RE.search(query))
 
 
+# Narrow, deterministic pre-check for financial-balance-shaped questions —
+# "how much is outstanding", "what do I owe" — that routes straight to the
+# aggregate SQL tool in chargeback_agent.py's _resolve_data_lookup_intent()
+# instead of relying on the LLM's own tool-calling judgment call for this
+# keyword set. Confirmed live this was necessary, not hypothetical: the
+# same exact query ("how much is outstanding this case?"), sent
+# unchanged, non-deterministically produced three different outcomes
+# across repeated calls even at temperature=0 (Groq's MoE routing/batching
+# introduces real run-to-run variance) — sometimes correctly calling the
+# aggregate tool, sometimes the listing tool, and sometimes neither,
+# falling through to a plain knowledge-base search that surfaced a
+# Visa/Mastercard arbitration-fee document (wrong card network entirely,
+# USD example amounts) as if it answered the merchant's own NPCI/UPI
+# account balance. "outstanding"/"owe"/"owed" is unambiguous enough here
+# that there's no upside to leaving it to the LLM's judgment at all.
+_AGGREGATE_QUESTION_RE = re.compile(
+    r'\b(outstanding|owe|owed|amount due|total due)\b',
+    re.IGNORECASE
+)
+
+
+def looks_like_aggregate_question(query: str) -> bool:
+    """
+    True if `query` is a financial-balance-shaped question that should
+    bypass the LLM tool-calling decision entirely and go straight to the
+    aggregate SQL tool. See _AGGREGATE_QUESTION_RE for why this specific
+    keyword set is deterministic rather than left to the LLM.
+
+    Args:
+        query: The merchant's query (PII-masked).
+
+    Returns:
+        True if this should skip straight to the aggregate data lookup.
+    """
+    return bool(_AGGREGATE_QUESTION_RE.search(query))
+
+
 # Ordinal words a merchant might use to refer back to one of the cases
 # just listed, mapped to a 0-based index into that list (in display order,
 # i.e. the same order list_open_chargebacks() already returns — soonest
