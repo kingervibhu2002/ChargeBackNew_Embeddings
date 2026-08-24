@@ -776,7 +776,25 @@ class DisputeAgent:
                 # it were a fresh message, the same as chat.html's own
                 # client-side looksLikeNewTopic() already does for a
                 # narrower set of patterns during evidence-gathering.
-                masked_query = mask_pii(raw_context_preview)
+                #
+                # Promote only the LATEST turn, not the whole (possibly
+                # multi-turn) raw_context_preview blob — matching
+                # detect_case_selection()'s own latest-segment convention
+                # just above. Confirmed live this was a real bug: once a
+                # sub-conversation ran three-plus turns deep (e.g. list ->
+                # "the first one" -> a genuine new question), an EARLIER
+                # segment still sitting in the blob (e.g. "show me my open
+                # chargebacks") got promoted right alongside the real new
+                # question. _answer_question_node re-runs its own
+                # looks_like_data_lookup() check against whatever query it's
+                # given, that earlier segment's "chargebacks" text was
+                # enough to make it match again, and the tool-calling
+                # decision saw a blob literally starting with a listing
+                # request — so it re-showed the full case list instead of
+                # answering the real, later question.
+                segments = [s.strip() for s in raw_context_preview.split('\n\n') if s.strip()]
+                latest_segment = segments[-1] if segments else raw_context_preview
+                masked_query = mask_pii(latest_segment)
 
         # Guard 4 — deterministic intent classification (no LLM call)
         query_type = classifier.classify_query_type(masked_query)
