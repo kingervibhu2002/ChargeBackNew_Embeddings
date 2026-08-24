@@ -341,6 +341,21 @@ class DisputeAgent:
             resolved = classifier.detect_case_selection(raw_context_preview, shown)
             if resolved:
                 masked_query = f"Help me with case {resolved}"
+            elif not classifier.is_junk_reply(raw_context_preview, query=masked_query):
+                # Confirmed live: a genuine new question typed here ("what
+                # does U002 mean?", "how much is outstanding this month?")
+                # was silently swallowed — since masked_query stayed the
+                # stale "show me my open chargebacks" text, re-classifying
+                # it just re-showed the identical list instead of answering
+                # what was actually asked, with no visible sign anything
+                # had gone wrong. A reply that isn't junk and isn't a
+                # resolvable case selection is the merchant abandoning this
+                # sub-topic for a new one — promote it to be this turn's
+                # query so normal classification handles it exactly as if
+                # it were a fresh message, the same as chat.html's own
+                # client-side looksLikeNewTopic() already does for a
+                # narrower set of patterns during evidence-gathering.
+                masked_query = mask_pii(raw_context_preview)
 
         # Guard 4 — deterministic intent classification (no LLM call)
         query_type = classifier.classify_query_type(masked_query)
