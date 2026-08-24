@@ -32,9 +32,10 @@ Requires:
 """
 
 import re
-from typing import Callable, List, Literal, TypedDict
+from typing import Callable, List, Literal, Optional, TypedDict
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 
 import llm_provider
@@ -49,6 +50,42 @@ from network_detection import (
 )
 import classifier
 import decision_rules
+
+
+# ---------------------------------------------------------------------------
+# Data-lookup tools — bound to the LLM in _resolve_data_lookup_intent(),
+# replacing what used to be classifier.is_case_list_request()'s regex
+# guessing. Confirmed live (this session, before writing the plan this
+# implements) that the model this deployment actually runs correctly
+# discriminates all three cases these two tools + "call neither" cover,
+# across phrasings that broke every version of the regex approach:
+# "what all u002 cases exist currently?", "how much is outstanding this
+# month?", "what is my win rate?", and more. The docstrings below are
+# literally what the model reads to decide when to call them — verified
+# wording, not placeholder text, and worth keeping close to as-is if
+# edited later. Their bodies are never invoked by the framework; tool
+# execution happens manually in _resolve_data_lookup_intent() against the
+# real list_open_chargebacks()/query_chargebacks() functions, not these
+# stubs — this project doesn't use LangGraph's ToolNode/agent-executor
+# machinery anywhere else, and one decision point doesn't need it either.
+# ---------------------------------------------------------------------------
+
+@tool
+def list_merchant_cases(reason_code: str = "") -> str:
+    """List the merchant's own open chargeback cases so they can be shown
+    or picked from, optionally filtered to one reason code (e.g. U002).
+    Pass empty string for no filter. Use this when the merchant wants to
+    SEE or SELECT a case."""
+    return ""
+
+
+@tool
+def query_chargeback_data(question: str) -> str:
+    """Answer an analytical/aggregate question about the merchant's own
+    chargeback data (totals, counts, win rate, amounts due) by running it
+    against the database. Use this for computed numbers, not for listing
+    individual cases."""
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +250,33 @@ class DisputeAgent:
             except Exception:
                 raise primary_err
 
+    def _invoke_with_tools(self, messages: list, tools: list) -> object:
+        """
+        Same primary→fallback contract as _invoke(), but with tools bound
+        so the model can request a tool call instead of (or as well as)
+        answering directly. Kept as a separate method rather than adding a
+        tools=None param to _invoke() itself — every other call site in
+        this file wants plain chat completion, and binding tools on every
+        call for no reason would be wasted work.
+
+        Args:
+            messages: LangChain message list.
+            tools:    @tool-decorated functions to bind.
+
+        Returns:
+            AIMessage: may have a non-empty .tool_calls list.
+
+        Raises:
+            Exception: If both primary and fallback fail.
+        """
+        try:
+            return self._llm.bind_tools(tools).invoke(messages)
+        except Exception as primary_err:
+            try:
+                return self._fallback_llm.bind_tools(tools).invoke(messages)
+            except Exception:
+                raise primary_err
+
     # ── Nodes ─────────────────────────────────────────────────────────────
 
     def _filter_substantive_context(self, query: str, context: str) -> str:
@@ -277,7 +341,7 @@ class DisputeAgent:
             pass
         return context
 
-    def _filtered_open_cases(self, merchant_id: str, query: str) -> list:
+    def _filtered_open_cases(self, merchant_id: str, reason_code: str = "") -> list:
         """
         The open-chargebacks list a case-list query should show/resolve
         against — shared by _answer_question_node (rendering the list) and
@@ -285,33 +349,123 @@ class DisputeAgent:
         two can never drift apart and render one list while resolving
         against a different one.
 
-        Applies an explicit reason-code filter from the query text itself
-        when present (e.g. "give me all U002 cases that are open") via
-        extract_network_and_code() — the same extraction already used
-        everywhere else in this file, not new logic. Found live: without
-        this, "Give me all U002 cases that are open" correctly matched
-        is_case_list_request() but the rendered list ignored the U002
-        filter entirely and showed every open case regardless of network/
-        code, and (before this method existed) the resolution step in
-        _validate_node would have derived a differently-filtered list than
-        whatever was actually rendered, silently resolving "the first one"
-        against the wrong set.
+        Filtering by reason code is now decided upstream, by the LLM tool
+        call in _resolve_data_lookup_intent() (originally this method did
+        its own regex-based extraction from the query text via
+        classifier.extract_network_and_code() — replaced because that
+        extraction lived downstream of classifier.is_case_list_request(),
+        itself removed for missing phrasings like "what all u002 cases
+        exist currently?"). This method now just takes the already-decided
+        code and applies it — one job, not two.
 
         Args:
             merchant_id: Server-resolved merchant scope.
-            query:       The case-list query text (e.g. state["user_query"]
-                         or masked_query) — checked for an explicit code.
+            reason_code: An explicit code to filter to (e.g. "U002"), or
+                        "" for no filter.
 
         Returns:
             list[dict]: rows from merchant_db.list_open_chargebacks(),
-                       filtered to the mentioned reason code if any.
+                       filtered to reason_code if given.
         """
         from merchant_db import list_open_chargebacks
         cases = list_open_chargebacks(merchant_id, limit=100)
-        _, filter_code = classifier.extract_network_and_code(query)
-        if filter_code != "Unknown":
-            cases = [c for c in cases if c["reason_code"] == filter_code]
+        if reason_code:
+            cases = [c for c in cases if c["reason_code"] == reason_code]
         return cases
+
+    def _resolve_data_lookup_intent(self, merchant_id: str, query: str) -> Optional[dict]:
+        """
+        Decide whether `query` is asking to see/list the merchant's own
+        chargeback cases, asking an aggregate/analytic question about
+        them, or neither — via real LLM tool-calling instead of regex.
+
+        Replaces classifier.is_case_list_request()/personal_data_intent's
+        old regex approach, which broke on a new phrasing roughly every
+        other live test this session ("Give me all U002 cases" missed the
+        filter; "how much is outstanding this month?" missed the intent
+        entirely, in two separate places; "what all u002 cases exist
+        currently?" missed both). Confirmed live, before this method was
+        written, that the actually-configured model
+        (ChatGroq/openai-gpt-oss-120b) correctly discriminates all of
+        these via .bind_tools() — this is a working capability being used,
+        not a hopeful redesign.
+
+        Builds and maintains a real LangChain message history for this
+        decision (SystemMessage, HumanMessage, the returned AIMessage with
+        its tool_calls, and — when a tool was actually called — a
+        ToolMessage carrying that tool's real result) rather than just
+        returning a bare value, per standard LangChain tool-calling
+        convention. The list_merchant_cases/query_chargeback_data
+        functions bound here are never themselves executed — their
+        job is only to describe a schema/docstring for the model to
+        choose between; the real work (list_open_chargebacks() /
+        text_to_sql.query_chargebacks()) happens below once we know which
+        one, if any, was chosen.
+
+        Args:
+            merchant_id: Server-resolved merchant scope (never trusted
+                        from the query text itself).
+            query:       The query to classify — either the current turn's
+                        user_query (first turn) or the resent pending
+                        query (a continuity-resolution turn in
+                        _validate_node), same as _filtered_open_cases()
+                        already treats these interchangeably.
+
+        Returns:
+            {"type": "list", "reason_code": "U002" or ""}   — list intent
+            {"type": "aggregate", "answer": "..."}            — already
+                                                                 answered,
+                                                                 via
+                                                                 text_to_sql
+            None                                               — not a
+                                                                 data-lookup
+                                                                 query
+        """
+        messages = [
+            SystemMessage(content=(
+                "You are a chargeback assistant for a merchant. Decide "
+                "whether this message needs a lookup against the "
+                "merchant's own chargeback data, and if so, which tool."
+            )),
+            HumanMessage(content=query),
+        ]
+        ai_msg = self._invoke_with_tools(messages, [list_merchant_cases, query_chargeback_data])
+        messages.append(ai_msg)
+
+        if not ai_msg.tool_calls:
+            return None
+
+        tool_call = ai_msg.tool_calls[0]
+
+        if tool_call["name"] == "list_merchant_cases":
+            reason_code = (tool_call["args"].get("reason_code") or "").strip().upper()
+            cases = self._filtered_open_cases(merchant_id, reason_code)
+            messages.append(ToolMessage(
+                content=f"Found {len(cases)} matching case(s).",
+                tool_call_id=tool_call["id"],
+            ))
+            return {"type": "list", "reason_code": reason_code}
+
+        if tool_call["name"] == "query_chargeback_data":
+            from text_to_sql import query_chargebacks
+            # Deliberately the ORIGINAL query text, not tool_call["args"]
+            # ["question"] (the model's own rephrasing of it) — found live
+            # this regressed a case that worked before this redesign:
+            # "how much is outstanding this month?" got correctly routed
+            # here, but the model's rephrased version ("What is the total
+            # outstanding chargeback amount for the current month?") hit
+            # text_to_sql.py's own internal safety/question-answering logic
+            # differently and got rejected, while the identical original
+            # phrasing succeeds (confirmed directly, side by side).
+            # text_to_sql.py does its own NL interpretation regardless —
+            # the tool call's only job here is deciding to route to it,
+            # not rewriting what gets asked.
+            result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
+            answer = result.get("answer") or result.get("error") or "No matching data found."
+            messages.append(ToolMessage(content=answer, tool_call_id=tool_call["id"]))
+            return {"type": "aggregate", "answer": answer}
+
+        return None
 
     def _validate_node(self, state: ChargebackState) -> dict:
         """
@@ -369,10 +523,27 @@ class DisputeAgent:
         # an explicit case reference so classify_query_type() below routes
         # it as a normal dispute — _planner_node's existing step 4b case
         # lookup (merchant_id-scoped) picks it up from there, unchanged.
+        #
+        # Re-runs the SAME LLM tool-call decision _answer_question_node
+        # used to decide turn 1 was a list request in the first place
+        # (_resolve_data_lookup_intent, temperature=0 so this reproduces
+        # reliably) rather than a regex gate — the regex gate this
+        # replaced (classifier.is_case_list_request) was itself part of
+        # why "what all u002 cases exist currently?" broke continuity: even
+        # after fixing turn 1's rendering, turn 2 would never have resolved,
+        # since the pending query wouldn't have matched the regex either.
+        # Guarded by the loose, cheap looks_like_data_lookup() pre-filter
+        # first so an unrelated follow-up (e.g. mid evidence-gathering)
+        # doesn't cost an extra LLM call.
         raw_context_preview = state.get("additional_context", "")
         merchant_id_preview  = state.get("merchant_id", "")
-        if raw_context_preview and merchant_id_preview and classifier.is_case_list_request(masked_query):
-            shown = self._filtered_open_cases(merchant_id_preview, masked_query)
+        list_intent = None
+        if raw_context_preview and merchant_id_preview and classifier.looks_like_data_lookup(masked_query):
+            intent = self._resolve_data_lookup_intent(merchant_id_preview, masked_query)
+            if intent and intent["type"] == "list":
+                list_intent = intent
+        if list_intent is not None:
+            shown = self._filtered_open_cases(merchant_id_preview, list_intent["reason_code"])
             resolved = classifier.detect_case_selection(raw_context_preview, shown)
             if resolved:
                 masked_query = f"Help me with case {resolved}"
@@ -1050,41 +1221,31 @@ class DisputeAgent:
         query = state["user_query"]
         cache_key = query.lower().strip()
 
-        # Personal-data intent: "list my open chargebacks", "how many
-        # chargebacks do I have", "what's the status of my disputes" — this
-        # asks for the caller's OWN chargeback records, not general policy.
-        # This node only ever does semantic search over
-        # chargeback-encyclopedia/ (policy documents) — it has no connection
-        # to the merchant's actual chargebacks.db rows and never did.
-        # Without this check, a query phrased this way matched list_intent
-        # below and got routed into the generic KB-listing path, where the
-        # LLM — having nothing relevant retrieved — fabricated a plausible-
-        # looking table of chargebacks (case IDs like "CB001", generic
-        # labels like "Unauthorized Transaction") that don't exist anywhere
-        # in this project's real schema (real case IDs look like
-        # "NPCI20260810M001013"; real reason codes are U001-U010, not
-        # generic Visa/Mastercard-style descriptions). Confirmed live: this
-        # produced 7 entirely fictional chargebacks presented with full
-        # confidence. Checked first, ahead of stage_intent/list_intent, so a
-        # data-lookup question can never be misrouted into the fabrication-
-        # prone generic path — real data or an honest "I don't have that
-        # here" only, never a guess.
-        # Third alternative added after a live report: "how much is
-        # outstanding this month?" — no "chargeback"/"case" mention at all,
-        # so it failed both existing alternatives (confirmed directly) and
-        # fell through to classify_query_type(), which rejected it as
-        # "invalid" since it also has no other payment-domain keyword. This
-        # tool's whole domain is chargebacks, so "how much do I owe/is
-        # outstanding" unambiguously means the merchant's own chargeback
-        # liability here — doesn't need "chargeback" spelled out to be
-        # unambiguous the way a general-purpose assistant's would.
-        personal_data_intent = bool(_re.search(
-            r'\b(my|i have|i\'ve got|do i have|how many)\b.{0,30}\b(chargeback|dispute|case)s?\b'
-            r'|\b(chargeback|dispute|case)s?\b.{0,30}\b(status|open|pending|outstanding|due)\b'
-            r'|\bhow much\b.{0,30}\b(outstanding|due|owe|owed)\b',
-            query, _re.IGNORECASE
-        ))
-        if personal_data_intent:
+        # Personal-data intent: "list my open chargebacks", "what all U002
+        # cases exist currently?", "how much is outstanding this month?" —
+        # this asks for the caller's OWN chargeback records, not general
+        # policy. This node otherwise only does semantic search over
+        # chargeback-encyclopedia/ (policy documents) — it has no
+        # connection to the merchant's actual chargebacks.db rows on its
+        # own. Without this check, a query phrased this way matched
+        # list_intent below and got routed into the generic KB-listing
+        # path, where the LLM — having nothing relevant retrieved —
+        # fabricated a plausible-looking table of chargebacks (case IDs
+        # like "CB001") that don't exist anywhere in this project's real
+        # schema. Checked first, ahead of stage_intent/list_intent, so a
+        # data-lookup question can never be misrouted into the
+        # fabrication-prone generic path.
+        #
+        # The intent+filter decision itself is real LLM tool-calling
+        # (_resolve_data_lookup_intent), not regex — regex here went
+        # through four rounds of live-reported phrasing gaps in one
+        # session ("Give me all U002 cases" missed the filter; "how much
+        # is outstanding" missed the intent entirely, twice; "what all
+        # u002 cases exist currently?" missed both) before being replaced.
+        # looks_like_data_lookup() is only a loose, cheap pre-filter to
+        # skip the LLM call on turns obviously unrelated to the merchant's
+        # own data — the actual accuracy-critical decision is the model's.
+        if classifier.looks_like_data_lookup(query):
             merchant_id = state.get("merchant_id", "")
             if not merchant_id:
                 return {
@@ -1100,37 +1261,32 @@ class DisputeAgent:
                     "is_grounded":         True,
                     "groundedness_issues": "",
                 }
-            # A plain "show me my open chargebacks" (as opposed to an
-            # aggregate question like "how much is outstanding") gets a
-            # deterministic list here instead of text_to_sql.py's free-form
-            # NL->SQL — that path has no guaranteed row order, and a
-            # follow-up like "tell me about the first one" needs "first" to
-            # mean the same case it meant when the list was rendered.
-            # list_open_chargebacks() is the same function already backing
-            # /my-open-chargebacks' case-picker chips (soonest deadline
-            # first), so this reuses the canonical ordering rather than
-            # introducing a second one. needs_more_info=True here (not the
-            # default False every other branch in this node relies on) is
-            # what makes chat.html's existing handleDispute treat this as
-            # an ongoing conversation — it already resends the original
-            # query as pendingQuery plus the merchant's reply as
-            # additional_context for any needs_more_info=True response, no
-            # frontend changes needed. _validate_node's case-selection
-            # resolution step reads that combination back on the next turn.
-            if classifier.is_case_list_request(query):
-                # Filtering (e.g. "give me all U002 cases that are open")
-                # and rendering both go through the same
-                # _filtered_open_cases() helper _validate_node's resolution
-                # step also uses — guarantees "the first one" on the next
-                # turn resolves against the exact same (possibly filtered)
-                # set that was actually shown here, never a different one.
-                cases = self._filtered_open_cases(merchant_id, query)
-                _, filter_code = classifier.extract_network_and_code(query)
-                case_label = f"open {filter_code} case(s)" if filter_code != "Unknown" else "open chargeback case(s)"
+            intent = self._resolve_data_lookup_intent(merchant_id, query)
+
+            if intent and intent["type"] == "list":
+                # A plain "show me my open chargebacks" gets a deterministic
+                # rendering here instead of text_to_sql.py's free-form
+                # NL->SQL — that path has no guaranteed row order, and a
+                # follow-up like "tell me about the first one" needs
+                # "first" to mean the same case it meant when the list was
+                # rendered. _filtered_open_cases() is shared with
+                # _validate_node's continuity-resolution step, filtered by
+                # the same reason_code the tool call just decided — never
+                # a differently-filtered set than what's actually shown.
+                # needs_more_info=True (not the default False every other
+                # branch in this node relies on) is what makes chat.html's
+                # existing handleDispute treat this as an ongoing
+                # conversation — it already resends the original query as
+                # pendingQuery plus the merchant's reply as
+                # additional_context for any needs_more_info=True response,
+                # no frontend changes needed.
+                reason_code = intent["reason_code"]
+                cases = self._filtered_open_cases(merchant_id, reason_code)
+                case_label = f"open {reason_code} case(s)" if reason_code else "open chargeback case(s)"
                 if not cases:
                     no_match = (
-                        f"You have no open {filter_code} cases right now."
-                        if filter_code != "Unknown" else
+                        f"You have no open {reason_code} cases right now."
+                        if reason_code else
                         "You have no open chargeback cases right now."
                     )
                     return {
@@ -1166,20 +1322,24 @@ class DisputeAgent:
                     "needs_more_info":     True,
                 }
 
-            from text_to_sql import query_chargebacks
-            result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
-            answer = (
-                result.get("answer")
-                or result.get("error")
-                or "No matching chargebacks found."
-            )
-            return {
-                "final_answer":        answer,
-                "retrieved_docs":      [],
-                "confidence_score":    8,
-                "is_grounded":         True,
-                "groundedness_issues": "",
-            }
+            if intent and intent["type"] == "aggregate":
+                # Already executed and synthesized inside
+                # _resolve_data_lookup_intent() via text_to_sql.py's
+                # existing, separately-tested query_chargebacks() —
+                # nothing left to do here but return it.
+                return {
+                    "final_answer":        intent["answer"],
+                    "retrieved_docs":      [],
+                    "confidence_score":    8,
+                    "is_grounded":         True,
+                    "groundedness_issues": "",
+                }
+
+            # looks_like_data_lookup() fired (loose pre-filter) but the
+            # model decided neither tool actually applies — e.g. "what
+            # does U002 mean?" contains "case"-adjacent vocabulary in the
+            # KB sense, not a request for the merchant's own records. Falls
+            # through to the normal KB-search path below, unchanged.
 
         # Dispute-lifecycle questions ("which codes are at pre-arbitration stage?")
         # must NOT be routed into the generic list handler — codes don't map to

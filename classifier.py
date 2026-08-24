@@ -97,6 +97,14 @@ _QUESTION_PAYMENT_TERMS = [
     # this exact phrasing — that fix alone wasn't sufficient, since
     # classify_query_type() runs first and never let it through).
     "outstanding", "owe", "owed",
+    # Same reasoning a third time: "what is my win rate?" — added while
+    # verifying the LLM-tool-calling replacement for personal_data_intent
+    # (chargeback_agent.py's _resolve_data_lookup_intent) actually reaches
+    # the model at all. "case"/"cases" added too — the other keyword in
+    # that same tool-calling pre-filter (classifier.looks_like_data_lookup)
+    # not already covered here, same failure mode waiting to happen for
+    # any question naming only "case(s)" with no other payment term.
+    "win rate", "case", "cases",
     # Hinglish
     "chargeback kya", "kya hota hai",
 ]
@@ -589,51 +597,49 @@ def is_clarifying_question(text: str) -> bool:
 # 4b) — no new dispute-handling logic needed downstream of the resolution.
 # ---------------------------------------------------------------------------
 
-# Same regex chargeback_agent.py's _answer_question_node already uses to
-# detect a query about the caller's own chargeback records — duplicated
-# here (not imported, to avoid a chargeback_agent.py <-> classifier.py
-# circular import) so is_case_list_request() can reuse the identical
-# matching logic rather than drifting from it over time.
-# Third alternative: chargeback_agent.py's own copy of this pattern
-# needed one to catch "how much is outstanding this month?" (no
-# "chargeback"/"case" mention at all — confirmed live it fell through to
-# classify_query_type() and was rejected as "invalid"). Kept identical
-# here for the same reason the rest of this pattern is duplicated rather
-# than imported: is_case_list_request() must never silently drift from
-# what chargeback_agent.py actually matches.
-_PERSONAL_DATA_RE = re.compile(
-    r'\b(my|i have|i\'ve got|do i have|how many)\b.{0,30}\b(chargeback|dispute|case)s?\b'
-    r'|\b(chargeback|dispute|case)s?\b.{0,30}\b(status|open|pending|outstanding|due)\b'
-    r'|\bhow much\b.{0,30}\b(outstanding|due|owe|owed)\b',
+# Regex-guessing which phrasings mean "look up my own chargeback data" was
+# abandoned after four distinct live failures in one session ("Give me all
+# U002 cases" missed the filter; "how much is outstanding this month?"
+# missed the intent entirely, in two separate places; "what all u002
+# cases exist currently?" missed both) — each fix was a narrower patch
+# that the next phrasing broke again. This is a genuinely open-ended
+# natural-language surface, unlike reason-code extraction (U001-U010, a
+# small closed vocabulary) where regex genuinely is the right tool.
+# Replaced with real LLM tool-calling — see chargeback_agent.py's
+# _resolve_data_lookup_intent(), confirmed live to correctly discriminate
+# every phrasing that broke this regex, plus cases regex never covered at
+# all ("what is my win rate?").
+#
+# looks_like_data_lookup() is NOT that accuracy-critical decision — it's
+# a deliberately loose, over-inclusive pre-filter used only to skip the
+# LLM tool-call on turns that obviously have nothing to do with the
+# merchant's own case data (a plain evidence-gathering reply like "yes
+# only one credit was issued", mid dispute-flow). False positives here
+# just cost one extra (cheap, fast) LLM call; false negatives would
+# silently break the feature the way the old regex did — so this errs
+# toward matching too much, not too little.
+_DATA_LOOKUP_HINT_RE = re.compile(
+    r'\b(cases?|chargebacks?|disputes?|outstanding|owe|owed|win rate|how much)\b',
     re.IGNORECASE
 )
 
-# A personal_data_intent match that also contains one of these is asking
-# for a number/total, not a list of cases to pick from afterward — "how
-# much is outstanding this month" doesn't invite a "tell me about the
-# first one" follow-up the way "show me my open chargebacks" does. Kept
-# separate from is_case_list_request's caller so aggregate questions keep
-# going through text_to_sql.py's flexible NL->SQL unchanged.
-_AGGREGATE_WORDS = (
-    "how much", "total", "win rate", "outstanding amount", "average",
-)
 
-
-def is_case_list_request(query: str) -> bool:
+def looks_like_data_lookup(query: str) -> bool:
     """
-    True if `query` is asking to see/list the caller's own open chargeback
-    cases specifically (not an aggregate question like a total or a win
-    rate) — the shape of query whose response should support a follow-up
-    like "tell me about the first one".
+    Loose, over-inclusive check for whether `query` might be asking about
+    the merchant's own chargeback data — a cost guard, not the actual
+    intent decision (that's chargeback_agent.py's
+    _resolve_data_lookup_intent(), via real LLM tool-calling). Errs toward
+    false positives: matching too much just costs one extra LLM call,
+    missing a genuine data-lookup query would silently break the feature.
 
     Args:
         query: The merchant's query (PII-masked).
 
     Returns:
-        True if this is a case-listing request.
+        True if this might be worth an LLM tool-call check.
     """
-    q = query.lower()
-    return bool(_PERSONAL_DATA_RE.search(query)) and not any(w in q for w in _AGGREGATE_WORDS)
+    return bool(_DATA_LOOKUP_HINT_RE.search(query))
 
 
 # Ordinal words a merchant might use to refer back to one of the cases
