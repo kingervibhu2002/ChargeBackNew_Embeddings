@@ -12,8 +12,9 @@ No prior LangChain/LangGraph knowledge assumed. Basic Python (functions, diction
 2. [Part 1: LangChain — talking to a model](#part-1-langchain--talking-to-a-model)
 3. [Part 2: LangGraph — orchestrating many steps](#part-2-langgraph--orchestrating-many-steps)
 4. [Part 3: Walking through one real request](#part-3-walking-through-one-real-request)
-5. [Quick glossary](#quick-glossary)
-6. [Where to look in the code](#where-to-look-in-the-code)
+5. [Concept coverage: what this project uses, and what it doesn't](#concept-coverage-what-this-project-uses-and-what-it-doesnt)
+6. [Quick glossary](#quick-glossary)
+7. [Where to look in the code](#where-to-look-in-the-code)
 
 ---
 
@@ -419,6 +420,44 @@ Turn 2 — chat.html resends {query: "show me my open chargebacks",
 ```
 
 The interesting LangGraph point here: none of this needed a new node, edge, or state field. `_validate_node` — already the very first node in the graph — is where all of it lives, because an early `return {...}` with no `query_type` set is a pattern the graph already understood (`_route_after_validate` already treats a missing/empty `query_type` as "route to end"). The tool-calling loop itself is plain Python inside that one node's method body, not graph structure.
+
+## Concept coverage: what this project uses, and what it doesn't
+
+LangChain and LangGraph offer a lot more than what's used here. This section is an honest map — verified against the real code (greps, not memory) rather than assumed — of which parts of a broader LangGraph curriculum this project actually demonstrates, which it only approximates with hand-written code, and which it doesn't touch at all. Useful if you're learning LangGraph and want to know which of this codebase's patterns are "the real primitive" versus "a project-specific workaround that looks similar."
+
+**Solidly used, the real primitive:**
+
+- **Core graph mechanics** — `StateGraph`, `add_node`, `add_edge`, `add_conditional_edges`, `set_entry_point`, `END` (Part 2 above, in full).
+- **Messages** — `SystemMessage`, `HumanMessage`, `AIMessage`, `ToolMessage` (Parts 1 and 1.6). Not `MessagesState`, though — state here is a custom `TypedDict` (`ChargebackState`), not LangGraph's prebuilt message-list state shape.
+- **Conditional routing** — every `_route_after_*` function (§2.4).
+- **Tool calling** — `@tool`, `.bind_tools()`, `AIMessage.tool_calls` (§1.6) — via raw LangChain, not LangGraph's prebuilt `ToolNode`/agent-executor. A code comment right above the tool definitions in `chargeback_agent.py` says so explicitly: this project dispatches tool calls by hand because it only has two decision points that need it, not enough to justify the prebuilt machinery.
+- **RAG as graph nodes** — `planner_node` and `_answer_question_node` both do real vector retrieval as part of node logic (Part 3's first trace).
+- **Hybrid retrieval + reranking** — `vector_store.hybrid_search()` (vector + BM25) and a cross-encoder rerank step, both real, both load-bearing for retrieval quality.
+- **Fallback models** — `_invoke()`'s primary→fallback pattern (§1.4) — a genuine reliability mechanism, not just described.
+- **A hand-rolled agentic loop** — `_build_case_intro()`'s capped multi-round tool-calling loop (§1.6) is a real invoke → act → observe → repeat pattern with a stopping condition, just written directly rather than via `create_react_agent`.
+- **Guardrails** — prompt-injection detection, PII masking, rate limiting, a cost circuit breaker, role-based SQL scoping (`guardrails.py`, `auth.py`, `text_to_sql.py`) — all real, all enforced in code, not just prompted for.
+
+**Present as infrastructure, but not actually exercised:**
+
+- **Checkpointing** — a real `SqliteSaver` is wired up and every response carries a `thread_id` (§2.7), but `chat.html` never resends that `thread_id`, so nothing ever resumes from a saved checkpoint. Verified by grepping `chat.html` for `thread_id` — zero hits. `thread_id`'s actual job today is security scoping, not resumption.
+
+**Approximated with project-specific code, not the LangGraph-native version:**
+
+- **"Pause and resume" conversations** — real and working, but achieved by the graph run ending (`needs_more_info: True`) and the *browser* re-sending accumulated text on the next call — not LangGraph's `interrupt()`/`NodeInterrupt` primitive, which this project doesn't use at all.
+- **Query routing** — `classify_query_type()` plus the tool-calling intent decision act as a router, but as conditional edges inside one graph, not a "supervisor agent" orchestrating separate sub-agents.
+- **Human-in-the-loop, at the business level** — `auto_decision_poller.py` (auto-applies a recommendation) versus `suggestion_poller.py` (advisory only, a human decides) is a genuine HITL *pattern*, and there's a canned "talk to a human" escalation response — but neither uses LangGraph's interrupt/approval/resume primitives.
+
+**Not used at all, verified by direct inspection:**
+
+- **Custom reducers** — zero uses of `Annotated`/`operator.add`/`add_messages` anywhere in `chargeback_agent.py`. Every state field is plain last-write-wins overwrite, described precisely in §2.7's surrounding discussion of LangGraph's merge behavior.
+- **In-graph cycles/loops** — the graph is a DAG; no edge ever routes back to an earlier node. The 4-round loop in `_build_case_intro()` is a plain Python `for` loop inside one node's method body, not a graph-level cycle.
+- **Self-correcting retry loops** — `reflect_node` scores groundedness and confidence but has only one outgoing edge, straight to `END`. A low-confidence or ungrounded result is reported, never fed back into another retrieval/generation attempt.
+- **Subgraphs** — exactly one `StateGraph(ChargebackState)` exists in the whole file; no nested or composed graphs.
+- **Multi-agent architectures** — one agent (`DisputeAgent`), many nodes. No agent-to-agent handoff, no separate policy/evidence/transaction agents collaborating.
+- **Formal query rewriting** — the closest is `planner_node`'s step 3, which concatenates `f"{network} {code} {query}"` for a supplemental search; there's no LLM-driven query expansion/rewrite step.
+- **Tracing/observability tooling** — `AuditLogger` logs query, decision, and latency per request (real, but simple), but there's no LangSmith or comparable tracing integration anywhere in the repo.
+
+If you're using this project to practice LangGraph concepts you haven't built yet, the gaps above — subgraphs, multi-agent collaboration, real `interrupt()`-based HITL, a self-correcting RAG retry loop, custom reducers — are the genuinely open territory; everything else on this list is already a working, real example to read.
 
 ## Quick glossary
 
