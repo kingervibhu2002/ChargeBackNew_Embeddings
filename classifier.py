@@ -89,6 +89,14 @@ _QUESTION_PAYMENT_TERMS = [
     # "dispute" and routed into the full evidence-gathering pipeline instead
     # of answer_question_node.
     "fraud", "unauthorized", "unauthorised", "settlement",
+    # Same reasoning again: "how much is outstanding this month?" has no
+    # other payment-domain term, so is_question_form was true but
+    # has_payment_topic stayed false and the whole query was rejected as
+    # "invalid" before it ever reached _answer_question_node's
+    # personal_data_intent check (which was separately fixed to recognize
+    # this exact phrasing — that fix alone wasn't sufficient, since
+    # classify_query_type() runs first and never let it through).
+    "outstanding", "owe", "owed",
     # Hinglish
     "chargeback kya", "kya hota hai",
 ]
@@ -586,9 +594,17 @@ def is_clarifying_question(text: str) -> bool:
 # here (not imported, to avoid a chargeback_agent.py <-> classifier.py
 # circular import) so is_case_list_request() can reuse the identical
 # matching logic rather than drifting from it over time.
+# Third alternative: chargeback_agent.py's own copy of this pattern
+# needed one to catch "how much is outstanding this month?" (no
+# "chargeback"/"case" mention at all — confirmed live it fell through to
+# classify_query_type() and was rejected as "invalid"). Kept identical
+# here for the same reason the rest of this pattern is duplicated rather
+# than imported: is_case_list_request() must never silently drift from
+# what chargeback_agent.py actually matches.
 _PERSONAL_DATA_RE = re.compile(
     r'\b(my|i have|i\'ve got|do i have|how many)\b.{0,30}\b(chargeback|dispute|case)s?\b'
-    r'|\b(chargeback|dispute|case)s?\b.{0,30}\b(status|open|pending|outstanding|due)\b',
+    r'|\b(chargeback|dispute|case)s?\b.{0,30}\b(status|open|pending|outstanding|due)\b'
+    r'|\bhow much\b.{0,30}\b(outstanding|due|owe|owed)\b',
     re.IGNORECASE
 )
 

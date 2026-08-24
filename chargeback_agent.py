@@ -1069,9 +1069,19 @@ class DisputeAgent:
         # data-lookup question can never be misrouted into the fabrication-
         # prone generic path — real data or an honest "I don't have that
         # here" only, never a guess.
+        # Third alternative added after a live report: "how much is
+        # outstanding this month?" — no "chargeback"/"case" mention at all,
+        # so it failed both existing alternatives (confirmed directly) and
+        # fell through to classify_query_type(), which rejected it as
+        # "invalid" since it also has no other payment-domain keyword. This
+        # tool's whole domain is chargebacks, so "how much do I owe/is
+        # outstanding" unambiguously means the merchant's own chargeback
+        # liability here — doesn't need "chargeback" spelled out to be
+        # unambiguous the way a general-purpose assistant's would.
         personal_data_intent = bool(_re.search(
             r'\b(my|i have|i\'ve got|do i have|how many)\b.{0,30}\b(chargeback|dispute|case)s?\b'
-            r'|\b(chargeback|dispute|case)s?\b.{0,30}\b(status|open|pending|outstanding|due)\b',
+            r'|\b(chargeback|dispute|case)s?\b.{0,30}\b(status|open|pending|outstanding|due)\b'
+            r'|\bhow much\b.{0,30}\b(outstanding|due|owe|owed)\b',
             query, _re.IGNORECASE
         ))
         if personal_data_intent:
