@@ -909,8 +909,16 @@ def query_chargebacks(
     # Step 2 — generate SQL
     try:
         sql = _nl_to_sql(question, role, merchant_id, llm, previous_sql[:1000])
-    except Exception as e:
-        return {"sql": "", "answer": "", "rows": 0, "error": f"LLM error: {e}"}
+    except Exception:
+        # Deliberately not str(e) here — for a provider-side failure (e.g.
+        # a Groq rate-limit 429) that's the raw API exception body: org ID,
+        # billing links, internal error codes. Confirmed live this was
+        # reaching the merchant verbatim as the chat answer via
+        # chargeback_agent.py's `result.get("error")` fallback. A generic,
+        # merchant-safe message here, same tone as guardrails.py's
+        # CostCircuitBreaker ("Daily limit reached"), not a diagnostic.
+        return {"sql": "", "answer": "", "rows": 0,
+                "error": "Unable to look up that right now — please try again in a few minutes."}
 
     # Step 2b — fuzzy-correct merchant_name typos before anything downstream
     # relies on exact string matches (safety checks, execution, formatting).
