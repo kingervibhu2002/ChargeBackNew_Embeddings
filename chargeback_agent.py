@@ -43,6 +43,7 @@ from guardrails import check_length, detect_prompt_injection, mask_pii, _parse_j
 from evidence_tags import EvidenceTag, EVIDENCE_TAG_LABELS, humanize_evidence
 from network_detection import (
     DOMAIN_CANDIDATE_POOL_SIZE,
+    NETWORK_KNOWLEDGE_DOMAINS,
     detect_knowledge_domain,
     detect_network_title_keys,
     is_upi_context,
@@ -85,6 +86,34 @@ def query_chargeback_data(question: str) -> str:
     chargeback data (totals, counts, win rate, amounts due) by running it
     against the database. Use this for computed numbers, not for listing
     individual cases."""
+    return ""
+
+
+# Used by _build_case_intro()'s multi-round tool loop, not
+# _resolve_data_lookup_intent()'s single-round decision above — verified
+# live (this session, before writing the plan this implements) that a
+# single round is NOT enough here: given both tools at once, the model
+# correctly called only get_case_details first, because it has no way to
+# know get_reason_code_info's reason_code argument until it sees the case
+# details. A capped multi-round loop (invoke -> execute -> append
+# ToolMessage -> invoke again) was then verified to correctly call
+# get_case_details, then get_reason_code_info with the reason code it
+# just learned, then produce a combined final answer with no more calls
+# needed — a real, working multi-step tool-use pattern for this model,
+# not assumed.
+@tool
+def get_case_details(case_id: str) -> str:
+    """Fetch the merchant's own chargeback case record by case ID —
+    status, amount, deadline, reason code, and the recommended action if
+    one has been determined."""
+    return ""
+
+
+@tool
+def get_reason_code_info(network: str, reason_code: str) -> str:
+    """Fetch reference knowledge-base information explaining what a
+    specific chargeback reason code means and what evidence it typically
+    requires from the merchant."""
     return ""
 
 
@@ -467,6 +496,159 @@ class DisputeAgent:
 
         return None
 
+    def _lookup_case_details(self, merchant_id: str, case_id: str) -> tuple:
+        """
+        Real execution behind a get_case_details tool call — same DB
+        lookup _planner_node's step 4b already runs (scoped by case_id
+        directly here since the case was already resolved via
+        classifier.detect_case_selection(), not named in free text). Also
+        folds in decision_rules.RULES' required evidence for this
+        (network, reason_code) — the same deterministic lookup
+        _extract_evidence_node uses — as authoritative content for the
+        model to report verbatim, so the actual evidence ask stays
+        deterministic even though the surrounding narrative in
+        _build_case_intro() is LLM-synthesized.
+
+        Returns:
+            (content_for_tool_message, row_or_None)
+        """
+        from chargeback_analysis import analyze_chargeback
+        from merchant_db import get_connection
+
+        conn = get_connection()
+        row = conn.execute(
+            "SELECT * FROM chargebacks WHERE merchant_id = ? AND case_id = ?",
+            (merchant_id, case_id),
+        ).fetchone()
+        conn.close()
+
+        if not row:
+            return f"No case found with ID {case_id} for this merchant.", None
+
+        analysis = analyze_chargeback(row, db_path="chargebacks.db")
+        parts = [
+            f"Case {row['case_id']} (UTR {row['utr']}): reason code {row['reason_code']} "
+            f"({row['reason_description']}), amount {row['chargeback_amount']}, "
+            f"status {row['status']}, response deadline {row['response_deadline']}."
+        ]
+        if analysis.action:
+            parts.append(f"Recommended action: {analysis.action}. {analysis.reason}")
+
+        rule = decision_rules.RULES.get(("RuPay", row["reason_code"]))
+        if rule:
+            needed = rule.required_any or rule.required_all
+            if needed:
+                labels = ", ".join(humanize_evidence(sorted(needed)))
+                parts.append(f"Evidence typically required for this reason code: {labels}.")
+
+        return " ".join(parts), row
+
+    def _lookup_reason_code_info(self, network: str, reason_code: str) -> str:
+        """
+        Real execution behind a get_reason_code_info tool call — the same
+        confident (network, reason_code)-known retrieval chain
+        _answer_question_node uses for a strong domain match:
+        NETWORK_KNOWLEDGE_DOMAINS → search_chunks(knowledge_domain=...) →
+        select_domain_chunk() → full parent document on a strong hit.
+        Reused rather than reimplemented so this stays consistent with
+        what a direct question about the same code would already surface.
+        """
+        domain = NETWORK_KNOWLEDGE_DOMAINS.get((network or "").lower())
+        if not domain:
+            return f"No knowledge-base domain found for network '{network}'."
+
+        embedding = self._embed(f"{network} {reason_code} evidence required")
+        domain_hits = self._store.search_chunks(
+            embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE, knowledge_domain=domain
+        )
+        tier, best = select_domain_chunk(domain_hits, reason_code)
+        if not best:
+            return f"No specific knowledge-base entry found for {network} {reason_code}."
+
+        if tier == "strong":
+            parent_doc = self._store.get_document_by_id(best["document_id"])
+            if parent_doc:
+                return parent_doc["content"][:4000]
+        return best["content"]
+
+    def _build_case_intro(self, merchant_id: str, case_id: str) -> Optional[dict]:
+        """
+        Called from _validate_node when a merchant's follow-up reply
+        ("the first one") resolves to a real case_id — replaces the old
+        flat "Help me with case <id>" rewrite with a real, capped
+        multi-round tool-calling loop (get_case_details, then
+        get_reason_code_info once the reason code is known) so the
+        merchant sees a case summary + reason-code context before being
+        asked for evidence.
+
+        Verified live before writing this (see the module-level comment
+        above get_case_details/get_reason_code_info) that a single round
+        is NOT enough here — the model correctly refuses to guess
+        get_reason_code_info's reason_code argument before it has
+        get_case_details' result. Capped at 4 rounds — generous enough
+        for both tools plus one retry, never truly unbounded; if the cap
+        is hit without the model settling on a tool-call-free answer, one
+        final call with no tools bound forces a synthesis so this can
+        never return scaffolding-only content.
+
+        Returns:
+            {"final_answer": str, "reason_code": str, "card_network": str}
+            or None if case_id doesn't resolve to a real row for this
+            merchant — the caller falls through to today's existing
+            "Help me with case <id>" rewrite in that case, never a dead end.
+        """
+        messages = [
+            SystemMessage(content=(
+                "You are a chargeback assistant. The merchant just selected "
+                "one of their own open cases to learn more about. First look "
+                "up the case's real details, then look up what its reason "
+                "code means and what evidence it typically requires. Then "
+                "write a short, friendly summary covering: what the case is "
+                "(amount, status, deadline), what the reason code means, and "
+                "what evidence is needed next. Use only facts returned by "
+                "the tools — never invent a status, amount, or evidence "
+                "requirement."
+            )),
+            HumanMessage(content=f"The merchant selected case {case_id}. Tell me about it."),
+        ]
+
+        case_row = None
+        network, reason_code = "", ""
+        final_ai = None
+
+        for _ in range(4):
+            ai_msg = self._invoke_with_tools(messages, [get_case_details, get_reason_code_info])
+            messages.append(ai_msg)
+            if not ai_msg.tool_calls:
+                final_ai = ai_msg
+                break
+            for tc in ai_msg.tool_calls:
+                if tc["name"] == "get_case_details":
+                    content, case_row = self._lookup_case_details(
+                        merchant_id, tc["args"].get("case_id") or case_id
+                    )
+                    if case_row:
+                        network, reason_code = "RuPay", case_row["reason_code"]
+                elif tc["name"] == "get_reason_code_info":
+                    content = self._lookup_reason_code_info(
+                        tc["args"].get("network") or network,
+                        tc["args"].get("reason_code") or reason_code,
+                    )
+                else:
+                    content = ""
+                messages.append(ToolMessage(content=content, tool_call_id=tc["id"]))
+        else:
+            final_ai = self._invoke(messages)
+
+        if case_row is None:
+            return None
+
+        return {
+            "final_answer": (final_ai.content if final_ai else "").strip(),
+            "reason_code":  reason_code,
+            "card_network": network,
+        }
+
     def _validate_node(self, state: ChargebackState) -> dict:
         """
         Node 0 — Input guardrails + dispute intent check.
@@ -546,6 +728,39 @@ class DisputeAgent:
             shown = self._filtered_open_cases(merchant_id_preview, list_intent["reason_code"])
             resolved = classifier.detect_case_selection(raw_context_preview, shown)
             if resolved:
+                # Rich case-intro: a real DB lookup + a real knowledge-base
+                # lookup, both as genuine tool calls with maintained
+                # AIMessage/ToolMessage history (_build_case_intro), rather
+                # than just rewriting the query and falling through to the
+                # normal pipeline — which, per a live trace, jumped straight
+                # to an evidence question with no case summary or
+                # reason-code context shown first. Early-return here mirrors
+                # the length-check/prompt-injection guards above: no
+                # query_type is set, so _route_after_validate falls through
+                # to "end" with final_answer already populated. Falls
+                # through to the old rewrite-and-continue behavior if the
+                # lookup finds no matching row — never a dead end.
+                intro = self._build_case_intro(merchant_id_preview, resolved)
+                if intro:
+                    # confidence_score/is_grounded: 8/True is the fixed
+                    # convention _answer_question_node's own confident,
+                    # tool-backed answers use to bypass reflect_node (which
+                    # never runs on this early-return path) — not setting
+                    # these left the API response defaulting to
+                    # confidence_score=0, which reads as a low-confidence
+                    # answer in chat.html's UI despite this being a
+                    # grounded, real DB+KB-backed response.
+                    return {
+                        "is_valid_query": True,
+                        "user_query":     masked_query,
+                        "final_answer":   intro["final_answer"],
+                        "reason_code":    intro["reason_code"],
+                        "card_network":   intro["card_network"],
+                        "needs_more_info": True,
+                        "confidence_score": 8,
+                        "is_grounded":      True,
+                        "groundedness_issues": "",
+                    }
                 masked_query = f"Help me with case {resolved}"
             elif not classifier.is_junk_reply(raw_context_preview, query=masked_query):
                 # Confirmed live: a genuine new question typed here ("what
