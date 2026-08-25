@@ -207,6 +207,17 @@ class ChargebackState(TypedDict):
                                              instead of an actual answer, confirmed live via
                                              agent_eval.py. This field is the signal that lets that
                                              first-turn question get recognized at all.
+        resolved_utr          (str):        The same real case's UTR, set alongside
+                                             resolved_case_id. Both are read by reflect_node to
+                                             catch and deterministically correct a real, confirmed
+                                             live failure mode: the LLM garbling a real case_id
+                                             into a similar-looking wrong one inside the generated
+                                             letter (e.g. "NPCI20260530M010" instead of the real
+                                             "NPCI20260530M002010") — reflect_node's existing
+                                             groundedness check only ever verified REASON CODE
+                                             tokens, never case/UTR identifiers, so a wrong case ID
+                                             in a letter meant to go to an actual bank passed
+                                             through completely unnoticed.
     """
     user_query:            str
     additional_context:    str
@@ -223,6 +234,7 @@ class ChargebackState(TypedDict):
     ledger_decision_reason: str
     ledger_no_decision_reason: str
     resolved_case_id:      str
+    resolved_utr:          str
     evidence_present:      List[str]
     evidence_missing:      List[str]
     needs_more_info:            bool
@@ -1141,6 +1153,7 @@ class DisputeAgent:
         ledger_decision_reason = ""
         ledger_no_decision_reason = ""
         resolved_case_id = ""
+        resolved_utr = ""
 
         # 1. Deterministic code extraction — covers the majority of disputes
         network, code = classifier.extract_network_and_code(query)
@@ -1240,6 +1253,7 @@ class DisputeAgent:
                     network = "RuPay"
                     code    = row["reason_code"]
                     resolved_case_id = row["case_id"]
+                    resolved_utr     = row["utr"]
 
                     analysis = analyze_chargeback(row, db_path="chargebacks.db")
                     status_line = (
@@ -1346,6 +1360,7 @@ class DisputeAgent:
             "ledger_decision_reason":    ledger_decision_reason,
             "ledger_no_decision_reason": ledger_no_decision_reason,
             "resolved_case_id":          resolved_case_id,
+            "resolved_utr":              resolved_utr,
         }
 
     def _detect_settlement_node(self, state: ChargebackState) -> dict:
@@ -2789,14 +2804,19 @@ class DisputeAgent:
           - Extracts reason-code tokens from the draft and cross-checks them
             against retrieved docs and the RULES table. Codes that appear in
             the draft but nowhere in either source are flagged as ungrounded.
+          - When a specific case was resolved (resolved_case_id/resolved_utr
+            set), deterministically corrects any garbled case_id/UTR the LLM
+            wrote in the draft — this is a letter that may actually get
+            submitted to a bank, so a wrong case reference in it is worse
+            than a merely-worded-oddly answer.
           - Computes confidence from a formula (evidence count + rule-table
             coverage + doc match) rather than LLM self-rating.
           - Length-caps final_answer to 3000 characters.
-          - Does NOT rewrite the draft — _generate_node already produced a
-            complete, disclaimer-appended response.
+          - Does NOT otherwise rewrite the draft — _generate_node already
+            produced a complete, disclaimer-appended response.
 
         Reads:  draft_response, reason_code, card_network, evidence_present,
-                retrieved_docs
+                retrieved_docs, resolved_case_id, resolved_utr
         Writes: final_answer, reflection_feedback, confidence_score,
                 is_grounded, groundedness_issues
         """
@@ -2804,6 +2824,37 @@ class DisputeAgent:
         reason_code  = (state.get("reason_code",  "") or "").strip()
         card_network = (state.get("card_network", "") or "").strip()
         evidence_present = state.get("evidence_present", [])
+
+        # ------------------------------------------------------------------
+        # Case-ID/UTR correction — deterministic, not a groundedness flag.
+        # Confirmed live: a fully-grounded letter (real ledger evidence,
+        # correct reason code, correct UTR) still cited the wrong case_id
+        # in its "Re:" line — "NPCI20260530M010" instead of the real
+        # "NPCI20260530M002010" (a dropped "002"). reflect_node's
+        # groundedness check only ever verified reason-code tokens; a
+        # garbled case/UTR reference passed through completely unnoticed,
+        # into a letter meant to actually go to a bank. Since there's only
+        # ever one real case being discussed here, any NPCI.../UTR...-shaped
+        # token in the draft that doesn't match the one real,
+        # deterministically-known value is corrected outright rather than
+        # merely flagged — a lower confidence score is easy to miss buried
+        # in a long letter; a wrong case ID sent to a bank is a real
+        # consequence, and there is nothing ambiguous to preserve by
+        # leaving it wrong.
+        # ------------------------------------------------------------------
+        id_corrected = False
+        resolved_case_id = state.get("resolved_case_id", "")
+        resolved_utr      = state.get("resolved_utr", "")
+        if resolved_case_id:
+            for found in set(re.findall(r"\bNPCI\w+\b", draft, re.IGNORECASE)):
+                if found.upper() != resolved_case_id.upper():
+                    draft = draft.replace(found, resolved_case_id)
+                    id_corrected = True
+        if resolved_utr:
+            for found in set(re.findall(r"\bUTR\w+\b", draft, re.IGNORECASE)):
+                if found.upper() != resolved_utr.upper():
+                    draft = draft.replace(found, resolved_utr)
+                    id_corrected = True
 
         # ------------------------------------------------------------------
         # Groundedness check
@@ -2868,18 +2919,27 @@ class DisputeAgent:
         confidence += 2 if in_rule_table else 0    # +2 for deterministic decision
         confidence += 1 if doc_match    else 0     # +1 if code found in retrieved docs
         confidence -= 2 if not is_grounded else 0  # -2 for ungrounded citations
+        confidence -= 1 if id_corrected  else 0     # -1 for a corrected case_id/UTR
         confidence -= 2 if len(draft) < 150 else 0 # -2 if draft suspiciously short
         confidence  = max(1, min(10, confidence))
 
-        # Length cap
+        # Length cap — applied to the (possibly case-ID-corrected) draft
         final = draft[:2997] + "…" if len(draft) > 3000 else draft
 
+        feedback = (
+            "Grounded — all cited codes found in docs/rule table."
+            if is_grounded else
+            f"Groundedness issues detected: {groundedness_issues}"
+        )
+        if id_corrected:
+            feedback += (
+                f" Corrected a mismatched case_id/UTR in the draft to the "
+                f"confirmed value (case {resolved_case_id or '(n/a)'}, "
+                f"UTR {resolved_utr or '(n/a)'})."
+            )
+
         return {
-            "reflection_feedback": (
-                "Grounded — all cited codes found in docs/rule table."
-                if is_grounded else
-                f"Groundedness issues detected: {groundedness_issues}"
-            ),
+            "reflection_feedback": feedback,
             "final_answer":        final,
             "confidence_score":    confidence,
             "is_grounded":         is_grounded,
@@ -3077,6 +3137,7 @@ class DisputeAgent:
             "ledger_decision_reason": "",
             "ledger_no_decision_reason": "",
             "resolved_case_id":      "",
+            "resolved_utr":          "",
             "evidence_present":      [],
             "evidence_missing":      [],
             "needs_more_info":            False,
