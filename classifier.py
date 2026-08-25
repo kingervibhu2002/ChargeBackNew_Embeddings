@@ -69,6 +69,29 @@ _CONCEPT_QUERY_PATTERNS = (
     "ki list",
 )
 
+# A merchant asking to see their OWN existing cases in aggregate — "help me
+# with all open u002 chargebacks", "what about all my pending disputes" —
+# reads as a listing/data-lookup request, not a single new incident being
+# reported. Checked separately from _CONCEPT_QUERY_PATTERNS above (mid-
+# sentence, same as that list) because "all"/"my" + a status word here
+# signals "show me the list" specifically, distinct from a general
+# informational question. Without this, "help me with all open u002
+# chargebacks" doesn't start with an _IMPERATIVE_LIST_STARTERS phrase and
+# contains "chargebacks" (a _DISPUTE_INCIDENT_TERMS word), so it fell
+# through to "dispute" — the single-incident evidence-gathering pipeline —
+# and asked the merchant to "confirm only one credit was issued" for a
+# request that was never describing one specific transaction at all.
+#
+# Requires the status word to sit directly next to the case-noun (an
+# optional reason code allowed in between, e.g. "open u002 chargebacks") —
+# a plain "all open"/"my open" substring match was tried first and wrongly
+# fired on "they filed a U002 dispute against my open store", where "open"
+# describes the store, not the case count.
+_OWN_CASES_STATUS_NOUN_RE = re.compile(
+    r"\b(open|pending)\s+(?:u\d{3}\s+)?(chargebacks?|disputes?|cases?)\b",
+    re.IGNORECASE,
+)
+
 # Payment-domain terms that qualify a question-form input as on-topic.
 # "upi" and "code"/"codes" were missing — a query naming only "UPI" (not
 # "rupay"/"npci") or asking generically about "codes" (not a specific
@@ -203,6 +226,10 @@ def classify_query_type(query: str) -> str:
         or any(q.startswith(w) for w in _IMPERATIVE_LIST_STARTERS)
         or any(marker in q for marker in _MID_SENTENCE_QUESTION_MARKERS)
         or any(pattern in q for pattern in _CONCEPT_QUERY_PATTERNS)
+        or (
+            ("all " in q or "my " in q)
+            and _OWN_CASES_STATUS_NOUN_RE.search(q)
+        )
     )
     # Also treat a query as payment-related when it contains a recognisable
     # card code (Visa decimal, Mastercard 4-digit, Amex letter+digit, RuPay U-code).
