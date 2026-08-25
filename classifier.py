@@ -24,6 +24,21 @@ from typing import Dict, List, Optional, Tuple
 _CASE_REF_RE = re.compile(r'\b(?:UTR|NPCI)\d{6,}\w*\b', re.IGNORECASE)
 
 
+def has_case_reference(query: str) -> bool:
+    """True if `query` names a specific UTR/case ID directly (e.g.
+    "NPCI20260530M002010") rather than describing a dispute in general
+    terms. Used both by classify_query_type() below (a named case wins
+    "dispute" classification outright) and by chargeback_agent.py's
+    _validate_node, which must NOT run its list-then-select continuity
+    logic (asking the LLM "is this a request to list cases?") against a
+    query that already names one exact case — confirmed live that the
+    LLM tool-call there misread "Help me with case NPCI..." as a listing
+    request, which then discarded the case reference entirely as if it
+    were stale pendingQuery text to be replaced by the newest message.
+    """
+    return bool(_CASE_REF_RE.search(query))
+
+
 # ---------------------------------------------------------------------------
 # Query type classification
 # ---------------------------------------------------------------------------
@@ -217,7 +232,7 @@ def classify_query_type(query: str) -> str:
     # route to answer_question_node (generic knowledge-base search) instead
     # of planner_node (which looks the exact case up and grounds the answer
     # in it via chargeback_analysis.py).
-    if _CASE_REF_RE.search(query):
+    if has_case_reference(query):
         return "dispute"
 
     is_question_form    = (
@@ -578,6 +593,19 @@ _QUESTION_STARTER_WORDS = (
     "is there", "who",
 )
 
+# A merchant can ask several real questions in one imperative-shaped
+# sentence — "help me with step by step info, when was it raised, what
+# is the reason code, what evidence..." — with no "?" at all and no
+# question word at the very start. Each clause after a comma/semicolon
+# starting with a question word is itself a clarifying question, even
+# though the sentence as a whole opens with "help me with." Checked
+# separately from the start/end-anchored check above (which alone missed
+# exactly this phrasing live) rather than folding into it, since this one
+# looks for a clause boundary, not just a word position.
+_MID_SENTENCE_CLARIFYING_RE = re.compile(
+    r'[,;]\s*(how|where|what|why|which|who)\b', re.IGNORECASE
+)
+
 
 def is_clarifying_question(text: str) -> bool:
     """
@@ -613,6 +641,7 @@ def is_clarifying_question(text: str) -> bool:
     return bool(latest) and (
         latest.strip().endswith("?")
         or any(latest.lower().strip().startswith(w) for w in _QUESTION_STARTER_WORDS)
+        or bool(_MID_SENTENCE_CLARIFYING_RE.search(latest))
     )
 
 

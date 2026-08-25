@@ -808,7 +808,27 @@ class DisputeAgent:
         raw_context_preview = state.get("additional_context", "")
         merchant_id_preview  = state.get("merchant_id", "")
         list_intent = None
-        if raw_context_preview and merchant_id_preview and classifier.looks_like_data_lookup(masked_query):
+        # A pendingQuery that ALREADY names one specific case (e.g. "Help
+        # me with case NPCI20260530M002010" — itself the result of a
+        # prior single-case lookup, not a list-then-select flow) must
+        # skip this whole block rather than be handed to
+        # _resolve_data_lookup_intent() below. Confirmed live: that LLM
+        # tool-call misread exactly this query as a "list my cases"
+        # request (its docstring says "use this when the merchant wants
+        # to SEE or SELECT a case," which a specific case mention
+        # loosely resembles) — list_intent then got set, the merchant's
+        # real follow-up ("when was it raised, what's the reason code,
+        # what evidence...") didn't look like an ordinal case selection
+        # against the resulting list, and the code below fell through to
+        # its "abandon and promote the latest reply" branch, discarding
+        # the case reference in masked_query entirely and replacing it
+        # with the follow-up text alone — which has no case ID, no
+        # reason code, and no evidence-gathering context at all.
+        if (
+            raw_context_preview and merchant_id_preview
+            and not classifier.has_case_reference(masked_query)
+            and classifier.looks_like_data_lookup(masked_query)
+        ):
             intent = self._resolve_data_lookup_intent(merchant_id_preview, masked_query)
             if intent and intent["type"] == "list":
                 list_intent = intent
