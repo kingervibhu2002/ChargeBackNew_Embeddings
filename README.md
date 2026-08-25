@@ -284,6 +284,8 @@ A few decisions repeat throughout the codebase and are worth knowing before read
 
 - **`network_detection.py`** — shared logic for recognizing which payment network a query is actually about, including recognizing consumer app names (Google Pay, PhonePe) as referring to UPI/NPCI even when no technical term like "UPI" appears. Used by both the Dispute Assistant and the plain `/search` endpoint so they can't disagree about what counts as a network reference.
 
+- **`retrieval_evaluator.py`** — a deterministic (no LLM) check, run by `planner_node` right after retrieval and before generation: are the documents just retrieved actually consistent with the network detected for this query, or merely semantically similar to it? A high cosine-similarity score doesn't guarantee policy applicability — a Visa document about "unauthorized transactions" can score well against a UPI fraud question while being the wrong network's rules entirely, and this happened live: "how much is outstanding this case?" and "what documentation is required for this?" both matched wrong-network (Visa/Mastercard/Amex) content for RuPay merchants before their root causes were fixed elsewhere. Writes a `retrieval_status` (`"good"`/`"ambiguous"`/`"bad"`) and `retrieval_issues` explanation to state and the API response — **signal only right now**: nothing yet retries retrieval or blocks generation when this comes back `"bad"`. A real, pre-existing bug surfaced while building this: RuPay and Amex documents in the actual index are split across two different `network` payload spellings each (`"RuPay"`/`"RuPay / NPCI"`, `"Amex"`/`"American Express"`) — `chargeback_agent.py`'s old single-spelling translation dict silently missed half of each network's documents in the targeted payload-filter search (`_planner_node` step 3) the whole time, and would have produced false "bad" verdicts here too; fixed by accepting either real spelling as a match instead of assuming just one.
+
 ### Knowledge base and retrieval
 
 - **`vector_store.py`** — a thin wrapper around Qdrant (a vector database) running in local file mode, meaning no separate server process or Docker container is needed; everything is stored under `qdrant_data/`. Defines the `VectorStore` class, which manages two parallel collections: one holding whole documents, one holding heading-based chunks of the same documents for more precise retrieval. Also blends in classic keyword search (BM25) alongside vector similarity.
@@ -428,6 +430,7 @@ python test_search.py                                   # retrieval smoke test (
 | `decision_rules.py` | Fight/refund lookup table |
 | `evidence_tags.py` | Closed evidence vocabulary |
 | `network_detection.py` | "Which payment network is this about" detection |
+| `retrieval_evaluator.py` | Retrieval-consistency signal (network match check, no LLM) |
 | `vector_store.py` | Qdrant wrapper (whole-doc + chunk collections) |
 | `chunking.py` | Document → chunk splitting rules |
 | `load_encyclopedia.py`, `load_chargeback_docs.py` | Knowledge base indexing scripts |

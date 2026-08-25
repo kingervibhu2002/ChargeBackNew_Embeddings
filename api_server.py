@@ -275,6 +275,15 @@ class DisputeResponse(BaseModel):
         thread_id         (str):       This conversation's session id — new or resumed.
                                        Pass back on the next request to resume via the
                                        checkpointer.
+        retrieval_status  (str):       "good" | "ambiguous" | "bad" | "" (not assessed —
+                                       e.g. no network detected yet). Whether the documents
+                                       RETRIEVED were actually consistent with the detected
+                                       network — a different question from is_grounded below,
+                                       which checks whether the drafted ANSWER's own citations
+                                       trace back to what was retrieved. Signal only for now;
+                                       nothing currently blocks or retries on a "bad" result.
+        retrieval_issues  (str):       Human-readable explanation when retrieval_status isn't
+                                       "good".
     """
     final_answer:        str
     decision:            str
@@ -285,6 +294,8 @@ class DisputeResponse(BaseModel):
     confidence_score:    int
     is_grounded:         bool
     groundedness_issues: str
+    retrieval_status:    str
+    retrieval_issues:    str
     thread_id:           str
 
 
@@ -767,6 +778,8 @@ def dispute(
             confidence_score    = result.get("confidence_score",    0),
             is_grounded         = result.get("is_grounded",         True),
             groundedness_issues = result.get("groundedness_issues", ""),
+            retrieval_status    = result.get("retrieval_status",    ""),
+            retrieval_issues    = result.get("retrieval_issues",    ""),
             thread_id           = result.get("thread_id", thread_id),
         )
 

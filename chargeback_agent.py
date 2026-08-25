@@ -51,6 +51,7 @@ from network_detection import (
 )
 import classifier
 import decision_rules
+import retrieval_evaluator
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +134,12 @@ class ChargebackState(TypedDict):
         reason_code           (str):        e.g. "13.1" — set by planner_node / extract_code_node.
         card_network          (str):        "Visa" or "Mastercard" — set by planner_node / extract_code_node.
         retrieved_docs        (List[str]):  Policy doc contents — set by planner_node.
+        retrieval_status      (str):        "good" | "ambiguous" | "bad" | "" (not assessed
+                                             yet, e.g. network unknown) — set by planner_node.
+                                             Signal only right now: see retrieval_evaluator.py's
+                                             module docstring for why nothing routes on it yet.
+        retrieval_issues      (str):        Human-readable explanation when retrieval_status
+                                             isn't "good" — set by planner_node.
         is_settlement_issue   (bool):       True → set by detect_settlement_node.
         merchant_is_asking_question (bool): True → set by detect_clarification_node.
         evidence_present      (List[str]):  Evidence merchant mentioned — set by extract_evidence_node.
@@ -159,6 +166,8 @@ class ChargebackState(TypedDict):
     reason_code:           str
     card_network:          str
     retrieved_docs:        List[str]
+    retrieval_status:      str
+    retrieval_issues:      str
     evidence_present:      List[str]
     evidence_missing:      List[str]
     needs_more_info:            bool
@@ -204,18 +213,32 @@ def _make_llms() -> tuple:
 # classifier.py's extract_network_and_code() returns short canonical network
 # names ("RuPay", "Amex") — the form used everywhere else in this project
 # (state fields, decision_rules.RULES keys, evidence tag mappings). The
-# encyclopedia's frontmatter `network` field doesn't always match that
-# exactly (confirmed via `grep -h "^network:" chargeback-encyclopedia/*/*.md`):
-# RuPay docs are tagged "RuPay / NPCI" and Amex docs "American Express".
-# _planner_node's step 3 (below) filters Qdrant by exact payload match, so
-# without this translation that filter silently returns zero results for
-# every RuPay/Amex case — always falling through to fuzzier semantic search,
-# which can surface a wrong-but-adjacent reason code's document instead of
-# the actual one (e.g. a "U010" query pulling in "U009"'s evidence guidance).
-# Visa/Mastercard need no entry here — their frontmatter already matches.
-_FRONTMATTER_NETWORK_NAMES = {
-    "RuPay": "RuPay / NPCI",
-    "Amex":  "American Express",
+# encyclopedia's INDEXED network payload field doesn't always match that —
+# but not in the single, uniform way an earlier version of this comment
+# assumed ("RuPay docs are tagged 'RuPay / NPCI'", confirmed only via
+# grep-ing the frontmatter TEXT, never against what actually landed in
+# Qdrant). Verified directly against the real index
+# (VectorStore.filter_by_payload({}, limit=300), grouped by network):
+# RuPay documents are split across BOTH "RuPay" (5 docs) and "RuPay / NPCI"
+# (6 docs); Amex across both "Amex" (9) and "American Express" (4) — a
+# genuinely mixed, inconsistent index, not a single wrong spelling to
+# correct. Root cause: chunking.py's derive_network() only uses a
+# document's own frontmatter network: field when it parses as present and
+# non-empty; it silently falls back to a short folder-based name
+# otherwise, and that fallback fires for roughly half of each network's
+# real documents. A translation to only ONE spelling (this dict's earlier
+# form) meant _planner_node's step 3 payload filter matched only the other
+# half — silently missing real documents and always falling through to
+# the fuzzier hybrid-search fallback, and, once retrieval_evaluator.py
+# started using this same mapping, produced false "bad" consistency
+# verdicts for genuinely correct RuPay/Amex retrieval. Kept as a list per
+# network (not a single string) so both call sites below can accept
+# either real spelling as a match instead of assuming there's only one.
+# Visa/Mastercard need no entry here — every indexed document for both is
+# tagged with exactly the plain canonical name already.
+_NETWORK_PAYLOAD_SPELLINGS = {
+    "RuPay": ["RuPay", "RuPay / NPCI"],
+    "Amex":  ["Amex", "American Express"],
 }
 
 
@@ -978,13 +1001,15 @@ class DisputeAgent:
           5. LLM fallback ONLY when regex found neither network nor code — 1 call.
 
         Reads:  user_query, merchant_id
-        Writes: card_network, reason_code, retrieved_docs
+        Writes: card_network, reason_code, retrieved_docs, retrieval_status,
+                retrieval_issues
         """
         query       = state["user_query"]
         merchant_id = state.get("merchant_id", "")
 
         # 1. Deterministic code extraction — covers the majority of disputes
         network, code = classifier.extract_network_and_code(query)
+        payload_networks = _NETWORK_PAYLOAD_SPELLINGS.get(network, [network])
 
         # 2. Broad hybrid search (no LLM needed to decide what to retrieve)
         embedding = self._embed(query)
@@ -999,15 +1024,31 @@ class DisputeAgent:
             if len(diverse) == 5:
                 break
 
+        # Retrieval-sufficiency check — does `diverse` actually look
+        # applicable to the network just detected, or merely semantically
+        # similar to it? Deliberately run on `diverse` (the STRUCTURED
+        # results, still carrying their own `network` payload field)
+        # before the next line flattens them to bare content strings that
+        # carry no metadata at all. Signal only for now — nothing below
+        # this reads or routes on it yet; see retrieval_evaluator.py's own
+        # module docstring for why that's a deliberate, separate next step.
+        assessment = retrieval_evaluator.evaluate_retrieval(payload_networks, diverse)
+
         retrieved_contents = [r["content"] for r in diverse]
         existing_set       = set(retrieved_contents)
 
         # 3. Targeted supplemental retrieval when code is known
         if code != "Unknown" and network != "Unknown":
-            payload_network = _FRONTMATTER_NETWORK_NAMES.get(network, network)
-            targeted = self._store.filter_by_payload(
-                {"network": payload_network, "reason_code": code}, limit=3
-            )
+            # Try every known real spelling for this network (see
+            # _NETWORK_PAYLOAD_SPELLINGS) — the index is genuinely split
+            # across more than one for RuPay/Amex, not just one to guess.
+            targeted = []
+            for payload_network in payload_networks:
+                targeted = self._store.filter_by_payload(
+                    {"network": payload_network, "reason_code": code}, limit=3
+                )
+                if targeted:
+                    break
             if not targeted:
                 focused_q = f"{network} {code} {query}"
                 emb2      = self._embed(focused_q)
@@ -1120,9 +1161,11 @@ class DisputeAgent:
             code    = data.get("reason_code",  "Unknown")
 
         return {
-            "card_network":   network,
-            "reason_code":    code,
-            "retrieved_docs": retrieved_contents,
+            "card_network":     network,
+            "reason_code":      code,
+            "retrieved_docs":   retrieved_contents,
+            "retrieval_status": assessment.status,
+            "retrieval_issues": "; ".join(assessment.issues),
         }
 
     def _detect_settlement_node(self, state: ChargebackState) -> dict:
@@ -2754,6 +2797,8 @@ class DisputeAgent:
             "reason_code":           "",
             "card_network":          "",
             "retrieved_docs":        [],
+            "retrieval_status":      "",
+            "retrieval_issues":      "",
             "evidence_present":      [],
             "evidence_missing":      [],
             "needs_more_info":            False,
@@ -2790,6 +2835,17 @@ class DisputeAgent:
             "confidence_score":    result.get("confidence_score",    0),
             "is_grounded":         result.get("is_grounded",         True),
             "groundedness_issues": result.get("groundedness_issues", ""),
+            # Deliberately separate from confidence_score/is_grounded above,
+            # not folded into them — this is a RETRIEVAL-quality signal
+            # (were the docs we fetched actually applicable to the detected
+            # network?), computed by planner_node before generation ever
+            # runs. is_grounded is an ANSWER-quality signal, computed by
+            # reflect_node after generation, checking whether the DRAFT's
+            # own citations trace back to what was retrieved. Two different
+            # questions; conflating them would hide which one, if either,
+            # actually failed.
+            "retrieval_status":    result.get("retrieval_status",    ""),
+            "retrieval_issues":    result.get("retrieval_issues",    ""),
             "thread_id":           thread_id,
         }
 
