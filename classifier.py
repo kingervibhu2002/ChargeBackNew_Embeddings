@@ -695,7 +695,13 @@ _ORDINAL_WORDS = {
     "first": 0, "1st": 0,
     "second": 1, "2nd": 1,
     "third": 2, "3rd": 2,
-    "fourth": 3, "4th": 3,
+    "fourth": 3, "4th": 3, "forth": 3,  # "forth" is a common misspelling of
+                                        # "fourth" — confirmed live typed
+                                        # exactly this way ("what about
+                                        # forth one?"); without this alias
+                                        # it doesn't match any ordinal at
+                                        # all, falling through as if it
+                                        # weren't a selection attempt.
     "fifth": 4, "5th": 4,
 }
 
@@ -804,3 +810,57 @@ def detect_case_selection(text: str, shown_cases: List[Dict]) -> Optional[str]:
         return shown_cases[0]["case_id"]
 
     return None
+
+
+def is_out_of_range_case_reference(text: str, shown_cases: List[Dict]) -> bool:
+    """
+    True if the latest turn in `text` looks like an ordinal/number case
+    reference ("the third one", "#5") whose index does NOT exist in
+    shown_cases — i.e. detect_case_selection() returned None specifically
+    BECAUSE the position was out of range, not because the text wasn't a
+    selection attempt at all. The two situations need different handling
+    from the caller: a genuinely unrelated follow-up question should fall
+    through to normal classification, but an out-of-range selection
+    attempt should be told plainly there's no such case, not silently
+    reinterpreted as something else.
+
+    Confirmed live this distinction is necessary, not defensive
+    programming: with only detect_case_selection()'s plain None to go on,
+    _validate_node's existing fallback (promote this turn's text, re-
+    enriched with whatever case reference the ORIGINAL pendingQuery
+    happened to carry) reattached the FIRST case's id to "what about
+    third one?" when only two cases had ever been shown — producing a
+    confidently wrong answer ("Case NPCI... is the third open
+    chargeback...") for a case that was never third anything, rather
+    than surfacing that no third case exists.
+
+    Args:
+        text:        The merchant's reply — same latest-segment
+                     convention as detect_case_selection().
+        shown_cases: The cases actually shown, same as
+                     detect_case_selection().
+
+    Returns:
+        True only if an ordinal/number was named and it's out of range;
+        False for a reference that resolves fine, or for text with no
+        ordinal/number in it at all (that's just "not a selection",
+        detect_case_selection()'s job to say so).
+    """
+    if not shown_cases:
+        return False
+
+    segments = [s.strip() for s in text.split('\n\n') if s.strip()]
+    latest = (segments[-1] if segments else text).strip()
+    t = latest.lower()
+
+    m = _NUMBER_HASH_RE.search(t)
+    if m:
+        idx = int(m.group(1) or m.group(2)) - 1
+        if idx < 0 or idx >= len(shown_cases):
+            return True
+
+    for word, idx in _ORDINAL_WORDS.items():
+        if re.search(rf'\b{re.escape(word)}\b', t) and idx >= len(shown_cases):
+            return True
+
+    return False

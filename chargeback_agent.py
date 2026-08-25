@@ -811,6 +811,37 @@ class DisputeAgent:
                         "groundedness_issues": "",
                     }
                 masked_query = f"Help me with case {resolved}"
+            elif classifier.is_out_of_range_case_reference(raw_context_preview, shown):
+                # Confirmed live: "what about third one?" when only 2 cases
+                # were ever shown reached the promotion fallback below with
+                # bare detect_case_selection()==None — indistinguishable
+                # from "not a selection at all" — and got re-enriched with
+                # whatever case the ORIGINAL pendingQuery happened to
+                # reference, producing a confidently wrong answer ("Case
+                # NPCI... is the third open chargeback") instead of telling
+                # the merchant plainly that no third case exists. Caught
+                # here, before that fallback ever runs, and answered with
+                # the real count + the list again rather than guessing.
+                case_label = (
+                    f"open {list_intent['reason_code']} case(s)"
+                    if list_intent["reason_code"] else "open chargeback case(s)"
+                )
+                lines = [f"You only have {len(shown)} {case_label} right now — there's no case at that position. Here they are again:\n"]
+                for i, c in enumerate(shown, 1):
+                    lines.append(
+                        f"{i}. {c['case_id']} — RuPay {c['reason_code']} "
+                        f"({c['reason_description']}), ₹{c['chargeback_amount']:,.2f}, "
+                        f"due {c['response_deadline']}"
+                    )
+                return {
+                    "is_valid_query": True,
+                    "user_query":     masked_query,
+                    "final_answer":   "\n".join(lines),
+                    "needs_more_info": True,
+                    "confidence_score": 8,
+                    "is_grounded":      True,
+                    "groundedness_issues": "",
+                }
             elif not classifier.is_junk_reply(raw_context_preview, query=masked_query):
                 # Confirmed live: a genuine new question typed here ("what
                 # does U002 mean?", "how much is outstanding this month?")
