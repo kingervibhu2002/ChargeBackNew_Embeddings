@@ -192,6 +192,21 @@ class ChargebackState(TypedDict):
                                              extract_evidence_node surfaces this reason directly
                                              instead of asking the merchant to "confirm" evidence
                                              that was never the actual blocker.
+        resolved_case_id      (str):        Set by planner_node whenever a named UTR/case_id in
+                                             the query resolved to a real row for this merchant —
+                                             regardless of whether analyze_chargeback() reached a
+                                             confident decision. Read by detect_clarification_node:
+                                             a FIRST-turn query naming a real case can itself be a
+                                             genuine question ("What exactly happened?", "Did you
+                                             receive my evidence?") rather than a fresh incident
+                                             description — but is_clarifying_question() otherwise
+                                             only ever checks additional_context (a SECOND-turn
+                                             reply), so a first-turn question was silently running
+                                             straight through extract_evidence -> decide ->
+                                             generate and getting a generic rebuttal/refund letter
+                                             instead of an actual answer, confirmed live via
+                                             agent_eval.py. This field is the signal that lets that
+                                             first-turn question get recognized at all.
     """
     user_query:            str
     additional_context:    str
@@ -207,6 +222,7 @@ class ChargebackState(TypedDict):
     ledger_decision:       str
     ledger_decision_reason: str
     ledger_no_decision_reason: str
+    resolved_case_id:      str
     evidence_present:      List[str]
     evidence_missing:      List[str]
     needs_more_info:            bool
@@ -807,6 +823,7 @@ class DisputeAgent:
         # doesn't cost an extra LLM call.
         raw_context_preview = state.get("additional_context", "")
         merchant_id_preview  = state.get("merchant_id", "")
+        data_lookup_intent = None
         list_intent = None
         # A pendingQuery that ALREADY names one specific case (e.g. "Help
         # me with case NPCI20260530M002010" — itself the result of a
@@ -830,8 +847,10 @@ class DisputeAgent:
             and classifier.looks_like_data_lookup(masked_query)
         ):
             intent = self._resolve_data_lookup_intent(merchant_id_preview, masked_query)
-            if intent and intent["type"] == "list":
-                list_intent = intent
+            if intent:
+                data_lookup_intent = intent
+                if intent["type"] == "list":
+                    list_intent = intent
         if list_intent is not None:
             shown = self._filtered_open_cases(merchant_id_preview, list_intent["reason_code"])
             resolved = classifier.detect_case_selection(raw_context_preview, shown)
@@ -931,6 +950,27 @@ class DisputeAgent:
                 # decision saw a blob literally starting with a listing
                 # request — so it re-showed the full case list instead of
                 # answering the real, later question.
+                segments = [s.strip() for s in raw_context_preview.split('\n\n') if s.strip()]
+                latest_segment = segments[-1] if segments else raw_context_preview
+                masked_query = mask_pii(latest_segment)
+        elif data_lookup_intent is not None:
+            # The original query resolved to a non-list data-lookup intent
+            # (e.g. "aggregate" — a computed-number question like "how many
+            # chargebacks do I currently have?"). There's no list to select
+            # a position from, so only the "abandon and promote a genuine
+            # new message" repair above applies — but it was never reached
+            # for this intent type at all, since it lives inside the
+            # list_intent branch. Confirmed live via agent_eval.py: a
+            # session that opened with an aggregate question, then asked
+            # two different genuine follow-ups ("how much is still open?",
+            # "what are my most common reasons?"), got the exact same stale
+            # first answer for all three turns — masked_query never
+            # changed, so _answer_question_node reprocessed the identical
+            # frozen query every time (and its own _list_cache, keyed on
+            # query text alone, then reproduced the same cached response on
+            # top of that). Same fix as the list branch: promote a
+            # non-junk follow-up to be this turn's real query.
+            if not classifier.is_junk_reply(raw_context_preview, query=masked_query):
                 segments = [s.strip() for s in raw_context_preview.split('\n\n') if s.strip()]
                 latest_segment = segments[-1] if segments else raw_context_preview
                 masked_query = mask_pii(latest_segment)
@@ -1100,6 +1140,7 @@ class DisputeAgent:
         ledger_decision = ""
         ledger_decision_reason = ""
         ledger_no_decision_reason = ""
+        resolved_case_id = ""
 
         # 1. Deterministic code extraction — covers the majority of disputes
         network, code = classifier.extract_network_and_code(query)
@@ -1198,6 +1239,7 @@ class DisputeAgent:
                     # already found and fully analyzed.
                     network = "RuPay"
                     code    = row["reason_code"]
+                    resolved_case_id = row["case_id"]
 
                     analysis = analyze_chargeback(row, db_path="chargebacks.db")
                     status_line = (
@@ -1303,6 +1345,7 @@ class DisputeAgent:
             "ledger_decision":           ledger_decision,
             "ledger_decision_reason":    ledger_decision_reason,
             "ledger_no_decision_reason": ledger_no_decision_reason,
+            "resolved_case_id":          resolved_case_id,
         }
 
     def _detect_settlement_node(self, state: ChargebackState) -> dict:
@@ -1407,10 +1450,26 @@ class DisputeAgent:
         the junk-reply/substantive-context filters, so the two can't drift
         on what counts as "the merchant is asking a question."
 
-        Reads:  additional_context
+        On a FIRST turn (no additional_context yet), also checks the
+        original user_query itself — but only when planner_node already
+        resolved it to one specific, real case (resolved_case_id set).
+        Without this, a first message like "What exactly happened?" or
+        "Did you receive my evidence?" naming a real case ID never had any
+        chance of being recognized as a question at all — this check only
+        ever looked at additional_context, a SECOND-turn reply — so it ran
+        straight through extract_evidence -> decide -> generate and got a
+        generic rebuttal/refund letter instead of an actual answer.
+        Confirmed live via agent_eval.py. Scoped to only fire when a real
+        case was already resolved (not any first message) so a genuine new
+        dispute description that happens to contain a question word isn't
+        misrouted away from the normal evidence-gathering flow.
+
+        Reads:  additional_context, user_query, resolved_case_id
         Writes: merchant_is_asking_question
         """
         context = state.get("additional_context", "")
+        if not context and state.get("resolved_case_id"):
+            return {"merchant_is_asking_question": classifier.is_clarifying_question(state.get("user_query", ""))}
         return {"merchant_is_asking_question": classifier.is_clarifying_question(context)}
 
     def _answer_clarification_node(self, state: ChargebackState) -> dict:
@@ -1450,7 +1509,11 @@ class DisputeAgent:
         docs_text    = "\n\n".join(state.get("retrieved_docs", [])[:2])
 
         segments = [s.strip() for s in context.split("\n\n") if s.strip()]
-        latest   = segments[-1] if segments else context
+        # Falls back to user_query itself when there's no additional_context
+        # at all — the first-turn case detect_clarification_node now also
+        # recognizes (see that node's docstring): the merchant's actual
+        # question IS the original query, not a follow-up reply to one.
+        latest   = segments[-1] if segments else (context or state.get("user_query", ""))
 
         response = self._invoke([
             SystemMessage(content=(
@@ -3013,6 +3076,7 @@ class DisputeAgent:
             "ledger_decision":       "",
             "ledger_decision_reason": "",
             "ledger_no_decision_reason": "",
+            "resolved_case_id":      "",
             "evidence_present":      [],
             "evidence_missing":      [],
             "needs_more_info":            False,
