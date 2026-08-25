@@ -326,7 +326,7 @@ A few decisions repeat throughout the codebase and are worth knowing before read
 
 ### Frontend
 
-- **`chat.html`** — the entire frontend: a single self-contained HTML file (no build step, no separate framework) served directly by `api_server.py` at `/`. Implements the three-tab chat UI and talks to the backend purely over the HTTP endpoints listed above.
+- **`chat.html`** — the entire frontend: a single self-contained HTML file (no build step, no separate framework) served directly by `api_server.py` at `/`. Implements the three-tab chat UI and talks to the backend purely over the HTTP endpoints listed above. Bot answers are markdown (`###` headings, `**bold**`, `-`/`1.` lists, `|`-tables) — `renderMarkdown()` renders that into real HTML in every bot bubble across all three tabs, rather than showing it as literal escaped characters (a real, reported gap: every bubble previously just HTML-escaped the text and inserted it as-is). Deliberately hand-rolled rather than pulling in a CDN markdown library, consistent with this file's no-external-scripts constraint — escapes HTML first, then applies the markdown transforms on top of the now-inert escaped text, so this is exactly as XSS-safe as the plain-escaping it replaces.
 
 ### Tests and evaluation
 

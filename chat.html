@@ -240,6 +240,31 @@
     .status-pill.status-open      { background: #e8ecff; color: #4048c9; }
     .status-pill.status-lost      { background: #fdeaea; color: #c22b2b; }
     .status-pill.status-expired   { background: #f0f0f2; color: #66666e; }
+
+    /* Markdown rendering for LLM-authored bot answers (see renderMarkdown()) —
+       these come back as ###/**/-/| markdown, and were previously shown as
+       literal, unrendered characters in every bot bubble across all three
+       tabs. */
+    .md-h1, .md-h2, .md-h3, .md-h4 {
+      margin: 12px 0 6px; font-weight: 700; color: #222; line-height: 1.3;
+    }
+    .md-h1:first-child, .md-h2:first-child, .md-h3:first-child, .md-h4:first-child { margin-top: 0; }
+    .md-h1 { font-size: 16px; }
+    .md-h2 { font-size: 15px; }
+    .md-h3 { font-size: 14px; }
+    .md-h4 { font-size: 13.5px; }
+    .md-p  { margin: 6px 0; line-height: 1.7; }
+    .md-list { margin: 6px 0; padding-left: 22px; line-height: 1.7; }
+    .md-list li { margin: 2px 0; }
+    .md-table-wrap {
+      overflow-x: auto; margin: 8px 0; border: 1px solid #eee; border-radius: 8px;
+    }
+    .md-table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+    .md-table th, .md-table td {
+      padding: 7px 12px; text-align: left; border-bottom: 1px solid #eee;
+    }
+    .md-table th { background: #f8f9fa; color: #555; font-weight: 600; }
+    .md-table tbody tr:last-child td { border-bottom: none; }
   </style>
 </head>
 <body>
@@ -759,9 +784,15 @@
     const row = document.createElement('div');
     row.className = 'bubble-row agent';
 
-    const fmt = t => t
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\n/g, '<br>');
+    // Was previously its own bare regex here (**bold** + \n->br) with no
+    // HTML-escaping step at all before inserting into innerHTML — a real
+    // gap, not just inconsistent with the rest of the app: any literal
+    // "<"/">" in an LLM-generated or DB-derived answer would have been
+    // parsed as real HTML/script rather than shown as text. renderMarkdown()
+    // escapes first, then formats — same safety guarantee as every other
+    // bot bubble in this file, plus the same full markdown support (this
+    // tab's answers can include tables/lists too, e.g. a multi-row summary).
+    const fmt = renderMarkdown;
 
     const hasCsv     = data.rows_data && data.rows_data.length > 0;
     const csvBtnId    = 'csvBtn_' + Date.now();
@@ -856,7 +887,7 @@
       <div class="avatar bot">⚡</div>
       <div class="bubble bot">
         <div class="followup-banner">I need a bit more information before I can help:</div>
-        <div style="margin-top:10px;font-size:14px;color:#1a1a1a;">${escapeHtml(question)}</div>
+        <div style="margin-top:10px;font-size:14px;color:#1a1a1a;">${renderMarkdown(question)}</div>
       </div>`;
     messagesEl.appendChild(row);
     scrollBottom();
@@ -867,13 +898,11 @@
     const row = document.createElement('div');
     row.className = 'bubble-row';
 
-    // Question answer or rejected query — render with line breaks preserved
+    // Question answer or rejected query
     if (!data.decision) {
-      const formatted = escapeHtml(data.final_answer)
-        .replace(/\n/g, '<br>');
       row.innerHTML = `
         <div class="avatar bot">⚡</div>
-        <div class="bubble bot" style="color:#333; white-space:pre-wrap; line-height:1.7;">${formatted}</div>`;
+        <div class="bubble bot" style="color:#333;">${renderMarkdown(data.final_answer)}</div>`;
       messagesEl.appendChild(row);
       scrollBottom();
       return;
@@ -928,7 +957,7 @@
           ${groundWarn}
           <div class="letter-section">
             <div class="letter-label">${data.decision === 'fight' ? 'Rebuttal Letter' : 'Advice'}</div>
-            <div class="letter-body">${escapeHtml(data.final_answer)}</div>
+            <div class="letter-body">${renderMarkdown(data.final_answer)}</div>
           </div>
         </div>
       </div>`;
@@ -957,6 +986,104 @@
       .replace(/</g,'&lt;')
       .replace(/>/g,'&gt;')
       .replace(/"/g,'&quot;');
+  }
+
+  // Minimal, self-contained Markdown -> HTML renderer for bot answer
+  // bubbles. This project deliberately has no build step and no external
+  // scripts (see README.md/CLAUDE.md) — pulling in a CDN markdown library
+  // would break that, so this hand-rolls just the subset every LLM-authored
+  // answer in this app actually uses: headings (#/##/###/####), **bold**,
+  // *italic*, "- " bullet lists, "1. " numbered lists, and "| a | b |" pipe
+  // tables. Confirmed live this was needed, not cosmetic: every bot bubble
+  // across all three tabs was showing literal "###", "**", "-" characters
+  // instead of rendered structure, because escapeHtml() (still called
+  // FIRST, here, unchanged) only ever guarded against XSS — it was never
+  // meant to also format markdown, and nothing else in this file did either.
+  //
+  // Escaping happens before any markdown transform runs, not after —
+  // markdown punctuation (*, #, -, |) all survive HTML-escaping completely
+  // unchanged, so running these regexes on the escaped text is exactly as
+  // safe as the plain escapeHtml()-then-textContent path this replaces; a
+  // merchant typing literal "<script>" in a reply still renders as inert
+  // text, never as a tag.
+  function renderMarkdown(rawText) {
+    const escaped = escapeHtml(String(rawText));
+    const lines = escaped.split('\n');
+    const parts = [];
+    let i = 0;
+
+    function inline(text) {
+      return text
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s).,!?]|$)/g, '$1<em>$2</em>');
+    }
+    function isTableSeparator(line) {
+      return /^\s*\|?(\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$/.test(line);
+    }
+    function splitTableRow(line) {
+      return line.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+    }
+
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // Blank line — just a separator between blocks, no output of its own
+      if (line.trim() === '') { i++; continue; }
+
+      // Table: a row immediately followed by a |---|---| separator row
+      if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        const headerCells = splitTableRow(line);
+        i += 2;
+        const bodyRows = [];
+        while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+          bodyRows.push(splitTableRow(lines[i]));
+          i++;
+        }
+        let table = '<div class="md-table-wrap"><table class="md-table"><thead><tr>'
+          + headerCells.map(c => `<th>${inline(c)}</th>`).join('')
+          + '</tr></thead><tbody>'
+          + bodyRows.map(row => '<tr>' + row.map(c => `<td>${inline(c)}</td>`).join('') + '</tr>').join('')
+          + '</tbody></table></div>';
+        parts.push(table);
+        continue;
+      }
+
+      // Headings
+      const heading = line.match(/^(#{1,4})\s+(.*)$/);
+      if (heading) {
+        parts.push(`<div class="md-h${heading[1].length}">${inline(heading[2])}</div>`);
+        i++;
+        continue;
+      }
+
+      // Bullet list — consecutive "- " or "* " lines
+      if (/^\s*[-*]\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*[-*]\s+/, ''));
+          i++;
+        }
+        parts.push('<ul class="md-list">' + items.map(it => `<li>${inline(it)}</li>`).join('') + '</ul>');
+        continue;
+      }
+
+      // Numbered list — consecutive "1. " lines
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*\d+\.\s+/, ''));
+          i++;
+        }
+        parts.push('<ol class="md-list">' + items.map(it => `<li>${inline(it)}</li>`).join('') + '</ol>');
+        continue;
+      }
+
+      // Plain paragraph line
+      parts.push(`<p class="md-p">${inline(line)}</p>`);
+      i++;
+    }
+
+    return parts.join('');
   }
 
   queryEl.focus();
