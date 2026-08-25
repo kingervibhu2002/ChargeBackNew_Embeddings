@@ -34,8 +34,8 @@ def poll_and_apply(db_path: str = DB_PATH, audit_logger: AuditLogger = None) -> 
     Run one poll pass over every merchant with auto_decision='auto'.
 
     Returns:
-        dict: {"merchants_polled", "disputed_as_duplicate", "accepted",
-               "flagged_to_fight", "skipped"}
+        dict: {"merchants_polled", "disputed_as_duplicate", "disputed_via_ledger",
+               "accepted", "flagged_to_fight", "skipped"}
     """
     logger = audit_logger or AuditLogger("audit.log")
     conn = get_connection(db_path)
@@ -48,6 +48,7 @@ def poll_and_apply(db_path: str = DB_PATH, audit_logger: AuditLogger = None) -> 
         summary = {
             "merchants_polled":      len(merchant_ids),
             "disputed_as_duplicate": 0,
+            "disputed_via_ledger":   0,
             "accepted":              0,
             "flagged_to_fight":      0,
             "skipped":               0,
@@ -76,6 +77,35 @@ def poll_and_apply(db_path: str = DB_PATH, audit_logger: AuditLogger = None) -> 
                     "Pending", "Fight", f"Auto-disputed as duplicate — {analysis.reason}",
                 )
                 summary["disputed_as_duplicate"] += 1
+            elif analysis.action == "fight" and analysis.source == "ledger":
+                # Real bank-side ledger evidence (chargeback_analysis.py's
+                # U002 check: a confirmed duplicate credit, or confirmation
+                # that only one credit ever landed) is just as trustworthy
+                # as the CBS-refund check above — not a rule-table guess
+                # made with zero merchant evidence — so this can also be
+                # auto-disputed with confidence, rather than flagged for a
+                # human to gather evidence the bank's own records already
+                # supply in this specific case.
+                new_status, resolution, note = (
+                    "Pending", "Fight", f"Auto-disputed — {analysis.reason}",
+                )
+                summary["disputed_via_ledger"] += 1
+            elif analysis.action == "refund" and analysis.source == "ledger":
+                # A materially different situation from the "no evidence on
+                # file" default below, even though both land on the same
+                # status/resolution: here the ledger POSITIVELY CONFIRMS
+                # the customer's claim (e.g. chargeback_analysis.py's U002
+                # check found a genuine second credit) — real, strong
+                # evidence, just evidence that happens to support the
+                # customer rather than the merchant. Found live: the
+                # generic "(no evidence on file)" note text was factually
+                # wrong for this case — there IS evidence, it just isn't in
+                # the merchant's favor — worth its own accurate note rather
+                # than silently reusing a note that means the opposite.
+                new_status, resolution, note = (
+                    "Accepted", "Accept", f"Auto-accepted — bank ledger confirms the claim: {analysis.reason}",
+                )
+                summary["accepted"] += 1
             elif analysis.action == "refund":
                 new_status, resolution, note = (
                     "Accepted", "Accept", f"Auto-accepted (no evidence on file): {analysis.reason}",
@@ -120,6 +150,7 @@ if __name__ == "__main__":
     print(
         f"Polled {summary['merchants_polled']} opted-in merchant(s): "
         f"{summary['disputed_as_duplicate']} auto-disputed as duplicate (CBS refund on file), "
+        f"{summary['disputed_via_ledger']} auto-disputed via ledger evidence (U002 duplicate-credit check), "
         f"{summary['accepted']} auto-accepted, "
         f"{summary['flagged_to_fight']} flagged to fight (needs manual follow-through), "
         f"{summary['skipped']} skipped (no rule for that reason code)."

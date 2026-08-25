@@ -1,16 +1,21 @@
 """
 create_test_chargeback.py — Insert one fresh Open chargeback for a specific
-merchant, optionally with a matching CBS refund record, for testing
+merchant, optionally with a matching CBS ledger record, for testing
 auto_decision_poller.py without wiping/re-seeding the whole database.
 
 Usage:
-    # Plain chargeback, no CBS match — should auto-accept (if reason_code is
-    # in decision_rules.RULES) or get skipped (if not), once the poller runs.
+    # Plain chargeback, no ledger match — should auto-accept (if reason_code
+    # is in decision_rules.RULES) or get skipped (if not), once the poller runs.
     python create_test_chargeback.py --merchant AIRTEL_M001 --reason U001
 
     # Same, but also insert a CBS refund for it — should auto-dispute as
     # duplicate regardless of reason_code, since the CBS check runs first.
     python create_test_chargeback.py --merchant AIRTEL_M001 --reason U010 --with-refund
+
+    # A genuine second credit posted for this UTR — for U002 specifically,
+    # this should auto-dispute as "refund" via chargeback_analysis.py's
+    # ledger-based check (count_credits() >= 2), not the rule table.
+    python create_test_chargeback.py --merchant AIRTEL_M002 --reason U002 --with-duplicate-credit
 
     # Explicit amount instead of a random one:
     python create_test_chargeback.py --merchant AIRTEL_M002 --reason U002 --amount 5000 --with-refund
@@ -36,6 +41,7 @@ def insert_test_chargeback(
     reason_code: str,
     amount: float = None,
     with_refund: bool = False,
+    with_duplicate_credit: bool = False,
     db_path: str = "chargebacks.db",
 ) -> dict:
     if merchant_id not in _MERCHANTS_BY_ID:
@@ -82,14 +88,38 @@ def insert_test_chargeback(
             reason_code, NPCI_REASON_CODES[reason_code],
         ))
 
+        # Baseline ledger entry — the expected single settlement credit for
+        # this transaction, same as cbs.py's own seed_data() inserts for
+        # every real chargeback. Without this, a test-inserted row would
+        # have ZERO ledger entries at all (count_credits()==0), which
+        # chargeback_analysis.py's U002 check deliberately treats as "can't
+        # resolve either way, fall through to the rule table" rather than
+        # a real "one clean credit, claim refuted" case — inserting it here
+        # keeps a plain test chargeback (no flags) behaving like the common,
+        # unremarkable case it's meant to simulate.
+        credit_ref = f"CBS-CR-{utr}"
+        conn.execute("""
+            INSERT INTO ledger_entries (utr, entry_type, amount, status, posting_date, reference_id, remarks)
+            VALUES (?, 'credit', ?, 'posted', ?, ?, 'Original settlement credit (test)')
+        """, (utr, amount, txn_date.isoformat(), credit_ref))
+
         refund_ref = None
         if with_refund:
             refund_date = (txn_date + timedelta(days=random.randint(1, 5))).isoformat()
             refund_ref  = f"CBS-RFND-{utr}"
             conn.execute("""
-                INSERT INTO cbs_transactions (utr, txn_type, amount, txn_date, reference_id, remarks)
-                VALUES (?, 'refund', ?, ?, ?, 'Test refund inserted by create_test_chargeback.py')
+                INSERT INTO ledger_entries (utr, entry_type, amount, status, posting_date, reference_id, remarks)
+                VALUES (?, 'refund', ?, 'posted', ?, ?, 'Test refund inserted by create_test_chargeback.py')
             """, (utr, amount, refund_date, refund_ref))
+
+        duplicate_ref = None
+        if with_duplicate_credit:
+            dup_date = (txn_date + timedelta(days=random.randint(1, 3))).isoformat()
+            duplicate_ref = f"CBS-CR2-{utr}"
+            conn.execute("""
+                INSERT INTO ledger_entries (utr, entry_type, amount, status, posting_date, reference_id, remarks)
+                VALUES (?, 'credit', ?, 'posted', ?, ?, 'Test duplicate credit inserted by create_test_chargeback.py')
+            """, (utr, amount, dup_date, duplicate_ref))
 
         conn.commit()
     finally:
@@ -104,6 +134,8 @@ def insert_test_chargeback(
         "amount": amount,
         "with_refund": with_refund,
         "cbs_reference": refund_ref,
+        "with_duplicate_credit": with_duplicate_credit,
+        "duplicate_reference": duplicate_ref,
     }
 
 
@@ -113,7 +145,10 @@ if __name__ == "__main__":
     parser.add_argument("--reason", required=True, help=f"One of: {', '.join(NPCI_REASON_CODES)}")
     parser.add_argument("--amount", type=float, default=None, help="Defaults to a random amount")
     parser.add_argument("--with-refund", action="store_true",
-                         help="Also insert a matching CBS refund record for this transaction")
+                         help="Also insert a matching CBS ledger refund entry for this transaction")
+    parser.add_argument("--with-duplicate-credit", action="store_true",
+                         help="Also insert a genuine second ledger credit entry for this transaction "
+                              "(tests chargeback_analysis.py's U002 ledger-based check)")
     parser.add_argument("--db-path", default="chargebacks.db")
     args = parser.parse_args()
 
@@ -123,6 +158,7 @@ if __name__ == "__main__":
             reason_code=args.reason,
             amount=args.amount,
             with_refund=args.with_refund,
+            with_duplicate_credit=args.with_duplicate_credit,
             db_path=args.db_path,
         )
     except ValueError as e:
@@ -137,6 +173,10 @@ if __name__ == "__main__":
     if result["with_refund"]:
         print(f"  CBS refund:  {result['cbs_reference']} (should auto-dispute as duplicate)")
     else:
-        print(f"  CBS refund:  none (will follow decision_rules.py's normal evidence-free outcome)")
+        print(f"  CBS refund:  none")
+    if result["with_duplicate_credit"]:
+        print(f"  2nd credit:  {result['duplicate_reference']} (should auto-refund via ledger check, U002 only)")
+    if not result["with_refund"] and not result["with_duplicate_credit"]:
+        print(f"               (will follow decision_rules.py's normal evidence-free outcome)")
     print()
     print("Now run: python auto_decision_poller.py")
