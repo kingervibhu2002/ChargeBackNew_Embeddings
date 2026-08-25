@@ -835,6 +835,61 @@ class DisputeAgent:
         # doesn't cost an extra LLM call.
         raw_context_preview = state.get("additional_context", "")
         merchant_id_preview  = state.get("merchant_id", "")
+
+        # A case named DIRECTLY in a first-turn query ("Help me with case
+        # NPCI20260530M002010", "explain more on UTR...") used to fall
+        # straight through to the full dispute pipeline
+        # (extract_evidence -> decide -> generate), which unconditionally
+        # produces a complete fight/refund letter regardless of what was
+        # actually asked — jumping straight to a conclusion instead of
+        # retrieving the case, explaining the reason code, and evaluating
+        # evidence first, the way the ordinal-selection continuity path
+        # ("show me my cases" -> "tell me about the first one") already
+        # does via _build_case_intro(). Confirmed live this was a real,
+        # not cosmetic, gap: identical case, identical merchant, but a
+        # completely different (and worse) experience purely because of
+        # HOW the case was referenced. Fixed by giving a direct case
+        # mention the exact same progressive introduction, on a TRUE
+        # first turn only (no additional_context yet) — once the merchant
+        # has replied with evidence/a follow-up, chat.html resends this
+        # same masked_query with additional_context now set, this check
+        # deliberately does not re-fire, and the normal pipeline (still
+        # grounded via planner_node's own step 4b lookup) proceeds to a
+        # real evidence evaluation and eventual decision instead of
+        # repeating the intro forever.
+        if not raw_context_preview and merchant_id_preview:
+            case_ref_token = classifier.extract_case_reference(masked_query)
+            if case_ref_token:
+                from merchant_db import get_connection as _get_conn
+                conn = _get_conn()
+                row = conn.execute(
+                    "SELECT case_id FROM chargebacks WHERE merchant_id = ? AND (utr = ? OR case_id = ?)",
+                    (merchant_id_preview, case_ref_token, case_ref_token),
+                ).fetchone()
+                conn.close()
+                if row:
+                    intro = self._build_case_intro(merchant_id_preview, row["case_id"])
+                    if intro:
+                        return {
+                            "is_valid_query": True,
+                            "user_query":     masked_query,
+                            "final_answer":   intro["final_answer"],
+                            "reason_code":    intro["reason_code"],
+                            "card_network":   intro["card_network"],
+                            "needs_more_info": True,
+                            "confidence_score": 8,
+                            "is_grounded":      True,
+                            "groundedness_issues": "",
+                        }
+                    # intro build failed (e.g. tool loop never resolved a
+                    # row) — fall through to planner_node's step 4b, same
+                    # never-a-dead-end guarantee the ordinal-selection path
+                    # already relies on.
+                # else: no row for this merchant — fall through too;
+                # planner_node's step 4b + extract_code_node's
+                # case_ref_not_found handling give the accurate
+                # "no such case on your account" answer for that case.
+
         data_lookup_intent = None
         list_intent = None
         # A pendingQuery that ALREADY names one specific case (e.g. "Help

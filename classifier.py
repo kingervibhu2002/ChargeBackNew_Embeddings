@@ -39,6 +39,16 @@ def has_case_reference(query: str) -> bool:
     return bool(_CASE_REF_RE.search(query))
 
 
+def extract_case_reference(query: str) -> Optional[str]:
+    """The literal UTR/case_id token named in `query`, or None if none is
+    present. Same underlying pattern as has_case_reference() above — used
+    by _validate_node to look the token up directly (by utr OR case_id;
+    the merchant may name either) rather than just knowing one exists.
+    """
+    match = _CASE_REF_RE.search(query)
+    return match.group(0) if match else None
+
+
 # ---------------------------------------------------------------------------
 # Query type classification
 # ---------------------------------------------------------------------------
