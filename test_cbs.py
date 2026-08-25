@@ -16,7 +16,15 @@ import os
 import sys
 import tempfile
 
-from cbs import count_credits, create_schema, find_refund_for_utr, get_ledger_entries, has_pending_suspense
+from cbs import (
+    count_credits,
+    create_schema,
+    find_refund_for_utr,
+    get_ledger_entries,
+    has_pending_suspense,
+    reconcile_utr,
+    total_credit_amount,
+)
 from chargeback_analysis import analyze_chargeback
 from merchant_db import get_connection
 
@@ -55,6 +63,24 @@ def _insert_ledger_entry(db_path, utr, entry_type, amount, status="posted", post
     )
     conn.commit()
     conn.close()
+
+
+def _insert_settlement_entry(db_path, utr, amount, settlement_type="AUTH", settlement_date="2026-01-01", ref=None):
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO settlement_entries (utr, amount, settlement_type, settlement_date, cycle_id, reference_id) "
+        "VALUES (?, ?, ?, ?, 'CYCLE-1', ?)",
+        (utr, amount, settlement_type, settlement_date, ref or f"SETREF-{utr}-{amount}-{settlement_date}"),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _get_ledger_entry_id(db_path, reference_id):
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT id FROM ledger_entries WHERE reference_id = ?", (reference_id,)).fetchone()
+    conn.close()
+    return row["id"]
 
 
 def test_count_credits_zero_when_no_entries() -> bool:
@@ -134,6 +160,107 @@ def test_find_refund_for_utr_none() -> bool:
         os.remove(db)
 
 
+def test_count_credits_nets_out_reversed_credit_with_no_repost() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_ledger_entry(db, "UTR_REV", "credit", 500, status="posted", posting_date="2026-01-01", ref="REV-CR1")
+        credit_id = _get_ledger_entry_id(db, "REV-CR1")
+        conn = get_connection(db)
+        conn.execute(
+            "INSERT INTO ledger_entries (utr, entry_type, amount, status, posting_date, reference_id, reversal_of_id) "
+            "VALUES (?, 'reversal', ?, 'posted', ?, ?, ?)",
+            ("UTR_REV", 500, "2026-01-03", "REV-REV1", credit_id),
+        )
+        conn.commit()
+        conn.close()
+        return _check("count_credits() == 0 when the only credit was reversed and never reposted",
+                       count_credits("UTR_REV", db_path=db) == 0,
+                       detail=str(count_credits("UTR_REV", db_path=db)))
+    finally:
+        os.remove(db)
+
+
+def test_count_credits_reversal_then_repost_nets_to_one() -> bool:
+    # The exact scenario a naive entry_type='credit' row count would
+    # misread as a duplicate: credit -> reversal -> repost. Two raw
+    # 'credit' rows exist, but only one is still standing.
+    db = _make_test_db()
+    try:
+        _insert_ledger_entry(db, "UTR_REPOST", "credit", 500, status="posted", posting_date="2026-01-01", ref="REPOST-CR1")
+        credit_id = _get_ledger_entry_id(db, "REPOST-CR1")
+        conn = get_connection(db)
+        conn.execute(
+            "INSERT INTO ledger_entries (utr, entry_type, amount, status, posting_date, reference_id, reversal_of_id) "
+            "VALUES (?, 'reversal', ?, 'posted', ?, ?, ?)",
+            ("UTR_REPOST", 500, "2026-01-02", "REPOST-REV1", credit_id),
+        )
+        conn.commit()
+        conn.close()
+        _insert_ledger_entry(db, "UTR_REPOST", "credit", 500, status="posted", posting_date="2026-01-03", ref="REPOST-CR2")
+        return _check(
+            "count_credits() == 1 after credit -> reversal -> repost (not 2, despite two 'credit' rows)",
+            count_credits("UTR_REPOST", db_path=db) == 1,
+            detail=str(count_credits("UTR_REPOST", db_path=db)),
+        )
+    finally:
+        os.remove(db)
+
+
+def test_total_credit_amount_nets_reversals_too() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_ledger_entry(db, "UTR_AMT", "credit", 500, status="posted", posting_date="2026-01-01", ref="AMT-CR1")
+        credit_id = _get_ledger_entry_id(db, "AMT-CR1")
+        conn = get_connection(db)
+        conn.execute(
+            "INSERT INTO ledger_entries (utr, entry_type, amount, status, posting_date, reference_id, reversal_of_id) "
+            "VALUES (?, 'reversal', ?, 'posted', ?, ?, ?)",
+            ("UTR_AMT", 500, "2026-01-02", "AMT-REV1", credit_id),
+        )
+        conn.commit()
+        conn.close()
+        _insert_ledger_entry(db, "UTR_AMT", "credit", 500, status="posted", posting_date="2026-01-03", ref="AMT-CR2")
+        return _check("total_credit_amount() == 500 (net), not 1000, after reversal+repost",
+                       total_credit_amount("UTR_AMT", db_path=db) == 500,
+                       detail=str(total_credit_amount("UTR_AMT", db_path=db)))
+    finally:
+        os.remove(db)
+
+
+def test_reconcile_utr_matched() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_ledger_entry(db, "UTR_MATCH", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_MATCH", 500)
+        result = reconcile_utr("UTR_MATCH", db_path=db)
+        return _check("reconcile_utr() == 'matched' when settlement equals net ledger credit",
+                       result["status"] == "matched", detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_reconcile_utr_mismatch() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_ledger_entry(db, "UTR_MISMATCH", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_MISMATCH", 300)
+        result = reconcile_utr("UTR_MISMATCH", db_path=db)
+        return _check("reconcile_utr() == 'mismatch' when settlement and ledger disagree",
+                       result["status"] == "mismatch", detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_reconcile_utr_no_data() -> bool:
+    db = _make_test_db()
+    try:
+        result = reconcile_utr("UTR_NODATA", db_path=db)
+        return _check("reconcile_utr() == 'no_data' when neither settlement nor ledger has anything",
+                       result["status"] == "no_data", detail=str(result))
+    finally:
+        os.remove(db)
+
+
 def test_get_ledger_entries_ordered() -> bool:
     db = _make_test_db()
     try:
@@ -181,11 +308,33 @@ def test_u002_one_credit_recommends_fight_via_ledger() -> bool:
     try:
         _insert_chargeback(db, "UTR_ONE", "U002")
         _insert_ledger_entry(db, "UTR_ONE", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_ONE", 500)  # reconciled — matches the ledger
         row = _get_chargeback_row(db, "UTR_ONE")
         result = analyze_chargeback(row, db_path=db)
-        return _check("U002 + exactly 1 posted credit, nothing pending -> action='fight', source='ledger'",
+        return _check("U002 + exactly 1 posted credit, nothing pending, reconciled -> action='fight', source='ledger'",
                        result.action == "fight" and result.source == "ledger",
                        detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_u002_one_credit_unreconciled_returns_no_recommendation() -> bool:
+    # Ledger looks internally fine (exactly one clean credit), but nothing
+    # the network reported as settled matches it -- a mismatch a same-
+    # source-only check could never surface. Must NOT resolve to "fight"
+    # just because the ledger alone looks clean.
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_UNRECON", "U002")
+        _insert_ledger_entry(db, "UTR_UNRECON", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_UNRECON", 0)  # network reports nothing settled
+        row = _get_chargeback_row(db, "UTR_UNRECON")
+        result = analyze_chargeback(row, db_path=db)
+        return _check(
+            "U002 + 1 posted credit but settlement mismatch -> action=None, source='ledger'",
+            result.action is None and result.source == "ledger",
+            detail=str(result),
+        )
     finally:
         os.remove(db)
 
@@ -260,8 +409,15 @@ def main() -> None:
         test_find_refund_for_utr_found,
         test_find_refund_for_utr_none,
         test_get_ledger_entries_ordered,
+        test_count_credits_nets_out_reversed_credit_with_no_repost,
+        test_count_credits_reversal_then_repost_nets_to_one,
+        test_total_credit_amount_nets_reversals_too,
+        test_reconcile_utr_matched,
+        test_reconcile_utr_mismatch,
+        test_reconcile_utr_no_data,
         test_u002_two_credits_recommends_refund_via_ledger,
         test_u002_one_credit_recommends_fight_via_ledger,
+        test_u002_one_credit_unreconciled_returns_no_recommendation,
         test_u002_pending_entry_returns_no_recommendation,
         test_u002_zero_credits_falls_through_to_rule_table,
         test_cbs_refund_check_still_takes_priority_over_ledger_check,

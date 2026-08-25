@@ -237,9 +237,14 @@ cron → auto_decision_poller.py (merchants who opted in)
              the dispute process? if so, that settles it regardless
              of reason code
            → else, for U002 specifically: cbs.py's ledger — did the
-             bank's own records show two credits (refund) or exactly
-             one with nothing pending (fight)? real bank evidence
-             either way, not a rule-table guess
+             bank's own records show two net credits (refund, reversal-
+             aware so a credit→reversal→repost doesn't miscount as a
+             duplicate) or exactly one with nothing pending? if exactly
+             one, cbs.py's reconcile_utr() cross-checks that credit
+             against the network-reported settlement before trusting
+             it — only a matching, reconciled single credit resolves to
+             fight; a mismatch defers instead of guessing. real bank
+             evidence either way, not a rule-table guess
            → else: decision_rules.py lookup for this network+code
          → if a confident recommendation exists: write it back to
            chargebacks.db as the case's resolution
@@ -312,9 +317,9 @@ A few decisions repeat throughout the codebase and are worth knowing before read
 
 ### Background automation
 
-- **`cbs.py`** — a dummy "Core Banking System" ledger: the one source of ground truth for what actually happened to a transaction's money, as posted by the bank itself. `ledger_entries` holds real per-posting rows (a transaction can have more than one credit, a pending/unresolved entry, a refund, or a reversal) rather than a flat "was this refunded, yes/no" flag — a customer can mistakenly claim a duplicate charge that never happened just as easily as they can fail to notice a refund they already received, and this is what settles either question directly from bank-side evidence rather than trusting either side's unverified claim. `count_credits()`/`has_pending_suspense()` answer "did the bank's ledger actually show two separate credits for this transaction" (the real-evidence question a U002 duplicate-transaction dispute needs, not an inference from the absence of a merchant counter-argument); `find_refund_for_utr()` answers the original "was this already refunded outside the dispute process" question. Deliberately a synthetic, production-*inspired* schema scoped to exactly what a chargeback investigation needs — not a claim to model any real bank's actual CBS/ledger/settlement architecture, which varies by institution and is distributed across several systems in practice.
+- **`cbs.py`** — a dummy "Core Banking System" ledger: the one source of ground truth for what actually happened to a transaction's money, as posted by the bank itself. `ledger_entries` holds real per-posting rows (a transaction can have more than one credit, a pending/unresolved entry, a refund, or a reversal linked back to the specific credit it cancels via `reversal_of_id`) rather than a flat "was this refunded, yes/no" flag — a customer can mistakenly claim a duplicate charge that never happened just as easily as they can fail to notice a refund they already received, and this is what settles either question directly from bank-side evidence rather than trusting either side's unverified claim. `count_credits()`/`total_credit_amount()` net out reversed credits internally (a credit → reversal → correct repost nets to one effective credit, not two, so a normal correction sequence can't be misread as a duplicate) and answer "how many/how much did the bank's ledger actually post for this transaction" (the real-evidence question a U002 duplicate-transaction dispute needs, not an inference from the absence of a merchant counter-argument); `find_refund_for_utr()` answers the original "was this already refunded outside the dispute process" question. `has_pending_suspense()` flags an entry still in flight. A second, independent `settlement_entries` table records what the payment network itself reported as settled (`settlement_type`: AUTH/DISPUTE/ADJUSTMENT, mirroring NPCI's real practice of keeping settlement cycles separate by type) — `reconcile_utr()` compares this against the ledger's net credit total and returns `matched`/`mismatch`/`no_data`, so a ledger that's internally tidy but disagrees with what the network independently reported is caught as its own signal, not silently trusted. Deliberately a synthetic, production-*inspired* schema scoped to exactly what a chargeback investigation needs — not a claim to model any real bank's actual CBS/ledger/settlement architecture, which varies by institution and is distributed across several systems in practice.
 
-- **`chargeback_analysis.py`** — the single shared "what should happen to this chargeback" function, used by both pollers below so they can never quietly disagree. Checks `cbs.py`'s refund record first (a confirmed duplicate refund always wins, regardless of reason code); for U002 specifically, then checks `cbs.py`'s ledger — a confirmed second credit means refund, exactly one clean credit with nothing pending means fight, backed by real bank evidence either way rather than the rule table's usual evidence-free "refund" default; only then falls back to `decision_rules.py`'s evidence-based table for everything else.
+- **`chargeback_analysis.py`** — the single shared "what should happen to this chargeback" function, used by both pollers below so they can never quietly disagree. Checks `cbs.py`'s refund record first (a confirmed duplicate refund always wins, regardless of reason code); for U002 specifically, then checks `cbs.py`'s ledger — two or more net credits means refund; exactly one with nothing pending is cross-checked against `cbs.py`'s `reconcile_utr()` before being trusted, so only a credit that also reconciles with the network-reported settlement resolves to fight — a reconciliation mismatch defers instead of guessing, backed by real bank evidence either way rather than the rule table's usual evidence-free "refund" default; only then falls back to `decision_rules.py`'s evidence-based table for everything else.
 
 - **`auto_decision_poller.py`** — a standalone script (run via cron, not part of the live server) that applies `chargeback_analysis.py`'s recommendation directly to every Open chargeback belonging to a merchant who has opted into `auto_decision = 'auto'`. Note this does not mean "always accept" or "always fight" as a blanket setting — it applies whatever the case-by-case analysis actually recommends; the opt-in only removes the manual confirmation step.
 
@@ -445,7 +450,7 @@ python test_search.py                                   # retrieval smoke test (
 | `auth.py` | API key → identity resolution |
 | `guardrails.py` | Rate limiting, PII masking, audit log, cost cap |
 | `llm_provider.py` | Groq/OpenAI provider selection |
-| `cbs.py` | Dummy core-banking refund ledger |
+| `cbs.py` | Dummy core-banking ledger + settlement reconciliation |
 | `chargeback_analysis.py` | Shared fight/refund recommendation logic |
 | `auto_decision_poller.py` | Applies recommendations automatically (opted-in merchants) |
 | `suggestion_poller.py` | Advisory-only recommendations (opted-out merchants) |

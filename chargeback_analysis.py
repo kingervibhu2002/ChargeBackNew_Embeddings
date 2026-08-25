@@ -9,7 +9,7 @@ pollers can never silently diverge on what a given case's recommendation is.
 from typing import NamedTuple, Optional
 
 import decision_rules
-from cbs import count_credits, find_refund_for_utr, has_pending_suspense
+from cbs import count_credits, find_refund_for_utr, has_pending_suspense, reconcile_utr
 
 # All chargebacks in this schema are NPCI/UPI disputes — see
 # auto_decision_poller.py's matching comment for why this is a constant
@@ -44,7 +44,20 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
        credit landed and the customer's duplicate-charge claim doesn't
        hold. The ledger is real, bank-side evidence a background poller
        can act on with no merchant involved, same justification as the
-       CBS refund check above.
+       CBS refund check above. count_credits() is reversal-aware (see
+       cbs.py's _net_posted_credits()) — a credit that was reversed and
+       correctly reposted nets to one effective credit, not two, so this
+       can't misread that sequence as a duplicate.
+    2b. When ledger_entries alone shows exactly one clean credit (the
+        "fight" case above), that's checked a second, INDEPENDENT way
+        before being trusted: does the bank's own ledger actually agree
+        with what the payment network separately reported as settled
+        (cbs.reconcile_utr())? A ledger that's internally tidy can still
+        disagree with an independent source — and that disagreement is
+        itself real signal a same-source-only check could never surface,
+        not the absence of evidence "refund" already means elsewhere in
+        this function. A reconciliation mismatch here downgrades a would-
+        be "fight" to "cannot confidently decide" instead.
     3. Otherwise, decision_rules.decide() with no evidence present, same
        as before: known reason codes resolve to "refund", unmapped codes
        return no recommendation (action=None) rather than guessing.
@@ -65,13 +78,15 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
     if row["reason_code"] == "U002":
         credits = count_credits(row["utr"], db_path=db_path)
         if credits >= 2:
+            recon = reconcile_utr(row["utr"], db_path=db_path)
             return Analysis(
                 action="refund",
                 reason=(
                     f"Ledger shows {credits} separate credits posted for this transaction "
-                    f"— the customer's duplicate-charge claim is confirmed by the bank's own "
-                    f"posting records, not merely unrebutted. The duplicate amount should be "
-                    f"refunded."
+                    f"(₹{recon['ledger_credit_total']:,.2f} total credited, against a network-"
+                    f"reported settlement of ₹{recon['settlement_amount']:,.2f}) — the customer's "
+                    f"duplicate-charge claim is confirmed by the bank's own posting records, not "
+                    f"merely unrebutted. The duplicate amount should be refunded."
                 ),
                 source="ledger",
             )
@@ -85,12 +100,26 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 source="ledger",
             )
         if credits == 1:
+            recon = reconcile_utr(row["utr"], db_path=db_path)
+            if recon["status"] == "mismatch":
+                return Analysis(
+                    action=None,
+                    reason=(
+                        f"Ledger shows one posted credit (₹{recon['ledger_credit_total']:,.2f}), "
+                        f"but it does not reconcile with the network-reported settlement "
+                        f"(₹{recon['settlement_amount']:,.2f}) for this transaction — cannot "
+                        f"confidently recommend fight or refund until this discrepancy is "
+                        f"investigated."
+                    ),
+                    source="ledger",
+                )
             return Analysis(
                 action="fight",
                 reason=(
-                    "Ledger shows exactly one posted credit for this transaction and no "
-                    "unresolved pending entries — the duplicate-charge claim is not supported "
-                    "by the bank's own records."
+                    "Ledger shows exactly one posted credit for this transaction, reconciled "
+                    "against the network-reported settlement, and no unresolved pending "
+                    "entries — the duplicate-charge claim is not supported by the bank's own "
+                    "records."
                 ),
                 source="ledger",
             )

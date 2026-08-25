@@ -1,31 +1,44 @@
 """
-cbs.py — Dummy Core Banking System ledger.
+cbs.py — Dummy Core Banking System ledger + network settlement records.
 
-Models the one piece of ground truth neither the merchant's claims nor the
-customer's dispute can be trusted to report accurately on their own: what
-actually happened to a given transaction's money, as posted by the bank
-itself. A customer can mistakenly claim a duplicate charge that never
-happened, or fail to notice a refund they already received — that's a
-dispute the bank's own ledger can settle directly, without needing the
-merchant to argue it from scratch.
+Models the two independent pieces of ground truth neither the merchant's
+claims nor the customer's dispute can be trusted to report accurately on
+their own: what the bank's own ledger shows happened to a transaction's
+money (ledger_entries), and what the payment network independently reported
+as settled for it (settlement_entries). A customer can mistakenly claim a
+duplicate charge that never happened, or fail to notice a refund they
+already received — the ledger settles that directly. But the ledger alone
+is only ONE source; comparing it against an independent settlement record
+(reconcile_utr()) is what NPCI's own operating material actually requires
+for UPI exception/dispute handling — a three-way reconciliation across the
+network feed, the bank's switch, and its CBS. This module doesn't model all
+three, but it models the two that matter most for a chargeback
+investigation: does the bank's internal ledger agree with what the network
+independently says was settled.
 
-Started as a single flat "was this transaction refunded, yes/no" table
-(`cbs_transactions`). Evolved into `ledger_entries` — real per-posting rows
-per transaction (a transaction can have MORE than one credit, a pending/
-unresolved entry, a refund, or a reversal) — because a flat existence check
-can only ever answer "was there a refund." It can never answer "did the
-bank's ledger actually show two separate credits for this one transaction,"
-which is exactly the question a U002 (duplicate transaction) dispute needs
-answered from real bank-side evidence rather than the absence of a
-merchant-supplied counter-argument. See chargeback_analysis.py's use of
-count_credits()/has_pending_suspense() for where this actually gets used.
+History: started as a single flat "was this transaction refunded, yes/no"
+table (`cbs_transactions`). Evolved into `ledger_entries` — real per-posting
+rows (a transaction can have MORE than one credit, a pending/unresolved
+entry, a refund, or a reversal) — because a flat existence check can only
+ever answer "was there a refund," never "did the bank's ledger actually show
+two separate credits for this one transaction," the real-evidence question a
+U002 (duplicate transaction) dispute needs answered. Then added
+`reversal_of_id` (a reversal row references the specific credit it cancels)
+so a credit → reversal → repost sequence nets to ONE effective credit, not
+two raw rows that look like a duplicate but aren't — a naive row count over
+`entry_type='credit'` alone would get this wrong the moment a reversal ever
+existed, so this is fixed before any code path actually creates one, not
+after a real bug was hit. Then added `settlement_entries` +
+`reconcile_utr()` for the same reason: a bank's own ledger can be
+internally consistent and still not match what the network actually
+settled, and that mismatch is itself real, useful investigative signal —
+not "no evidence," a THIRD kind of finding entirely.
 
 Deliberately NOT modeled as "the real schema a production CBS uses" — there
 is no single universal one; real banking systems distribute this across a
 payment switch, CBS, GL/ledger, reconciliation platform, and more. This is a
 synthetic, production-inspired schema scoped to exactly what a chargeback
-investigation needs: was money credited once or more than once, is anything
-still pending, and was it refunded.
+investigation needs.
 
 This is deliberately separate from decision_rules.py's `refund_already_issued`
 evidence tag, which the merchant supplies by assertion during a live chat
@@ -33,7 +46,7 @@ evidence tag, which the merchant supplies by assertion during a live chat
 have been checked against — a merchant claiming "I already refunded this" in
 chat isn't evidence; a matching row here is.
 
-Run directly to create and seed the table:
+Run directly to create and seed the tables:
     python cbs.py
 """
 
@@ -48,14 +61,32 @@ from merchant_db import DB_PATH, get_connection
 def create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ledger_entries (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            utr          TEXT NOT NULL,           -- matches chargebacks.utr
-            entry_type   TEXT NOT NULL,           -- 'credit' | 'refund' | 'reversal'
-            amount       REAL NOT NULL,
-            status       TEXT NOT NULL DEFAULT 'posted',  -- 'posted' | 'pending' | 'reversed'
-            posting_date TEXT NOT NULL,           -- ISO date
-            reference_id TEXT NOT NULL UNIQUE,     -- CBS's own posting reference
-            remarks      TEXT DEFAULT ''
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            utr            TEXT NOT NULL,           -- matches chargebacks.utr
+            entry_type     TEXT NOT NULL,           -- 'credit' | 'refund' | 'reversal'
+            amount         REAL NOT NULL,
+            status         TEXT NOT NULL DEFAULT 'posted',  -- 'posted' | 'pending' | 'reversed'
+            posting_date   TEXT NOT NULL,           -- ISO date
+            reference_id   TEXT NOT NULL UNIQUE,     -- CBS's own posting reference
+            reversal_of_id INTEGER DEFAULT NULL,     -- for entry_type='reversal': the
+                                                      -- ledger_entries.id this cancels out
+            remarks        TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settlement_entries (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            utr             TEXT NOT NULL,           -- matches chargebacks.utr
+            amount          REAL NOT NULL,
+            settlement_type TEXT NOT NULL DEFAULT 'AUTH',  -- 'AUTH' | 'DISPUTE' | 'ADJUSTMENT'
+                                                      -- NPCI runs AUTH and dispute settlement
+                                                      -- as separate cycles, not one generic
+                                                      -- "settlement" concept — kept distinct
+                                                      -- here for the same reason.
+            settlement_date TEXT NOT NULL,
+            cycle_id        TEXT NOT NULL,
+            reference_id    TEXT NOT NULL UNIQUE,
+            remarks         TEXT DEFAULT ''
         )
     """)
     conn.commit()
@@ -66,30 +97,39 @@ def seed_data(
     refund_fraction: float = 0.2,
     duplicate_fraction: float = 0.15,
     pending_fraction: float = 0.1,
+    reversal_repost_fraction: float = 0.08,
+    settlement_mismatch_fraction: float = 0.05,
 ) -> None:
     """
     Seed one baseline 'credit' entry (the expected single settlement credit)
-    for every existing chargeback's transaction, then layer one of three
-    mutually-exclusive scenarios onto a random subset — mirroring what a
-    real bank's ledger actually looks like across a real transaction volume:
-    most transactions are unremarkable (exactly one posted credit, nothing
-    else), a minority were already refunded outside the dispute flow, a
-    smaller minority genuinely received a second credit (the real-world
-    case a U002 duplicate-transaction dispute is actually about), and a
-    smaller minority still have an unresolved/pending entry sitting in the
-    ledger (money that hasn't settled yet, one way or the other).
+    and one matching 'AUTH' settlement entry for every existing chargeback's
+    transaction, then layer one of several mutually-exclusive ledger
+    scenarios onto a random subset — mirroring what a real bank's ledger and
+    network settlement actually look like across real transaction volume:
+    most transactions are unremarkable, a minority were already refunded
+    outside the dispute flow, a smaller minority genuinely received a
+    second credit (a true duplicate — the real-world case a U002 dispute is
+    actually about), a smaller minority still have an unresolved/pending
+    entry, and a smaller minority still show a credit that was reversed and
+    then correctly reposted (net ONE effective credit, even though two raw
+    'credit' rows exist — the exact scenario a reversal-unaware credit count
+    would misread as a duplicate). Independently, a small fraction of the
+    otherwise-unremarkable cases get a settlement amount that doesn't match
+    the ledger at all — a genuine reconciliation exception, not explained by
+    any of the ledger-side scenarios above.
 
     Args:
-        refund_fraction:    Fraction of transactions that already have a
-                            goodwill refund posted (the scenario this table
-                            originally existed to catch).
-        duplicate_fraction: Fraction that genuinely received a SECOND
-                            posted credit — real bank-side evidence that a
-                            duplicate-transaction claim is valid, not just
-                            unrebutted.
-        pending_fraction:   Fraction with a credit still stuck in 'pending'
-                            status — can't yet be confidently resolved
-                            either way.
+        refund_fraction:              Fraction with a goodwill refund posted.
+        duplicate_fraction:           Fraction with a genuine SECOND posted
+                                     credit (true duplicate, no reversal).
+        pending_fraction:             Fraction with a credit stuck 'pending'.
+        reversal_repost_fraction:     Fraction where the original credit was
+                                     reversed and then reposted — nets to
+                                     one effective credit despite two raw
+                                     'credit' rows.
+        settlement_mismatch_fraction: Of the remaining (otherwise normal)
+                                     cases, fraction whose settlement amount
+                                     doesn't match the ledger at all.
     """
     rows = conn.execute(
         "SELECT utr, transaction_amount, transaction_date FROM chargebacks"
@@ -106,16 +146,23 @@ def seed_data(
             pending_fraction + duplicate_fraction
             <= roll < pending_fraction + duplicate_fraction + refund_fraction
         )
+        is_reversal_repost = (
+            pending_fraction + duplicate_fraction + refund_fraction
+            <= roll < pending_fraction + duplicate_fraction + refund_fraction + reversal_repost_fraction
+        )
+        is_normal = not (is_pending or is_duplicate or is_refunded or is_reversal_repost)
         if is_pending:
             credit_status = "pending"
 
+        credit_id = None
         try:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO ledger_entries (utr, entry_type, amount, status, posting_date, reference_id, remarks) "
                 "VALUES (?, 'credit', ?, ?, ?, ?, ?)",
                 (row["utr"], row["transaction_amount"], credit_status, credit_date.isoformat(),
                  f"CBS-CR-{row['utr']}", "Original settlement credit"),
             )
+            credit_id = cur.lastrowid
             inserted += 1
         except sqlite3.IntegrityError:
             pass  # skip duplicate reference_id on re-seed
@@ -142,12 +189,55 @@ def seed_data(
                 )
             except sqlite3.IntegrityError:
                 pass
+        elif is_reversal_repost and credit_id is not None:
+            reversal_date = credit_date + timedelta(days=random.randint(1, 2))
+            repost_date = reversal_date + timedelta(days=random.randint(1, 2))
+            try:
+                conn.execute(
+                    "INSERT INTO ledger_entries "
+                    "(utr, entry_type, amount, status, posting_date, reference_id, reversal_of_id, remarks) "
+                    "VALUES (?, 'reversal', ?, 'posted', ?, ?, ?, ?)",
+                    (row["utr"], row["transaction_amount"], reversal_date.isoformat(),
+                     f"CBS-REV-{row['utr']}", credit_id,
+                     "Original credit reversed — posting error"),
+                )
+                conn.execute(
+                    "INSERT INTO ledger_entries (utr, entry_type, amount, status, posting_date, reference_id, remarks) "
+                    "VALUES (?, 'credit', ?, 'posted', ?, ?, ?)",
+                    (row["utr"], row["transaction_amount"], repost_date.isoformat(),
+                     f"CBS-CR-REPOST-{row['utr']}", "Reposted after reversal — corrected posting"),
+                )
+            except sqlite3.IntegrityError:
+                pass
+
+        # Settlement — one AUTH entry per transaction. Deliberately mismatched
+        # for a small subset of otherwise-normal cases (never the duplicate/
+        # refunded/pending/reversal-repost scenarios above, which already
+        # have their own, differently-shaped ledger story) — a genuine
+        # reconciliation exception with no other explanation.
+        settlement_date = credit_date + timedelta(days=random.randint(0, 1))
+        settlement_amount = row["transaction_amount"]
+        if is_normal and random.random() < settlement_mismatch_fraction:
+            settlement_amount = 0.0  # network reports nothing settled at all
+        try:
+            conn.execute(
+                "INSERT INTO settlement_entries "
+                "(utr, amount, settlement_type, settlement_date, cycle_id, reference_id, remarks) "
+                "VALUES (?, ?, 'AUTH', ?, ?, ?, ?)",
+                (row["utr"], settlement_amount, settlement_date.isoformat(),
+                 f"AUTH-{settlement_date.strftime('%Y%m')}", f"SET-{row['utr']}",
+                 "Network settlement record"),
+            )
+        except sqlite3.IntegrityError:
+            pass
 
     conn.commit()
     print(
         f"Seeded ledger entries for {inserted} transactions "
         f"(~{refund_fraction:.0%} refunded, ~{duplicate_fraction:.0%} duplicate credit, "
-        f"~{pending_fraction:.0%} pending)."
+        f"~{pending_fraction:.0%} pending, ~{reversal_repost_fraction:.0%} reversed+reposted), "
+        f"plus one settlement record each (~{settlement_mismatch_fraction:.0%} of normal cases "
+        f"deliberately mismatched)."
     )
 
 
@@ -157,7 +247,7 @@ def _parse_date(iso_str: str):
 
 
 def init_db(db_path: str = DB_PATH) -> None:
-    """Create schema and seed if the table is empty."""
+    """Create schema and seed if the tables are empty."""
     conn = get_connection(db_path)
     create_schema(conn)
     count = conn.execute("SELECT COUNT(*) FROM ledger_entries").fetchone()[0]
@@ -185,23 +275,56 @@ def get_ledger_entries(utr: str, db_path: str = DB_PATH) -> list:
         conn.close()
 
 
+def _net_posted_credits(conn: sqlite3.Connection, utr: str) -> list:
+    """
+    Posted 'credit' rows for this UTR, EXCLUDING any that a posted
+    'reversal' row references — the shared logic behind count_credits() and
+    total_credit_amount(). A raw `entry_type='credit'` count alone would
+    misread a credit → reversal → repost sequence as two credits instead of
+    the one that's actually still standing; this is what actually nets that
+    out, using the reversal's own reversal_of_id reference rather than
+    guessing from amounts or ordering.
+    """
+    reversed_ids = {
+        r["reversal_of_id"] for r in conn.execute(
+            "SELECT reversal_of_id FROM ledger_entries "
+            "WHERE utr = ? AND entry_type = 'reversal' AND status = 'posted' AND reversal_of_id IS NOT NULL",
+            (utr,),
+        ).fetchall()
+    }
+    credits = conn.execute(
+        "SELECT id, amount FROM ledger_entries WHERE utr = ? AND entry_type = 'credit' AND status = 'posted'",
+        (utr,),
+    ).fetchall()
+    return [c for c in credits if c["id"] not in reversed_ids]
+
+
 def count_credits(utr: str, db_path: str = DB_PATH) -> int:
     """
-    How many times the merchant's account was actually credited for this
-    UTR, per the bank's own ledger — the real-evidence answer to "did we
-    get charged/credited twice," not an inference from absence of a
-    refund. Excludes 'pending' (hasn't landed yet) and 'reversed' (no
-    longer valid) entries — only a posted credit counts as money that
-    actually, currently sits in the merchant's account.
+    How many times the merchant's account was actually, currently credited
+    for this UTR, per the bank's own ledger — the real-evidence answer to
+    "did we get charged/credited twice," not an inference from absence of a
+    refund. Excludes 'pending' (hasn't landed yet) and 'reversed' entries,
+    AND nets out any posted credit that a posted reversal specifically
+    references — a credit that was reversed and then correctly reposted
+    counts as ONE effective credit, not two raw rows.
     """
     conn = get_connection(db_path)
     try:
-        row = conn.execute(
-            "SELECT COUNT(*) AS n FROM ledger_entries "
-            "WHERE utr = ? AND entry_type = 'credit' AND status = 'posted'",
-            (utr,),
-        ).fetchone()
-        return row["n"]
+        return len(_net_posted_credits(conn, utr))
+    finally:
+        conn.close()
+
+
+def total_credit_amount(utr: str, db_path: str = DB_PATH) -> float:
+    """
+    Net posted credit amount for this UTR — the amount-based counterpart to
+    count_credits(), used by reconcile_utr() to compare against what the
+    network independently reported as settled.
+    """
+    conn = get_connection(db_path)
+    try:
+        return round(sum(c["amount"] for c in _net_posted_credits(conn, utr)), 2)
     finally:
         conn.close()
 
@@ -242,10 +365,60 @@ def find_refund_for_utr(utr: str, db_path: str = DB_PATH) -> Optional[dict]:
         conn.close()
 
 
+def reconcile_utr(utr: str, db_path: str = DB_PATH) -> dict:
+    """
+    Compare the network's independently-reported AUTH settlement amount for
+    this UTR against the bank's own net ledger credit total — a genuinely
+    independent-source check, not just "does our own ledger look
+    internally consistent." NPCI's own operating material requires exactly
+    this kind of reconciliation (network feed vs. bank records) for UPI
+    exception/dispute handling; a mismatch here is real investigative
+    signal in its own right; it means something an "own ledger looks fine"
+    check can never surface on its own.
+
+    Returns:
+        {"settlement_amount": float, "ledger_credit_total": float,
+         "status": "matched" | "mismatch" | "no_data"}
+        "no_data" means neither a settlement nor a ledger credit exists for
+        this UTR at all — nothing to reconcile, not the same as a genuine
+        mismatch.
+    """
+    conn = get_connection(db_path)
+    try:
+        settlement_total = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM settlement_entries "
+            "WHERE utr = ? AND settlement_type = 'AUTH'",
+            (utr,),
+        ).fetchone()["total"]
+    finally:
+        conn.close()
+
+    ledger_total = total_credit_amount(utr, db_path=db_path)
+
+    if settlement_total == 0 and ledger_total == 0:
+        status = "no_data"
+    elif abs(settlement_total - ledger_total) < 0.01:
+        status = "matched"
+    else:
+        status = "mismatch"
+
+    return {
+        "settlement_amount": round(settlement_total, 2),
+        "ledger_credit_total": ledger_total,
+        "status": status,
+    }
+
+
 if __name__ == "__main__":
     conn = get_connection()
-    create_schema(conn)
-    conn.execute("DELETE FROM ledger_entries")
+    # DROP, not DELETE — this table has no migration tooling (a deliberate,
+    # documented tradeoff for a synthetic demo schema, same as merchant_db.py/
+    # usermaster.py's own re-seed convention); a schema change (e.g. adding
+    # reversal_of_id) needs a fresh CREATE TABLE, not just cleared rows in
+    # the old one.
+    conn.execute("DROP TABLE IF EXISTS ledger_entries")
+    conn.execute("DROP TABLE IF EXISTS settlement_entries")
     conn.commit()
+    create_schema(conn)
     seed_data(conn)
     conn.close()
