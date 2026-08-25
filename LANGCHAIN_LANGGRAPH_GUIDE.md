@@ -219,7 +219,7 @@ class ChargebackState(TypedDict):
     evidence_present:      List[str]    # filled in partway through
     decision:               str         # "fight" or "refund" — filled in partway through
     final_answer:            str        # the finished output
-    # ...and more — see the real file for the full ~20-field shape
+    # ...and more — see the real file for the full ~30-field shape
 ```
 
 Think of it as a form that starts almost entirely blank and gets filled in, field by field, as it passes through the graph — never all at once.

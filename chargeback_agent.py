@@ -157,6 +157,41 @@ class ChargebackState(TypedDict):
         groundedness_issues   (str):        Description of any ungrounded claims found.
         reflection_feedback   (str):        What the peer-reviewer improved.
         final_answer          (str):        Polished final output — set by reflect_node.
+        case_ref_not_found    (str):        A UTR/case_id the merchant named in free text that
+                                             didn't resolve to a row scoped to their own
+                                             merchant_id — set by planner_node, read by
+                                             extract_code_node to give an accurate "no such case
+                                             on your account" message instead of silently falling
+                                             through to the generic new-dispute intake question.
+                                             Deliberately worded identically whether the ID is
+                                             simply wrong or belongs to another merchant — never
+                                             confirms or denies another tenant's case exists.
+        ledger_decision        (str):       "fight" | "refund" | "" — set by planner_node when a
+                                             named case reference resolved to a row AND
+                                             chargeback_analysis.analyze_chargeback() already
+                                             produced a confident, bank-evidence-backed action for
+                                             it (CBS refund record or U002 ledger/reconciliation).
+                                             Read by extract_evidence_node and decide_node, both
+                                             of which skip their own merchant-evidence gathering
+                                             and LLM-based decision entirely when this is set —
+                                             the bank's own posting records already settled the
+                                             question, so re-asking the merchant to "confirm" the
+                                             same fact the ledger already confirmed independently
+                                             is redundant, and trusting decision_rules.decide()'s
+                                             evidence-free default here could silently contradict
+                                             what the ledger actually showed.
+        ledger_decision_reason (str):       Explanation paired with ledger_decision, copied
+                                             verbatim from analyze_chargeback()'s own reason text.
+        ledger_no_decision_reason (str):    Set by planner_node instead of ledger_decision when
+                                             analyze_chargeback() found a real bank-side blocker
+                                             (a pending ledger entry, or a settlement
+                                             reconciliation mismatch) but deliberately returned no
+                                             confident action — equally authoritative as
+                                             ledger_decision in the sense that no merchant-
+                                             supplied evidence can resolve it either, so
+                                             extract_evidence_node surfaces this reason directly
+                                             instead of asking the merchant to "confirm" evidence
+                                             that was never the actual blocker.
     """
     user_query:            str
     additional_context:    str
@@ -168,6 +203,10 @@ class ChargebackState(TypedDict):
     retrieved_docs:        List[str]
     retrieval_status:      str
     retrieval_issues:      str
+    case_ref_not_found:    str
+    ledger_decision:       str
+    ledger_decision_reason: str
+    ledger_no_decision_reason: str
     evidence_present:      List[str]
     evidence_missing:      List[str]
     needs_more_info:            bool
@@ -1037,6 +1076,10 @@ class DisputeAgent:
         """
         query       = state["user_query"]
         merchant_id = state.get("merchant_id", "")
+        case_ref_not_found = ""
+        ledger_decision = ""
+        ledger_decision_reason = ""
+        ledger_no_decision_reason = ""
 
         # 1. Deterministic code extraction — covers the majority of disputes
         network, code = classifier.extract_network_and_code(query)
@@ -1161,6 +1204,35 @@ class DisputeAgent:
                             f"recommended action = {analysis.action}. {analysis.reason} "
                             f"{status_line}"
                         )
+                        # Authoritative, not just a hint for the LLM steps
+                        # below to notice — see ChargebackState's own
+                        # docstring for why extract_evidence_node/decide_node
+                        # must short-circuit on this deterministically rather
+                        # than rely on the LLM correctly re-deriving it from
+                        # retrieved_docs text (observed flaky live: the exact
+                        # RuPay U002 case this covers still asked the
+                        # merchant to "confirm only one credit was issued"
+                        # even with this analysis already inserted at [0]).
+                        ledger_decision = analysis.action
+                        ledger_decision_reason = analysis.reason
+                    elif analysis.source in ("cbs", "ledger"):
+                        # A real bank-side blocker (pending ledger entry, or
+                        # a settlement reconciliation mismatch), not simply
+                        # "no rule for this code." Equally authoritative as
+                        # the analysis.action branch above — no amount of
+                        # merchant-supplied evidence resolves a pending
+                        # ledger entry or a settlement mismatch, so this
+                        # must bypass extract_evidence_node's generic
+                        # evidence ask the same way, not just the retrieved
+                        # ledger text.
+                        retrieved_contents.insert(0,
+                            f"Case {row['case_id']} ({row['utr']}), reason code "
+                            f"{row['reason_code']} ({row['reason_description']}): "
+                            f"{analysis.reason} {status_line}"
+                        )
+                        ledger_no_decision_reason = (
+                            f"{analysis.reason} {status_line}"
+                        )
                     else:
                         retrieved_contents.insert(0,
                             f"Case {row['case_id']} ({row['utr']}), reason code "
@@ -1168,6 +1240,16 @@ class DisputeAgent:
                             f"no automated recommendation available for this reason "
                             f"code without more evidence. {status_line}"
                         )
+                else:
+                    # Matched a UTR/case_id-shaped token, but no row for THIS
+                    # merchant — either a typo, or (just as likely, given the
+                    # SQL scopes by merchant_id) a real case belonging to a
+                    # different merchant. Recorded so extract_code_node can
+                    # give an accurate answer instead of silently treating
+                    # this as a brand-new, code-less dispute report — see
+                    # extract_code_node for why that silent fallthrough was
+                    # a real bug, not just a UX nicety.
+                    case_ref_not_found = case_ref.group(1)
             except Exception:
                 pass
 
@@ -1192,11 +1274,15 @@ class DisputeAgent:
             code    = data.get("reason_code",  "Unknown")
 
         return {
-            "card_network":     network,
-            "reason_code":      code,
-            "retrieved_docs":   retrieved_contents,
-            "retrieval_status": assessment.status,
-            "retrieval_issues": "; ".join(assessment.issues),
+            "card_network":       network,
+            "reason_code":        code,
+            "retrieved_docs":     retrieved_contents,
+            "retrieval_status":   assessment.status,
+            "retrieval_issues":   "; ".join(assessment.issues),
+            "case_ref_not_found": case_ref_not_found,
+            "ledger_decision":           ledger_decision,
+            "ledger_decision_reason":    ledger_decision_reason,
+            "ledger_no_decision_reason": ledger_no_decision_reason,
         }
 
     def _detect_settlement_node(self, state: ChargebackState) -> dict:
@@ -1236,14 +1322,22 @@ class DisputeAgent:
         Single responsibility: supplement the planner's regex extraction with
         additional_context (the merchant's second-turn reply). Pre-populates
         missing_info_question with the static "please share the reason code"
-        text if the code remains unknown and no context was provided.
+        text if the code remains unknown and no context was provided — unless
+        planner_node flagged that the merchant actually named a specific
+        case reference that didn't resolve to their own account, in which
+        case that takes priority: telling them "I need a reason code" is
+        actively misleading when what actually happened is "that case ID
+        isn't on your account" — a merchant reading the generic question
+        has no way to tell those two situations apart, and would reasonably
+        assume the system just failed to notice the case ID they gave.
 
-        Reads:  reason_code, card_network, additional_context
+        Reads:  reason_code, card_network, additional_context, case_ref_not_found
         Writes: reason_code, card_network, missing_info_question
         """
         reason_code  = state.get("reason_code",  "Unknown") or "Unknown"
         card_network = state.get("card_network", "Unknown") or "Unknown"
         context      = state.get("additional_context", "")
+        not_found_id = state.get("case_ref_not_found", "")
 
         if reason_code == "Unknown" and context:
             n, c = classifier.extract_network_and_code(context)
@@ -1252,10 +1346,16 @@ class DisputeAgent:
             elif n != "Unknown":
                 card_network = n
 
-        return {
-            "reason_code":  reason_code,
-            "card_network": card_network,
-            "missing_info_question": (
+        if reason_code != "Unknown" or context:
+            missing_info_question = ""
+        elif not_found_id:
+            missing_info_question = (
+                f"I couldn't find a case matching '{not_found_id}' on your account. "
+                "Please double-check the case ID, or ask me to list your open "
+                "chargebacks and pick one from there."
+            )
+        else:
+            missing_info_question = (
                 "I still need one key detail to help you.\n\n"
                 "Did a customer file a chargeback against you — meaning your bank "
                 "sent you a chargeback notification and reversed funds from your account?\n\n"
@@ -1266,7 +1366,12 @@ class DisputeAgent:
                 "If your balance dropped for a different reason (fees, a refund you "
                 "issued, a processor deduction) — describe what happened and I can "
                 "advise accordingly."
-            ) if reason_code == "Unknown" and not context else "",
+            )
+
+        return {
+            "reason_code":            reason_code,
+            "card_network":           card_network,
+            "missing_info_question":  missing_info_question,
         }
 
     def _detect_clarification_node(self, state: ChargebackState) -> dict:
@@ -1372,10 +1477,37 @@ class DisputeAgent:
         function, not inside this node).
 
         Reads:  user_query, additional_context, reason_code, card_network,
-                retrieved_docs
+                retrieved_docs, ledger_decision
         Writes: evidence_present, evidence_missing, needs_more_info,
                 missing_info_question
         """
+        # planner_node already got a confident, bank-evidence-backed decision
+        # for this exact case (CBS refund record, or U002 ledger/settlement
+        # reconciliation) — skip the merchant-evidence gathering entirely
+        # rather than asking them to "confirm" a fact the bank's own records
+        # already settled. decide_node uses ledger_decision directly, so no
+        # evidence_present/missing is needed downstream either.
+        if state.get("ledger_decision"):
+            return {
+                "evidence_present":      [],
+                "evidence_missing":      [],
+                "needs_more_info":       False,
+                "missing_info_question": "",
+            }
+
+        # A real bank-side blocker (pending entry / reconciliation mismatch)
+        # already explains why no recommendation can be made yet — surface
+        # that directly rather than asking the merchant for evidence that
+        # was never the actual blocker.
+        no_decision_reason = state.get("ledger_no_decision_reason", "")
+        if no_decision_reason:
+            return {
+                "evidence_present":      [],
+                "evidence_missing":      [],
+                "needs_more_info":       True,
+                "missing_info_question": no_decision_reason,
+            }
+
         docs_text    = "\n\n".join(state.get("retrieved_docs", [])[:2])
         context      = state.get("additional_context", "")
         reason_code  = state.get("reason_code",  "Unknown")
@@ -2213,7 +2345,7 @@ class DisputeAgent:
         Node 5 — Recommend fight or refund.
 
         Reads:  user_query, reason_code, card_network, evidence_present,
-                evidence_missing, retrieved_docs
+                evidence_missing, retrieved_docs, ledger_decision
         Writes: decision, decision_reason
 
         Args:
@@ -2222,6 +2354,18 @@ class DisputeAgent:
         Returns:
             dict: {"decision": str, "decision_reason": str}
         """
+        # planner_node already resolved this exact case against the bank's
+        # own CBS/ledger records — use that directly instead of falling
+        # through to decision_rules.decide()'s evidence-free default, which
+        # could silently contradict it (e.g. U002's no-evidence default is
+        # "refund," but the ledger may have already confirmed "fight").
+        ledger_decision = state.get("ledger_decision", "")
+        if ledger_decision:
+            return {
+                "decision":        ledger_decision,
+                "decision_reason": state.get("ledger_decision_reason", ""),
+            }
+
         # Settlement scenario — merchant answered the "was customer charged?" question.
         # is_settlement_issue flag was set by detect_settlement_node (rule-based, classifier.py).
         context            = state.get("additional_context", "").lower()
@@ -2845,6 +2989,10 @@ class DisputeAgent:
             "retrieved_docs":        [],
             "retrieval_status":      "",
             "retrieval_issues":      "",
+            "case_ref_not_found":    "",
+            "ledger_decision":       "",
+            "ledger_decision_reason": "",
+            "ledger_no_decision_reason": "",
             "evidence_present":      [],
             "evidence_missing":      [],
             "needs_more_info":            False,
