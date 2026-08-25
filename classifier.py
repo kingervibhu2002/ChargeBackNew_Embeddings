@@ -742,18 +742,21 @@ def detect_case_selection(text: str, shown_cases: List[Dict]) -> Optional[str]:
 
     segments = [s.strip() for s in text.split('\n\n') if s.strip()]
     latest = (segments[-1] if segments else text).strip()
-
-    # A genuine question ("what does U002 mean?") is never a selection,
-    # even when it happens to name one of the shown cases' reason codes —
-    # confirmed live during testing: "what does U002 mean?" was matching
-    # the U002 case via the reason-code check below before this existed.
-    # Reuses the same check _validate_node already treats as authoritative
-    # for "is the merchant asking a question" elsewhere in this module.
-    if is_clarifying_question(latest):
-        return None
-
     t = latest.lower()
 
+    # Strong, unambiguous selection signals — checked BEFORE the
+    # clarifying-question guard below, deliberately. An ordinal/number
+    # reference is a real selection even when phrased as a question:
+    # "what about the second one?", "what's #2?" both unambiguously mean
+    # "show me case index 1", not a genuine request for information.
+    # Confirmed live this ordering matters, not just in theory: with the
+    # question-guard checked first (this function's original order),
+    # "what about second one?" — sent as a follow-up right after a
+    # 2-case list was shown — was rejected as "just a question" before
+    # this ordinal check ever ran, so it fell through to normal
+    # classification instead of resolving to the second case, and ended
+    # up answered from the FIRST case's own details instead (wrong case
+    # entirely, not just a missed selection).
     m = _NUMBER_HASH_RE.search(t)
     if m:
         idx = int(m.group(1) or m.group(2)) - 1
@@ -763,6 +766,21 @@ def detect_case_selection(text: str, shown_cases: List[Dict]) -> Optional[str]:
     for word, idx in _ORDINAL_WORDS.items():
         if re.search(rf'\b{re.escape(word)}\b', t) and idx < len(shown_cases):
             return shown_cases[idx]["case_id"]
+
+    # A genuine question ("what does U002 mean?") is never a selection via
+    # the WEAKER reason-code-mention signal below, even when it happens to
+    # name one of the shown cases' reason codes — confirmed live during
+    # testing: "what does U002 mean?" was matching the U002 case via the
+    # reason-code check below before this guard existed. Checked only
+    # here, after the strong ordinal/number signals above have already had
+    # their chance — a question-PHRASED selection still resolves via
+    # those, while a genuine informational question about a reason code
+    # (naming no ordinal/number at all) still correctly falls through to
+    # None. Reuses the same check _validate_node already treats as
+    # authoritative for "is the merchant asking a question" elsewhere in
+    # this module.
+    if is_clarifying_question(latest):
+        return None
 
     # A bare reason-code substring match is too loose on its own — "can you
     # explain U001 to me" is a description request, not a selection, but

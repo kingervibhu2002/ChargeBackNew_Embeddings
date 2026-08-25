@@ -290,9 +290,21 @@
 <script>
   // ── State ────────────────────────────────────────────────
   let currentTab       = 'qa';
-  let awaitingContext      = false;  // true after agent asks a follow-up question
-  let pendingQuery         = '';     // original dispute query (never changes mid-conversation)
-  let accumulatedContext   = '';     // all follow-up answers joined; grows each turn
+  let awaitingContext      = false;  // UI-only: true right after the agent asks a follow-up
+                                      // question (drives placeholder text / bubble style) —
+                                      // NOT the signal for whether conversation memory is
+                                      // still alive; see pendingQuery for that.
+  let pendingQuery         = '';     // original dispute/question query for the conversation
+                                      // currently in progress — set on turn 1, and (since a
+                                      // fix for losing context after any "complete" answer)
+                                      // stays set across a completed turn too, so a later
+                                      // follow-up can still resolve against it. Cleared only
+                                      // by looksLikeNewTopic() or an explicit reset
+                                      // (switching merchant/tab).
+  let accumulatedContext   = '';     // all follow-up answers joined; grows each turn, capped
+                                      // to the most recent MAX_CONTEXT_SEGMENTS (see
+                                      // handleDispute) so a long-running conversation that
+                                      // never resets doesn't grow this without bound
   let lastQAQuery          = '';     // previous Q&A tab query — lets a bare follow-up
                                       // like "are all covered?" inherit which network(s)
                                       // or topic the prior question was about
@@ -570,28 +582,57 @@
     return newTopicPatterns.some(p => p.test(t));
   }
 
+  // Cap on how many joined additional_context segments survive in an
+  // ongoing conversation. Without this, a long-running conversation that
+  // never hits looksLikeNewTopic() (below) or an explicit reset (switching
+  // merchant/tab) would grow additional_context indefinitely — more tokens
+  // sent per request, and a slower _filter_substantive_context LLM
+  // backstop call (which reads the WHOLE joined blob, not just the latest
+  // segment the way the resolution logic in chargeback_agent.py's
+  // _validate_node already does). Generous enough for a real multi-turn
+  // exploration (list -> select -> several follow-up questions) without
+  // being unbounded.
+  const MAX_CONTEXT_SEGMENTS = 10;
+
   // ── Dispute handler ───────────────────────────────────────
   async function handleDispute(input, typing) {
     let body;
 
-    if (awaitingContext && looksLikeNewTopic(input)) {
+    // pendingQuery (not awaitingContext) is the real signal for "is there
+    // an active conversation to continue" — a conversation that just
+    // completed (needs_more_info: false) still has real, useful context a
+    // follow-up like "what about the second one?" needs to resolve
+    // against, and used to be silently thrown away the moment ANY turn
+    // came back complete, even mid-topic. Confirmed live: a real 6-turn
+    // conversation (list cases -> select one -> two follow-up questions
+    // -> an aggregate question -> "what about second one?") lost all
+    // context after the FIRST completed answer (a plain "what does U002
+    // mean?"), so by the final turn there was nothing left to resolve
+    // "second one" against at all, and it fell through to the generic
+    // "please describe a dispute" rejection. awaitingContext itself is
+    // kept, but now only for its ORIGINAL purpose — the UI's follow-up
+    // bubble style/placeholder — not as the gate for whether memory
+    // persists.
+    if (pendingQuery && looksLikeNewTopic(input)) {
       // Abandon the pending dispute thread — this reads as a fresh,
-      // unrelated question rather than an answer to the follow-up.
+      // unrelated question rather than a continuation of it.
       awaitingContext     = false;
       pendingQuery        = '';
       accumulatedContext  = '';
       queryEl.placeholder = 'Describe your dispute…';
     }
 
-    if (awaitingContext) {
-      // Follow-up turn — append this answer to everything said before
-      accumulatedContext = accumulatedContext
-        ? accumulatedContext + '\n\n' + input
-        : input;
+    if (pendingQuery) {
+      // Follow-up turn — append this answer to everything said before,
+      // capped to the most recent MAX_CONTEXT_SEGMENTS so a long-running
+      // conversation doesn't grow additional_context without bound.
+      const segments = accumulatedContext
+        ? accumulatedContext.split('\n\n').concat([input])
+        : [input];
+      accumulatedContext = segments.slice(-MAX_CONTEXT_SEGMENTS).join('\n\n');
       body = { query: pendingQuery, additional_context: accumulatedContext };
-      // Don't reset yet — agent may ask another follow-up
     } else {
-      // Turn 1 — fresh dispute
+      // Turn 1 — fresh dispute (or right after an explicit reset above)
       accumulatedContext = '';
       body = { query: input, additional_context: '' };
     }
@@ -624,18 +665,21 @@
 
     const data = await res.json();
 
+    if (!pendingQuery) pendingQuery = body.query;   // only set on the very first turn
+
     if (data.needs_more_info) {
       // Agent needs more details — stay in follow-up mode, accumulate answers
       awaitingContext = true;
-      if (!pendingQuery) pendingQuery = body.query;   // only set on first turn
       queryEl.placeholder = 'Type your answer and press Enter…';
       addFollowUpBubble(data.final_answer);
     } else {
-      // Conversation complete — reset all state
-      awaitingContext    = false;
-      pendingQuery       = '';
-      accumulatedContext = '';
-      queryEl.placeholder = 'Describe your dispute…';
+      // A complete answer, not a full reset: pendingQuery/accumulatedContext
+      // stay alive so a follow-up ("what about the second one?", "and this
+      // case?") can still resolve against everything discussed so far.
+      // Only looksLikeNewTopic() (above) or an explicit reset (switching
+      // merchant/tab, see onMerchantChange/switchTab) actually clears them.
+      awaitingContext      = false;
+      queryEl.placeholder  = 'Ask a follow-up or describe a new dispute…';
       addDisputeBubble(data);
     }
   }
