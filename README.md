@@ -328,7 +328,7 @@ A few decisions repeat throughout the codebase and are worth knowing before read
 
 - **`test_classifier.py`** / **`test_decision_rules.py`** — plain `pytest` unit tests for the deterministic rule engines; no external services or API keys needed.
 - **`test_search.py`** — an end-to-end retrieval smoke test against the real embedding model (needs the model downloaded, but no LLM API key).
-- **`test_qa_stress.py`** / **`golden_queries.json`** / **`eval_retrieval.py`** — a larger adversarial/quality test set (100 stress-test queries across 10 categories, plus a 44-query "golden" retrieval benchmark) used to catch retrieval-quality regressions when the knowledge base or chunking strategy changes.
+- **`test_qa_stress.py`** / **`golden_queries.json`** / **`eval_retrieval.py`** — a larger adversarial/quality test set (100 stress-test queries across 10 categories, plus a 44-query "golden" retrieval benchmark) used to catch retrieval-quality regressions when the knowledge base or chunking strategy changes. `eval_retrieval.py` computes real information-retrieval metrics (Recall@5/@10, MRR, nDCG@10) rather than pass/fail — full explanation of each metric, plus this project's own real before/after numbers from the whole-document → chunked-embedding migration, in [`EVAL_RETRIEVAL_GUIDE.md`](EVAL_RETRIEVAL_GUIDE.md).
 
 ## Class reference
 
