@@ -2067,14 +2067,29 @@ class DisputeAgent:
                 "Using the knowledge base documents, summarize how each payment network handles "
                 "disputes: total number of codes, main categories (fraud / fulfillment / billing / "
                 "technical), key differences in timelines or liability rules, and any unique codes "
-                "one network has that the other doesn't. Use clear sections per network."
+                "one network has that the other doesn't. Use clear sections per network.\n\n"
+                "IMPORTANT: the question may name more than two things to compare (e.g. "
+                "\"how RuPay, Cashfree, NPCI differ\"), but this knowledge base only documents "
+                "card networks (Visa, Mastercard, Amex, RuPay) and NPCI/UPI — it does NOT cover "
+                "payment gateways/aggregators (Cashfree, Razorpay, PayU, and similar) at all, "
+                "since those are a fundamentally different kind of entity (a merchant-facing "
+                "payment processor, not a card network or dispute-arbitrating body). Before "
+                "answering, check the question against what's actually in the knowledge base "
+                "documents below: if it names something that ISN'T represented there, say so "
+                "explicitly and plainly (e.g. \"I don't have documentation on Cashfree — it's a "
+                "payment gateway, not a card network or UPI system this knowledge base covers\") "
+                "before answering the part you can. Never silently answer only the covered part "
+                "as if the full question had been addressed."
             )
         elif compare_intent and mentioned_codes:
             system_prompt = (
                 "You are a chargeback expert. The user wants a comparison. "
                 "Using the knowledge base documents, produce a clear side-by-side comparison. "
                 "Use a table or structured sections: for each code show — what triggers it, "
-                "who is liable, and key difference from the others. Be concise."
+                "who is liable, and key difference from the others. Be concise.\n\n"
+                "IMPORTANT: if the question names a code or system not represented in the "
+                "documents below, say so explicitly rather than silently comparing only the "
+                "ones you have information on."
             )
         elif list_intent:
             system_prompt = (
