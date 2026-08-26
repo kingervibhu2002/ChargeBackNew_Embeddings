@@ -723,8 +723,8 @@ def looks_like_data_lookup(query: str) -> bool:
 # actual first-person/possessive signal before treating a query as a
 # genuine "show me MY data" request in the no-identity case specifically.
 _PERSONAL_DATA_SIGNAL_RE = re.compile(
-    r"\b(my|mine|i've|i have|i currently|i owe|do i|am i|show me|give me|list my|"
-    r"tell me my)\b",
+    r"\b(my|mine|i've|i have|i currently|i owe|do i have|do i owe|show me my|"
+    r"give me my|list my|tell me my)\b",
     re.IGNORECASE,
 )
 

@@ -2457,6 +2457,39 @@ class DisputeAgent:
                 "is a factual error, not a reasonable generalization, even if you name "
                 "the source honestly."
             )
+        elif not detected_networks:
+            # A genuinely network-agnostic question ("how do I prevent
+            # chargebacks?", "what evidence should I keep?") with no
+            # network named at all — is_upi_context() above only fires
+            # when the query text ITSELF names UPI/RuPay/NPCI, so a query
+            # naming no network gets neither guard. But every real
+            # merchant transaction this platform actually has on file is
+            # RuPay/NPCI UPI (merchant_db.py's schema is RuPay by
+            # construction) — and the knowledge base's cross-network
+            # "best practices" content (e.g. 14_Best_Practices/
+            # 001_Prevention_Best_Practices.md) freely mixes in card-
+            # network-only mechanisms (3-D Secure, AVS, CVV, PSD2 SCA)
+            # that have no UPI equivalent at all (UPI authenticates via
+            # PIN/device binding, not card verification data). Confirmed
+            # live: "How to prevent chargebacks?" retrieved that exact
+            # doc and presented AVS/CVV/3DS as directly actionable advice
+            # with no indication that a RuPay/UPI merchant's transactions
+            # don't go through card verification at all. Not wrong per
+            # se (the docs are real, not hallucinated) — but presented
+            # without the one caveat that actually matters for this
+            # platform's real users.
+            system_prompt += (
+                "\n\nNote: every real merchant transaction this platform actually "
+                "processes is a RuPay/NPCI UPI transaction — not a Visa/Mastercard "
+                "card transaction. Some retrieved best-practice content may describe "
+                "card-network-specific mechanisms (3-D Secure, AVS, CVV, PSD2 SCA) "
+                "that have no UPI equivalent (UPI authenticates via PIN and device "
+                "binding, not card verification data). When recommending a specific "
+                "technical control, say plainly whether it's directly applicable to "
+                "UPI/RuPay transactions or is a card-network-only practice included "
+                "for general context — do not present every retrieved recommendation "
+                "as uniformly actionable for this merchant's actual transactions."
+            )
 
         # Shared across every branch above: found live that a question about
         # evidence/proof for a specific reason code got answered from the
