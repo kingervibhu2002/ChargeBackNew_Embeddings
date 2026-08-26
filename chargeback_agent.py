@@ -1890,8 +1890,21 @@ class DisputeAgent:
         # looks_like_data_lookup() is only a loose, cheap pre-filter to
         # skip the LLM call on turns obviously unrelated to the merchant's
         # own data — the actual accuracy-critical decision is the model's.
-        if classifier.looks_like_data_lookup(query):
-            merchant_id = state.get("merchant_id", "")
+        merchant_id = state.get("merchant_id", "")
+        # Without a merchant_id (the Q&A tab, unauthenticated), the loose
+        # looks_like_data_lookup() hint alone isn't enough to conclude this
+        # needs an identity — "what is chargeback" contains the word
+        # "chargeback" and would otherwise be rejected outright with a
+        # "select your merchant identity" message despite needing no
+        # identity at all. Require an actual first-person/possessive
+        # signal in that specific case; a logged-in caller keeps the
+        # original, looser behavior (a false positive there just costs one
+        # cheap, self-correcting LLM tool-call, not a wrongly rejected
+        # general question).
+        is_data_lookup = classifier.looks_like_data_lookup(query) and (
+            bool(merchant_id) or classifier.looks_like_personal_data_lookup(query)
+        )
+        if is_data_lookup:
             if not merchant_id:
                 return {
                     "final_answer": (

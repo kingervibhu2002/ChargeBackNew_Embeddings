@@ -119,15 +119,16 @@ Both layers ultimately reach into the same `chargebacks.db` SQLite database and 
 ### 1. Asking a knowledge-base question (Q&A tab)
 
 ```
-Browser → GET /search?query=... → api_server.py
-        → embed the query text (FastEmbed)
-        → vector_store.py: search_chunks() against Qdrant
-        → network_detection.py: does this query name a specific
-          card network / UPI app? boost matching results
-        → return ranked chunks with source document + score
+Browser → POST /dispute {query, additional_context: lastQAQuery}
+          — NO X-Merchant-Key header at all → api_server.py
+        → chargeback_agent.py: classify_query_type() → "question"
+        → _answer_question_node: embed + search Qdrant, then one LLM
+          call to synthesize a prose answer from the retrieved chunks
 ```
 
-No LLM call happens here at all for most queries — this route is deliberately "dumb" similarity search plus a scoring boost, so a merchant gets an instant, cheap answer. `chargeback_agent.py`'s `_answer_question_node` handles the same underlying question types when reached through the Dispute Assistant instead (it does one LLM call, to actually *write* a prose answer from the retrieved chunks, rather than just listing them).
+This tab is intentionally unauthenticated (no merchant identity at all) — see `/dispute`'s own docstring in `api_server.py` for why that's a supported, first-class mode, not a workaround. `/search` (a separate, lower-level endpoint: embed → `vector_store.py`'s `search_chunks()` → ranked chunks, no LLM call) still exists and is used by `chat.html`'s "My Chargebacks" tab elsewhere, but the Q&A tab itself calls `/dispute` for every query, not `/search` — it wants a synthesized prose answer, not a raw ranked-chunk list (confirmed live: a raw top-chunk excerpt only ever answers the one narrow question it happened to be written for, while the synthesized answer correctly weaves together multiple relevant sections).
+
+Because this tab has no merchant identity, `_answer_question_node` has to distinguish "a general policy question" (answerable with no identity — RAG only) from "a question about the caller's OWN records" (needs an identity that doesn't exist here). A real bug here, found live: the check gating that distinction (`classifier.looks_like_data_lookup()`) is *deliberately* loose — a topic word like "chargeback" alone is enough to match, which is fine when a merchant_id is present (a false positive just costs one extra, cheap, self-correcting LLM tool-call). But with no merchant_id, that same loose match went straight to "select your merchant identity" with no correction step at all — so "what is chargeback," a plain definitional question needing no identity whatsoever, got wrongly rejected, and so did every other Q&A question that happened to contain a topic word like "chargeback"/"case"/"dispute" (nearly all of them, in a chargeback-focused knowledge base). Fixed with a second, tighter check (`classifier.looks_like_personal_data_lookup()` — requires an actual first-person/possessive signal, "my"/"I owe"/"do I", or a genuine financial-balance phrasing like "outstanding"/"owe") that gates the *anonymous* branch specifically; the logged-in branch is unchanged.
 
 ### 2. Describing a chargeback (Dispute Assistant tab)
 

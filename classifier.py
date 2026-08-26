@@ -708,6 +708,46 @@ def looks_like_data_lookup(query: str) -> bool:
     return bool(_DATA_LOOKUP_HINT_RE.search(query))
 
 
+# _DATA_LOOKUP_HINT_RE above is deliberately loose ("cases", "chargebacks",
+# "disputes" alone are enough) — fine when a merchant_id is available,
+# since a false positive there just costs one extra, cheap LLM tool-call
+# that correctly says "not actually a personal lookup" and moves on. But
+# chargeback_agent.py's _answer_question_node also uses this same loose
+# check to gate its ANONYMOUS (no merchant_id, e.g. the Q&A tab with no
+# login) branch — and there, a false positive has no LLM call to correct
+# it: it goes straight to "select your merchant identity," full stop.
+# Confirmed live: "what is chargeback" — a plain definitional question,
+# not a request for the caller's own records — matches the loose hint
+# regex (it contains the word "chargeback") and got rejected outright,
+# even though it needs no identity at all. This tighter check requires an
+# actual first-person/possessive signal before treating a query as a
+# genuine "show me MY data" request in the no-identity case specifically.
+_PERSONAL_DATA_SIGNAL_RE = re.compile(
+    r"\b(my|mine|i've|i have|i currently|i owe|do i|am i|show me|give me|list my|"
+    r"tell me my)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_personal_data_lookup(query: str) -> bool:
+    """
+    Tighter than looks_like_data_lookup() — requires an explicit first-
+    person/possessive signal ("my", "I owe", "do I", ...), not just a
+    topic word like "chargeback". Used only to gate the ANONYMOUS branch
+    of _answer_question_node's data-lookup check (see that regex's own
+    comment above for why the loose version isn't safe to use alone
+    there) — the logged-in branch keeps using looks_like_data_lookup()
+    unchanged, since a false positive there is cheap to correct.
+
+    Also true for looks_like_aggregate_question() ("how much is
+    outstanding," "what do I owe") even without an explicit "my"/"I" —
+    that phrasing is unambiguously a personal-balance question by
+    convention in this app (see that function's own module comment),
+    not a definitional one, even when phrased impersonally.
+    """
+    return bool(_PERSONAL_DATA_SIGNAL_RE.search(query)) or looks_like_aggregate_question(query)
+
+
 # Narrow, deterministic pre-check for financial-balance-shaped questions —
 # "how much is outstanding", "what do I owe" — that routes straight to the
 # aggregate SQL tool in chargeback_agent.py's _resolve_data_lookup_intent()
