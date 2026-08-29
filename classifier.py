@@ -49,6 +49,32 @@ def extract_case_reference(query: str) -> Optional[str]:
     return match.group(0) if match else None
 
 
+_SAME_CASE_DEMONSTRATIVE_RE = re.compile(
+    r"\b(this|that|the)\s+(case|chargeback|dispute)\b", re.IGNORECASE
+)
+
+
+def refers_to_current_case(text: str) -> bool:
+    """
+    True if `text` uses a demonstrative reference ("this case," "this
+    chargeback," "that dispute," "the case") pointing back at a case
+    already anchored in the conversation, rather than asking about the
+    merchant's OTHER/ALL cases.
+
+    Used by _validate_node as a deterministic veto: when a follow-up on
+    an already-case-anchored masked_query ALSO looks like a data lookup
+    (contains "chargeback"/"cases"), the LLM tool-call deciding whether
+    to abandon the case anchor was confirmed live to be unreliable for
+    exactly this ambiguity — "help me with step by step info about THIS
+    chargeback" (clearly still about the one case) was misread as wanting
+    to see other cases, discarding the case reference. This demonstrative
+    check overrides that judgment call outright rather than trusting it:
+    a "this case"/"this chargeback" reference is unambiguous enough that
+    no LLM confirmation is needed to know it means the anchored case.
+    """
+    return bool(_SAME_CASE_DEMONSTRATIVE_RE.search(text))
+
+
 # ---------------------------------------------------------------------------
 # Query type classification
 # ---------------------------------------------------------------------------

@@ -1041,6 +1041,49 @@ class DisputeAgent:
                 segments = [s.strip() for s in raw_context_preview.split('\n\n') if s.strip()]
                 latest_segment = segments[-1] if segments else raw_context_preview
                 masked_query = mask_pii(latest_segment)
+        elif raw_context_preview and merchant_id_preview and classifier.has_case_reference(masked_query):
+            # masked_query is anchored to one specific case (named
+            # directly, or resolved earlier from a list) — but the
+            # merchant's LATEST reply might be a genuinely different
+            # question about their OWN data in aggregate ("which all
+            # chargeback cases are currently open?"), not a reply about
+            # THIS case at all. Confirmed live: this fell all the way
+            # through to detect_clarification_node/answer_clarification_
+            # node instead, whose own prompt says to "lead with" whatever
+            # case-specific record sits in retrieved_docs[0] — which is
+            # always THIS one case, no matter what was actually asked —
+            # so the merchant got the same single case's details again
+            # in answer to "which cases are open," with no listing at all.
+            #
+            # Reuses the same real LLM tool-call decision the list_intent
+            # branch above already trusts (_resolve_data_lookup_intent) —
+            # pointed at the FOLLOW-UP text specifically, never the stale
+            # case-anchored masked_query (misreading THAT is exactly what
+            # the has_case_reference guard above exists to prevent). A
+            # loose regex check alone isn't safe here: "help me with step
+            # by step info about THIS chargeback" (a genuine follow-up on
+            # the SAME case, a real bug fixed earlier this session) also
+            # contains the word "chargeback" and would wrongly trigger a
+            # looser check — the real tool-call correctly distinguishes
+            # "explain this one" (calls neither tool) from "show me my
+            # other cases" (calls list_merchant_cases/query_chargeback_data).
+            segments = [s.strip() for s in raw_context_preview.split('\n\n') if s.strip()]
+            latest_segment = segments[-1] if segments else raw_context_preview
+            if (
+                classifier.looks_like_data_lookup(latest_segment)
+                and not classifier.refers_to_current_case(latest_segment)
+                and not classifier.is_junk_reply(raw_context_preview, query=masked_query)
+            ):
+                # refers_to_current_case() is checked BEFORE the LLM
+                # tool-call, not just alongside it — confirmed live the
+                # tool-call alone isn't reliable enough here: given
+                # exactly this "explain THIS chargeback in detail" text,
+                # it returned an intent anyway, which would have
+                # re-triggered the exact case-losing bug this whole
+                # elif branch was built to avoid fixing a DIFFERENT one.
+                new_topic_intent = self._resolve_data_lookup_intent(merchant_id_preview, latest_segment)
+                if new_topic_intent:
+                    masked_query = mask_pii(latest_segment)
 
         # Guard 4 — deterministic intent classification (no LLM call)
         query_type = classifier.classify_query_type(masked_query)
