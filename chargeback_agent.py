@@ -155,6 +155,26 @@ class ChargebackState(TypedDict):
         evidence_missing      (List[str]):  Evidence still needed — set by extract_evidence_node.
         needs_more_info       (bool):       True → routes to ask_user_node.
         missing_info_question (str):        Question to ask the merchant.
+        clarification_round   (int):        How many clarification rounds have already been
+                                             asked-and-answered in this conversation — computed
+                                             fresh on every call by validate_node from
+                                             additional_context via
+                                             classifier.count_clarification_rounds() (this
+                                             project's only cross-call memory; nothing here is
+                                             actually incremented/persisted as running state —
+                                             see that function's docstring for why re-deriving
+                                             it from scratch each call is correct, not a
+                                             workaround). Enforced by ask_user_node and three of
+                                             validate_node's own early-return asks against
+                                             MAX_CLARIFICATION_ROUNDS, so an unresolved back-
+                                             and-forth escalates instead of asking forever.
+        clarification_reason  (str):        Why the pending question (if any) was asked — one
+                                             of the CLARIFICATION_REASON_* constants, or "" when
+                                             nothing is pending. Set alongside
+                                             missing_info_question by whichever node asked;
+                                             purely for observability (e.g. "what fraction of
+                                             merchants get stuck on X"), read by no routing
+                                             logic.
         decision              (str):        "fight" or "refund" — set by decide_node.
         decision_reason       (str):        Explanation of the decision.
         draft_response        (str):        First version of letter/advice — set by generate_node.
@@ -246,6 +266,8 @@ class ChargebackState(TypedDict):
     evidence_missing:      List[str]
     needs_more_info:            bool
     missing_info_question:      str
+    clarification_round:        int
+    clarification_reason:       str
     is_settlement_issue:        bool
     merchant_is_asking_question: bool
     decision:              str
@@ -367,6 +389,32 @@ def _deadline_bucket(response_deadline: str) -> str:
     return "later"
 
 
+# Hard cap on how many clarification rounds a single conversation can go
+# through before the agent stops asking and escalates instead — every agent
+# loop needs a termination guarantee (retrieval retries, tool retries,
+# reflection all already have one; this was the one exception). Counted via
+# classifier.count_clarification_rounds() from additional_context alone —
+# this project's only cross-call memory, since chat.html never round-trips
+# server-computed state (see looks_like_relative_case_reference()'s
+# docstring). Enforced in _ask_user_node (the single funnel for the main
+# pipeline's asks) and in the three of _validate_node's own early-return
+# asks that bypass that funnel entirely.
+MAX_CLARIFICATION_ROUNDS = 3
+
+# clarification_reason values — set alongside missing_info_question at each
+# site that asks the merchant something, purely for observability (e.g.
+# "what fraction of merchants get stuck on a missing reason code vs.
+# ambiguous case reference"). Deliberately scoped to sites that are actually
+# part of the ask-merchant loop MAX_CLARIFICATION_ROUNDS bounds — a
+# ledger-side blocker (ledger_no_decision_reason) isn't included here since
+# no merchant reply can resolve it either way, so it was never a
+# "clarification round" to begin with.
+CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE = "ambiguous_case_reference"
+CLARIFICATION_REASON_SETTLEMENT_AMBIGUITY     = "settlement_ambiguity"
+CLARIFICATION_REASON_MISSING_REASON_CODE      = "missing_reason_code"
+CLARIFICATION_REASON_MISSING_EVIDENCE         = "missing_evidence"
+
+
 # ---------------------------------------------------------------------------
 # DisputeAgent
 # ---------------------------------------------------------------------------
@@ -391,6 +439,16 @@ class DisputeAgent:
         "  • Mastercard merchant support: 1-800-999-0363\n\n"
         "I can still help you understand chargeback policies or draft a "
         "rebuttal letter. Just describe your dispute and I'll get started."
+    )
+
+    # Shown instead of yet another question once MAX_CLARIFICATION_ROUNDS is
+    # hit — see that constant's own comment for why this exists at all.
+    _CLARIFICATION_LIMIT_MESSAGE = (
+        "I still don't have enough verified information to help with this "
+        "after several rounds of questions. Please share the chargeback "
+        "notice from your bank with the exact reason code, or contact your "
+        "acquiring bank / Airtel Payments Bank support directly so they can "
+        "pull the remaining case details."
     )
 
     def __init__(self, store, embed_fn: Callable[[str], list], rerank_fn=None, checkpointer=None):
@@ -1107,6 +1165,14 @@ class DisputeAgent:
         raw_context_preview = state.get("additional_context", "")
         merchant_id_preview  = state.get("merchant_id", "")
 
+        # Purely derived from raw_context_preview, not incremented/persisted
+        # anywhere — see count_clarification_rounds()'s own docstring for
+        # why re-deriving this fresh on every call is correct for this
+        # project's stateless-per-call client, not a workaround. Read below
+        # by three early-return asks and threaded through to ask_user_node
+        # via the final return at the bottom of this function.
+        clarification_round = classifier.count_clarification_rounds(raw_context_preview)
+
         # A case named DIRECTLY in a first-turn query ("Help me with case
         # NPCI20260530M002010", "explain more on UTR...") used to fall
         # straight through to the full dispute pipeline
@@ -1151,6 +1217,13 @@ class DisputeAgent:
                             "confidence_score": 8,
                             "is_grounded":      True,
                             "groundedness_issues": "",
+                            # Not gated by MAX_CLARIFICATION_ROUNDS — a case
+                            # WAS just resolved, this is forward progress
+                            # (moving on to the evidence ask), not a stuck
+                            # loop. clarification_reason is still set so
+                            # telemetry can see what's being waited on next.
+                            "clarification_reason": CLARIFICATION_REASON_MISSING_EVIDENCE,
+                            "clarification_round":  clarification_round,
                         }
                     # intro build failed (e.g. tool loop never resolved a
                     # row) — fall through to planner_node's step 4b, same
@@ -1245,6 +1318,11 @@ class DisputeAgent:
                         "confidence_score": 8,
                         "is_grounded":      True,
                         "groundedness_issues": "",
+                        # Not gated by MAX_CLARIFICATION_ROUNDS — same
+                        # reasoning as the direct-mention branch above: a
+                        # case WAS just resolved, this is forward progress.
+                        "clarification_reason": CLARIFICATION_REASON_MISSING_EVIDENCE,
+                        "clarification_round":  clarification_round,
                     }
                 masked_query = f"Help me with case {resolved}"
             elif classifier.is_out_of_range_case_reference(raw_context_preview, shown):
@@ -1262,6 +1340,21 @@ class DisputeAgent:
                     f"open {list_intent['reason_code']} case(s)"
                     if list_intent["reason_code"] else "open chargeback case(s)"
                 )
+                if clarification_round >= MAX_CLARIFICATION_ROUNDS:
+                    # Repeated out-of-range references, MAX_CLARIFICATION_
+                    # ROUNDS worth of back-and-forth already spent — showing
+                    # the list a fourth+ time isn't going to land any
+                    # better than the first three. Escalate instead.
+                    return {
+                        "is_valid_query": True,
+                        "user_query":     masked_query,
+                        "final_answer":   self._CLARIFICATION_LIMIT_MESSAGE,
+                        "needs_more_info": False,
+                        "confidence_score": 8,
+                        "is_grounded":      True,
+                        "groundedness_issues": "",
+                        "clarification_round": clarification_round,
+                    }
                 lines = [f"You only have {len(shown)} {case_label} right now — there's no case at that position. Here they are again:\n"]
                 for i, c in enumerate(shown, 1):
                     lines.append(
@@ -1277,6 +1370,8 @@ class DisputeAgent:
                     "confidence_score": 8,
                     "is_grounded":      True,
                     "groundedness_issues": "",
+                    "clarification_reason": CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
+                    "clarification_round":  clarification_round,
                 }
             elif classifier.looks_like_relative_case_reference(raw_context_preview):
                 # "What about the other one?" — refers to a specific case
@@ -1294,12 +1389,24 @@ class DisputeAgent:
                 # project's own state genuinely doesn't have that answer
                 # to give), ask — the same "don't silently guess" principle
                 # _uncertain() exists for elsewhere in this file.
+                if clarification_round >= MAX_CLARIFICATION_ROUNDS:
+                    return {
+                        "is_valid_query": True,
+                        "user_query":     masked_query,
+                        **self._uncertain(
+                            self._CLARIFICATION_LIMIT_MESSAGE,
+                            needs_more_info=False,
+                            clarification_round=clarification_round,
+                        ),
+                    }
                 return {
                     "is_valid_query": True,
                     "user_query":     masked_query,
                     **self._uncertain(
                         "Do you mean a different case from the list I just showed? "
-                        "Tell me which one (e.g. \"the first one\", \"#2\", or the case ID)."
+                        "Tell me which one (e.g. \"the first one\", \"#2\", or the case ID).",
+                        clarification_reason=CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
+                        clarification_round=clarification_round,
                     ),
                 }
             elif not classifier.is_junk_reply(raw_context_preview, query=masked_query):
@@ -1412,13 +1519,25 @@ class DisputeAgent:
                     # "must be evidence," the same anti-pattern _uncertain()
                     # exists to close off everywhere in this file.
                     anchored_case = classifier.extract_case_reference(masked_query) or "this case"
+                    if clarification_round >= MAX_CLARIFICATION_ROUNDS:
+                        return {
+                            "is_valid_query": True,
+                            "user_query":     masked_query,
+                            **self._uncertain(
+                                self._CLARIFICATION_LIMIT_MESSAGE,
+                                needs_more_info=False,
+                                clarification_round=clarification_round,
+                            ),
+                        }
                     return {
                         "is_valid_query": True,
                         "user_query":     masked_query,
                         **self._uncertain(
                             f"I'm not sure if that's about case {anchored_case} or "
                             "something else — could you clarify, or ask your "
-                            "question directly and I'll answer it?"
+                            "question directly and I'll answer it?",
+                            clarification_reason=CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
+                            clarification_round=clarification_round,
                         ),
                     }
             elif classifier.looks_like_new_request(latest_segment):
@@ -1598,6 +1717,12 @@ class DisputeAgent:
             "user_query":        masked_query,
             "final_answer":      final_answer,
             "additional_context": context,
+            # Threaded through so ask_user_node can enforce
+            # MAX_CLARIFICATION_ROUNDS for the rest of the main pipeline
+            # (detect_settlement/extract_code/extract_evidence) — the same
+            # cap already enforced inline above for the early-return asks
+            # that bypass ask_user_node entirely.
+            "clarification_round": clarification_round,
         }
 
     def _planner_node(self, state: ChargebackState) -> dict:
@@ -1860,6 +1985,7 @@ class DisputeAgent:
                 "but whether to fight or accept any chargeback depends on whether you "
                 "delivered the goods."
             ) if is_settlement else "",
+            "clarification_reason": CLARIFICATION_REASON_SETTLEMENT_AMBIGUITY if is_settlement else "",
         }
 
     def _extract_code_node(self, state: ChargebackState) -> dict:
@@ -1893,6 +2019,7 @@ class DisputeAgent:
             elif n != "Unknown":
                 card_network = n
 
+        clarification_reason = ""
         if reason_code != "Unknown" or context:
             missing_info_question = ""
         elif not_found_id:
@@ -1901,6 +2028,7 @@ class DisputeAgent:
                 "Please double-check the case ID, or ask me to list your open "
                 "chargebacks and pick one from there."
             )
+            clarification_reason = CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE
         else:
             missing_info_question = (
                 "I still need one key detail to help you.\n\n"
@@ -1914,11 +2042,13 @@ class DisputeAgent:
                 "issued, a processor deduction) — describe what happened and I can "
                 "advise accordingly."
             )
+            clarification_reason = CLARIFICATION_REASON_MISSING_REASON_CODE
 
         return {
             "reason_code":            reason_code,
             "card_network":           card_network,
             "missing_info_question":  missing_info_question,
+            "clarification_reason":   clarification_reason,
         }
 
     def _detect_clarification_node(self, state: ChargebackState) -> dict:
@@ -2278,21 +2408,35 @@ class DisputeAgent:
             "evidence_missing":      evidence_missing,
             "needs_more_info":       needs_more_info,
             "missing_info_question": missing_info_question,
+            "clarification_reason":  CLARIFICATION_REASON_MISSING_EVIDENCE if needs_more_info else "",
         }
 
     def _ask_user_node(self, state: ChargebackState) -> dict:
         """
         Node 4 — Return a follow-up question (terminal for this turn).
 
-        Reads:  missing_info_question
+        The single funnel for every ask in the main pipeline (detect_
+        settlement, extract_code, extract_evidence, and answer_clarification
+        — which always edges here too, re-presenting the same pending
+        question after answering a merchant's meta-question). This is also
+        where MAX_CLARIFICATION_ROUNDS is enforced for all of them at once —
+        the three early-return asks inside validate_node's list-continuity
+        block bypass this node entirely (no query_type set, so they route
+        straight to END), so they enforce the same cap inline themselves.
+
+        Reads:  missing_info_question, clarification_round
         Writes: final_answer, needs_more_info
 
         Args:
             state (ChargebackState): Current graph state.
 
         Returns:
-            dict: final_answer set to the follow-up question.
+            dict: final_answer set to the follow-up question, or the
+            escalation message if MAX_CLARIFICATION_ROUNDS is already spent.
         """
+        if state.get("clarification_round", 0) >= MAX_CLARIFICATION_ROUNDS:
+            return {"final_answer": self._CLARIFICATION_LIMIT_MESSAGE, "needs_more_info": False}
+
         # `or`, not `.get(key, default)`: the fallback must also cover an
         # EMPTY string, not just a missing key. missing_info_question is
         # always set by the upstream node (never actually absent), but its
@@ -3778,6 +3922,8 @@ class DisputeAgent:
             "evidence_missing":      [],
             "needs_more_info":            False,
             "missing_info_question":      "",
+            "clarification_round":        0,
+            "clarification_reason":       "",
             "is_settlement_issue":        False,
             "merchant_is_asking_question": False,
             "decision":              "",
@@ -3822,6 +3968,8 @@ class DisputeAgent:
             "retrieval_status":    result.get("retrieval_status",    ""),
             "retrieval_issues":    result.get("retrieval_issues",    ""),
             "thread_id":           thread_id,
+            "clarification_round":  result.get("clarification_round",  0),
+            "clarification_reason": result.get("clarification_reason", ""),
         }
 
 

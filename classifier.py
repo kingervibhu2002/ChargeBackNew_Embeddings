@@ -1144,3 +1144,46 @@ def looks_like_relative_case_reference(text: str) -> bool:
     segments = [s.strip() for s in text.split('\n\n') if s.strip()]
     latest = segments[-1] if segments else text
     return bool(_RELATIVE_CASE_REFERENCE_RE.search(latest))
+
+
+def count_clarification_rounds(additional_context: str) -> int:
+    """
+    Approximates how many clarification rounds have already happened in
+    this conversation, purely from additional_context — this project's only
+    cross-call memory (chat.html never round-trips anything the server
+    computed; see looks_like_relative_case_reference()'s docstring for the
+    same constraint biting a different bug). Every non-empty reply segment
+    counts as one round.
+
+    Deliberately does NOT try to exclude "clarification about the
+    question" replies (is_clarifying_question()'s job elsewhere) — tried
+    that first and reverted it, confirmed live it was actively wrong: a
+    real, unresolved PRIMARY reply like "what about the other one?" also
+    ends in "?", so is_clarifying_question() matches it too, and excluding
+    it meant a merchant could repeat exactly that phrase forever with the
+    round count stuck at 0 — silently defeating the cap for precisely the
+    ambiguous-case-reference scenario it most needs to bound.
+    is_clarifying_question() only knows "is this phrased as a question,"
+    not "is this asking about the SYSTEM rather than attempting to answer
+    it" — too blunt an instrument to reuse here safely.
+
+    Net effect: a genuine meta-question ("where do I find the reason
+    code?") also consumes one of MAX_CLARIFICATION_ROUNDS, even though it
+    didn't get a real chance to resolve anything. Accepted deliberately —
+    a slightly conservative cap that reliably triggers beats a precise one
+    that can be talked past indefinitely just by phrasing replies as
+    questions. Likewise, a junk filler reply ("ok", "thanks") counts as a
+    round too, even though validate_node's own junk-reply filtering may
+    later strip it from what downstream nodes actually see — same
+    trade-off, same reasoning.
+
+    Args:
+        additional_context: The full accumulated conversation text, same
+                             '\\n\\n'-joined convention as every other
+                             function in this module.
+
+    Returns:
+        Number of prior rounds, 0 on a true first turn.
+    """
+    segments = [s.strip() for s in additional_context.split('\n\n') if s.strip()]
+    return len(segments)

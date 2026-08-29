@@ -284,6 +284,12 @@ class DisputeResponse(BaseModel):
                                        nothing currently blocks or retries on a "bad" result.
         retrieval_issues  (str):       Human-readable explanation when retrieval_status isn't
                                        "good".
+        clarification_round  (int):    How many clarification rounds have already happened in
+                                       this conversation (see chargeback_agent.py's
+                                       MAX_CLARIFICATION_ROUNDS) — 0 on a fresh conversation.
+        clarification_reason (str):    Why the pending question (if any) was asked — empty
+                                       when final_answer isn't a question. Purely observational,
+                                       not used for routing.
     """
     final_answer:        str
     decision:            str
@@ -297,6 +303,8 @@ class DisputeResponse(BaseModel):
     retrieval_status:    str
     retrieval_issues:    str
     thread_id:           str
+    clarification_round:  int
+    clarification_reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +789,8 @@ def dispute(
             retrieval_status    = result.get("retrieval_status",    ""),
             retrieval_issues    = result.get("retrieval_issues",    ""),
             thread_id           = result.get("thread_id", thread_id),
+            clarification_round  = result.get("clarification_round",  0),
+            clarification_reason = result.get("clarification_reason", ""),
         )
 
     except Exception as exc:
