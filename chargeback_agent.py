@@ -98,17 +98,23 @@ def query_chargeback_data(question: str) -> str:
 
 
 # Used by _build_case_intro()'s multi-round tool loop, not
-# _resolve_data_lookup_intent()'s single-round decision above — verified
-# live (this session, before writing the plan this implements) that a
-# single round is NOT enough here: given both tools at once, the model
-# correctly called only get_case_details first, because it has no way to
-# know get_reason_code_info's reason_code argument until it sees the case
-# details. A capped multi-round loop (invoke -> execute -> append
-# ToolMessage -> invoke again) was then verified to correctly call
-# get_case_details, then get_reason_code_info with the reason code it
-# just learned, then produce a combined final answer with no more calls
-# needed — a real, working multi-step tool-use pattern for this model,
-# not assumed.
+# _resolve_data_lookup_intent()'s single-round decision above. Originally
+# verified live that a single round isn't enough here — given both tools
+# at once, the model called only get_case_details first that time, then
+# get_reason_code_info in a later round with the real reason code. NOT
+# reliable, though: confirmed live in a LATER session that the model can
+# also call BOTH tools in the SAME round, and when it does,
+# get_reason_code_info gets no real reason code to work with yet — it was
+# observed guessing one from the case_id string itself ("NPCI...M002006"
+# -> reason_code="M002", not a real NPCI code at all), producing a
+# confidently wrong answer grounded in the WRONG reason code's knowledge-
+# base content. _build_case_intro() no longer trusts this tool call's own
+# arguments for network/reason_code once the real values are known from
+# get_case_details — see that method's own comments for the fix. Kept as
+# a genuine multi-round loop regardless (rather than trying to force
+# single-round-per-tool via prompting) since the model still sometimes
+# needs the extra round, and the fix above makes same-round calls safe
+# too.
 @tool
 def get_case_details(case_id: str) -> str:
     """Fetch the merchant's own chargeback case record by case ID —
@@ -986,11 +992,16 @@ class DisputeAgent:
 
         Verified live before writing this (see the module-level comment
         above get_case_details/get_reason_code_info) that a single round
-        is NOT enough here — the model correctly refuses to guess
-        get_reason_code_info's reason_code argument before it has
-        get_case_details' result. Capped at 4 rounds — generous enough
-        for both tools plus one retry, never truly unbounded; if the cap
-        is hit without the model settling on a tool-call-free answer, one
+        can be not enough here — the model doesn't always know
+        get_reason_code_info's reason_code argument until it's seen
+        get_case_details' result. It ALSO sometimes calls both tools in
+        the same round anyway and guesses a reason_code for the second
+        one (a real, observed failure — see the fix inside the loop
+        below) — the multi-round shape stays, but nothing downstream
+        trusts that guess once the real value is known. Capped at 4
+        rounds — generous enough for both tools plus one retry, never
+        truly unbounded; if the cap is hit without the model settling on
+        a tool-call-free answer, one
         final call with no tools bound forces a synthesis so this can
         never return scaffolding-only content.
 
@@ -1025,7 +1036,22 @@ class DisputeAgent:
             if not ai_msg.tool_calls:
                 final_ai = ai_msg
                 break
-            for tc in ai_msg.tool_calls:
+            # get_case_details processed first, regardless of the order the
+            # model returned them in. Confirmed live this matters: the model
+            # doesn't always call the two tools in separate rounds the way
+            # the docstring above assumed — it sometimes calls BOTH in the
+            # SAME round, and for get_reason_code_info it has no real reason
+            # code to give yet, so it guesses one from the case_id string
+            # itself (observed: "NPCI20260629M002006" -> reason_code="M002",
+            # not a real code at all — NPCI codes are U001-U010). Sorting
+            # get_case_details first, within this same round, means
+            # `reason_code`/`network` below are already the REAL values by
+            # the time get_reason_code_info's branch runs, whichever order
+            # the model listed the two calls in.
+            ordered_tool_calls = sorted(
+                ai_msg.tool_calls, key=lambda tc: tc["name"] != "get_case_details"
+            )
+            for tc in ordered_tool_calls:
                 if tc["name"] == "get_case_details":
                     content, case_row = self._lookup_case_details(
                         merchant_id, tc["args"].get("case_id") or case_id
@@ -1033,9 +1059,17 @@ class DisputeAgent:
                     if case_row:
                         network, reason_code = "RuPay", case_row["reason_code"]
                 elif tc["name"] == "get_reason_code_info":
+                    # Authoritative value (from get_case_details, this round
+                    # or an earlier one) wins over the model's own guessed
+                    # argument, not the other way around — the model has no
+                    # way to know the real reason code better than the DB
+                    # row already fetched, and any disagreement is by
+                    # definition the model being wrong. Only falls back to
+                    # the model's argument when get_case_details genuinely
+                    # hasn't run yet (network/reason_code both still "").
                     content = self._lookup_reason_code_info(
-                        tc["args"].get("network") or network,
-                        tc["args"].get("reason_code") or reason_code,
+                        network or tc["args"].get("network"),
+                        reason_code or tc["args"].get("reason_code"),
                     )
                 else:
                     content = ""

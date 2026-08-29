@@ -944,6 +944,23 @@ _ORDINAL_WORDS = {
 
 _NUMBER_HASH_RE = re.compile(r'#\s*(\d+)|\bcase\s+(\d+)\b', re.IGNORECASE)
 
+# "the last one"/"last case" — unlike "the other one" (looks_like_relative_
+# case_reference, genuinely ambiguous — which other one?), "last" is fully,
+# unambiguously resolvable: it always means the highest-index case in
+# whatever list was just shown. Confirmed live this was a real gap, not
+# hypothetical: with 7 cases shown, "last one" matched neither
+# _ORDINAL_WORDS (no entry past "fifth") nor
+# looks_like_relative_case_reference()'s pattern (doesn't say "other" or
+# "different") — it fell all the way through detect_case_selection()
+# returning None, past is_out_of_range_case_reference() (also ordinal-
+# word-based, so also None), past looks_like_relative_case_reference()
+# (no match), straight into the "abandon and promote" fallback, which
+# treated the bare text "last one" as a new topic and got rejected by the
+# generic invalid-query guard ("Please describe a chargeback dispute...")
+# — a confusing, unrelated-looking answer for what was actually a
+# perfectly resolvable case reference.
+_LAST_ONE_RE = re.compile(r'\b(the\s+)?last\s+(one|case|chargeback|dispute)\b', re.IGNORECASE)
+
 # Bare confirmation with no other specific content — only trustworthy as a
 # case selection when exactly one case was shown (nothing else for "yes"
 # to disambiguate between). Deliberately a small, literal set rather than
@@ -1005,6 +1022,9 @@ def detect_case_selection(text: str, shown_cases: List[Dict]) -> Optional[str]:
         idx = int(m.group(1) or m.group(2)) - 1
         if 0 <= idx < len(shown_cases):
             return shown_cases[idx]["case_id"]
+
+    if _LAST_ONE_RE.search(t):
+        return shown_cases[-1]["case_id"]
 
     for word, idx in _ORDINAL_WORDS.items():
         if re.search(rf'\b{re.escape(word)}\b', t) and idx < len(shown_cases):
