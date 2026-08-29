@@ -384,6 +384,62 @@ class DisputeAgent:
         self._graph         = self._build_graph()
         self._list_cache: dict[str, str] = {}  # cache for list/compare responses
 
+    # ── Shared "don't guess, ask" response builder ───────────────────────
+
+    def _uncertain(self, message: str, needs_more_info: bool = True, **extra) -> dict:
+        """
+        Build a consistent "not confident enough to proceed" response —
+        the one place a decision point in this graph goes when it can't
+        confidently commit to an outcome, instead of each node inventing
+        its own silent default guess.
+
+        Found live in three separate places in this file, all the same
+        underlying anti-pattern: an ambiguous or failed decision silently
+        became one specific guess rather than surfacing the uncertainty.
+          - _validate_node: a follow-up on an already-anchored case that
+            matched none of the known patterns (data lookup, same-case
+            reference, escalation, new request) used to be silently
+            treated as evidence for that case — "help me with all open
+            questions" got a full rebuttal letter for an unrelated case.
+          - _decide_node: an unparseable LLM response defaulted to
+            "fight" — the WRONG direction for a silent default, since
+            this project's own decision_rules.py philosophy is "no
+            evidence -> presumptively refund," the safe direction, not
+            the aggressive one. The LLM also had no way to express
+            genuine uncertainty at all — only a forced binary choice.
+          - _extract_evidence_node: an unparseable LLM response defaulted
+            to needs_more_info=False, silently letting an incomplete
+            case proceed straight to a decision.
+        Routing through one named, documented method — rather than three
+        independent ad hoc fixes — means a future 4th instance of this
+        same anti-pattern has an obvious tool to reach for.
+
+        Args:
+            message: The clarifying question or honest "not confident"
+                     explanation to show the merchant.
+            needs_more_info: Whether this genuinely expects a reply
+                     (True — the default) or is a terminal, informational
+                     answer for this turn (False — e.g. decide_node's
+                     uncertain-decision case, which deliberately doesn't
+                     reopen a second round of evidence-gathering; see
+                     extract_evidence_node's own "one round, max" cap).
+            **extra: Additional state fields the specific call site
+                     needs merged in (e.g. decision="" for decide_node,
+                     is_valid_query=True for validate_node's early return).
+
+        Returns:
+            dict with final_answer=message, needs_more_info, and sane
+            confidence/groundedness defaults, plus **extra merged in.
+        """
+        return {
+            "final_answer":        message,
+            "needs_more_info":     needs_more_info,
+            "confidence_score":    0,
+            "is_grounded":         True,
+            "groundedness_issues": "",
+            **extra,
+        }
+
     # ── LLM call with automatic fallback ─────────────────────────────────
 
     def _invoke(self, messages: list) -> object:
@@ -1185,7 +1241,12 @@ class DisputeAgent:
                 not classifier.refers_to_current_case(latest_segment)
                 and not classifier.is_junk_reply(raw_context_preview, query=masked_query)
             )
-            if classifier.looks_like_data_lookup(latest_segment) and not_same_case_and_not_junk:
+            if not not_same_case_and_not_junk:
+                # Refers to the anchored case, or is junk filler — fall
+                # through unchanged to the normal evidence-gathering flow
+                # below, exactly as before any of this branch existed.
+                pass
+            elif classifier.looks_like_data_lookup(latest_segment):
                 # refers_to_current_case() is checked BEFORE the LLM
                 # tool-call, not just alongside it — confirmed live the
                 # tool-call alone isn't reliable enough here: given
@@ -1196,7 +1257,24 @@ class DisputeAgent:
                 new_topic_intent = self._resolve_data_lookup_intent(merchant_id_preview, latest_segment)
                 if new_topic_intent:
                     masked_query = mask_pii(latest_segment)
-            elif classifier.looks_like_new_request(latest_segment) and not_same_case_and_not_junk:
+                else:
+                    # Loose data-lookup keyword matched, but the real
+                    # tool-call decided this ISN'T actually a list/
+                    # aggregate request either — genuinely unclear what
+                    # it is. Ask rather than silently falling through to
+                    # "must be evidence," the same anti-pattern _uncertain()
+                    # exists to close off everywhere in this file.
+                    anchored_case = classifier.extract_case_reference(masked_query) or "this case"
+                    return {
+                        "is_valid_query": True,
+                        "user_query":     masked_query,
+                        **self._uncertain(
+                            f"I'm not sure if that's about case {anchored_case} or "
+                            "something else — could you clarify, or ask your "
+                            "question directly and I'll answer it?"
+                        ),
+                    }
+            elif classifier.looks_like_new_request(latest_segment):
                 # Not data-lookup-shaped, but still clearly a fresh
                 # imperative ask ("help me with all open questions"),
                 # not an evidence answer for the anchored case at all.
@@ -1216,6 +1294,28 @@ class DisputeAgent:
                 # the same reasoning as refers_to_current_case()'s veto
                 # just above needing no LLM confirmation either.
                 masked_query = mask_pii(latest_segment)
+            # else: no known pattern matched at all — deliberately falls
+            # through unchanged to the normal evidence-gathering flow
+            # below, same as before this branch existed. Tried an
+            # unconditional "ask for clarification" catch-all here first
+            # and reverted it live: it also caught genuine evidence
+            # answers with no reason to be suspicious ("Yes, we confirmed
+            # only one credit was issued for this transaction" matches
+            # none of looks_like_data_lookup/looks_like_new_request/
+            # refers_to_current_case either — it says "this transaction,"
+            # not "this case"/"this chargeback" — so a blanket "ask when
+            # nothing matches" rule asked for clarification INSTEAD OF
+            # extracting real evidence that was right there, breaking the
+            # single most common follow-up shape in this whole flow).
+            # Evidence text is inherently unrecognizable by a positive
+            # pattern — it's free-form "here's what I have," not a fixed
+            # phrase — so there's no safe way to distinguish "confusingly
+            # phrased evidence" from "genuinely unrelated message" without
+            # more signal than a keyword/demonstrative check can give. The
+            # narrower asks above (data-lookup keyword matched but the
+            # LLM said no; an unambiguous imperative opener) stay, because
+            # each already has a real, specific reason to be suspicious —
+            # this bare fallback didn't.
 
         # Guard 4 — deterministic intent classification (no LLM call)
         query_type = classifier.classify_query_type(masked_query)
@@ -1897,8 +1997,25 @@ class DisputeAgent:
             )),
         ])
 
-        fallback = {"evidence_present": [], "evidence_missing": [],
-                    "needs_more_info": False, "missing_info_question": ""}
+        # needs_more_info=True on parse failure, not False — a genuinely
+        # failed LLM response used to silently mean "no evidence needed,
+        # proceed to a decision," letting an incomplete case reach
+        # decide_node with empty evidence_present/missing and no one ever
+        # having actually asked. See _uncertain()'s own docstring for the
+        # other two places this exact anti-pattern lived in this file.
+        # Only bites on a genuine parse failure — the surrounding
+        # "one evidence round max" cap a few lines below (needs_more_info
+        # = ... and not context) still suppresses this on a later turn,
+        # same as it already does for the LLM's own (successfully parsed)
+        # needs_more_info field.
+        fallback = {
+            "evidence_present": [], "evidence_missing": [],
+            "needs_more_info": True,
+            "missing_info_question": (
+                "I wasn't able to process that clearly — could you describe "
+                "what evidence you have for this dispute?"
+            ),
+        }
         data = _parse_json_safe(response.content, fallback)
 
         evidence_present = data.get("evidence_present", [])
@@ -2861,8 +2978,11 @@ class DisputeAgent:
             SystemMessage(content=(
                 "You are a chargeback strategy consultant.\n"
                 "Decide whether the merchant should fight or accept this chargeback.\n"
-                "  fight  — evidence is strong; representment likely to succeed.\n"
-                "  refund — evidence is weak or not worth contesting.\n\n"
+                "  fight      — evidence is strong; representment likely to succeed.\n"
+                "  refund     — evidence is weak or not worth contesting.\n"
+                "  uncertain  — the available evidence genuinely isn't enough to\n"
+                "               confidently recommend either. Use this rather than\n"
+                "               guessing when the case is a real toss-up.\n\n"
                 "Respond ONLY with JSON:\n"
                 '{"decision": "fight", "decision_reason": "Strong delivery proof"}'
             )),
@@ -2875,12 +2995,39 @@ class DisputeAgent:
             )),
         ])
 
+        # Fallback on parse failure is "uncertain", NOT "fight" — this
+        # project's own decision_rules.py philosophy is "no evidence ->
+        # presumptively refund," the safe direction. Defaulting an
+        # unparseable response to "fight" (the old fallback here) was the
+        # wrong direction for a silent guess, and the LLM had no way to
+        # express genuine uncertainty at all before this — only a forced
+        # binary choice. See _uncertain()'s own docstring for the other
+        # two places this exact anti-pattern lived in this file.
         data = _parse_json_safe(response.content, {
-            "decision":        "fight",
-            "decision_reason": "Review evidence manually",
+            "decision":        "uncertain",
+            "decision_reason": "",
         })
+        decision = data.get("decision", "uncertain")
+
+        if decision not in ("fight", "refund"):
+            # needs_more_info=False deliberately — this is the FINAL word
+            # for this turn, not a request the merchant is expected to
+            # reply to. extract_evidence_node already caps evidence-
+            # gathering at one round; reopening a second round here would
+            # contradict that established design instead of extending it.
+            return self._uncertain(
+                "The available evidence doesn't clearly support recommending "
+                "either fight or refund with confidence."
+                + (f" {data.get('decision_reason')}" if data.get("decision_reason") else "")
+                + " You may want to gather stronger documentation before "
+                "proceeding, or consult your acquiring bank directly.",
+                needs_more_info=False,
+                decision="",
+                decision_reason=data.get("decision_reason", "Insufficient evidence to decide confidently"),
+            )
+
         return {
-            "decision":        data.get("decision",        "fight"),
+            "decision":        decision,
             "decision_reason": data.get("decision_reason", ""),
         }
 
