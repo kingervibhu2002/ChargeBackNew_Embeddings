@@ -1934,6 +1934,37 @@ class DisputeAgent:
         # question IS the original query, not a follow-up reply to one.
         latest   = segments[-1] if segments else (context or state.get("user_query", ""))
 
+        # The closing reminder must point at whatever is ACTUALLY still
+        # missing, not a hardcoded "come back with evidence" regardless of
+        # stage. Confirmed live this was wrong: a merchant who asked "what
+        # is a reason code?" before ever providing one — reason_code was
+        # still "Unknown" — got told "please come back with the actual
+        # evidence once you have it." The real blocker was the reason
+        # code itself; there was no evidence stage to come back to yet,
+        # and nothing tracked the ORIGINAL pending question once this
+        # node's own answer overwrote missing_info_question. Reuses the
+        # same deterministic signals extract_code_node/decide_node already
+        # use to know what's actually missing, rather than leaving the
+        # LLM to guess a generic closing line from context alone.
+        if reason_code == "Unknown" or card_network == "Unknown":
+            closing_instruction = (
+                "End with one short sentence asking them to share the chargeback "
+                "reason code (e.g. 'Visa 13.1', 'RuPay U002') so you can continue — "
+                "that is the actual next thing needed, not evidence."
+            )
+        elif state.get("ledger_decision"):
+            closing_instruction = (
+                "Do NOT ask for evidence — this case's outcome is already "
+                "determined from the bank's own ledger records, not merchant-"
+                "supplied evidence. End with one short sentence letting them "
+                "know you already have what's needed for this case."
+            )
+        else:
+            closing_instruction = (
+                "End with one short sentence reminding them to come back with the "
+                "actual evidence once they have it."
+            )
+
         response = self._invoke([
             SystemMessage(content=(
                 "You are a chargeback evidence analyst. The merchant is asking a "
@@ -1954,8 +1985,7 @@ class DisputeAgent:
                 "what's on file (e.g. no full transaction ledger exists to "
                 "verify a duplicate charge from the payment side), say that "
                 "plainly rather than answering as if you looked it up.\n"
-                "End with one short sentence reminding them to come back with the "
-                "actual evidence once they have it.\n"
+                f"{closing_instruction}\n"
                 "Respond ONLY with JSON: {\"answer\": \"...\"}"
             )),
             HumanMessage(content=(
