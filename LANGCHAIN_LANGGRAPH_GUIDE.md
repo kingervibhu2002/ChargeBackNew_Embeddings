@@ -219,7 +219,9 @@ class ChargebackState(TypedDict):
     evidence_present:      List[str]    # filled in partway through
     decision:               str         # "fight" or "refund" — filled in partway through
     final_answer:            str        # the finished output
-    # ...and more — see the real file for the full ~30-field shape
+    # ...and more — see the real file for the full ~40-field shape, including
+    # three Annotated[dict, _merge_dict] fields (case_context, conversation,
+    # decision_ctx) added as part of an in-progress refactor — see §2.8.
 ```
 
 Think of it as a form that starts almost entirely blank and gets filled in, field by field, as it passes through the graph — never all at once.
@@ -325,6 +327,25 @@ Why this matters in practice: it's *why* a case-selection sub-conversation could
 Two honest takeaways: (1) a library offering a feature doesn't mean a project actually exercises it — the checkpointer here is correctly wired but functionally inert; (2) `thread_id` earns its keep anyway, just for a different reason than resumption — it's a security-scoping token (so a guessed/leaked `thread_id` can't be replayed against another merchant's identity), independent of whether anything ever actually resumes on it.
 
 **A narrower, separate fix for one specific symptom of the "no real memory" problem above — deliberately NOT the checkpointer.** Re-deriving everything from resent text is usually reliable, but confirmed live to occasionally lose track of which case is anchored: a reply shaped like a fresh imperative ask ("show me the ledger entries for this transaction") gets promoted to replace `masked_query` outright (see `classifier.looks_like_new_request()`), and if that promoted text has no case reference of its own, `_planner_node`'s case lookup comes up empty even though a real case was clearly still the subject — the agent falls back to `reason_code="Unknown"` and asks the merchant to describe their dispute from scratch, mid-conversation. Real, checkpointer-based state persistence would fix this structurally, but was scoped out as a first step: it requires 4 of this file's most heavily-patched node functions (`_validate_node`, `_planner_node`, `_extract_code_node`, `_extract_evidence_node`) to stop unconditionally overwriting case-identifying fields, and an earlier attempt at exactly that — confirmed by a standalone test — found `DisputeAgent.run()`'s full blank `initial_state` overwrites rather than merges with whatever a checkpoint holds, so it's a real redesign, not a config flip. Instead: `DisputeRequest`/`DisputeResponse` already round-trip `case_id` every turn (the server always tells the client which case it resolved to) — `chat.html` just never captured or resent it. Now it does (`anchoredCaseId`, cleared at the same three points `pendingQuery` already is: merchant switch, tab switch, `looksLikeNewTopic()`), and `_planner_node`'s case-lookup regex uses it as a pure fallback — only when THIS turn's own text has no case reference, and never overriding an explicit, different case reference the merchant actually typed (checked first, unconditionally). One field, one node, no checkpointer involved — its inert status above is unchanged by this.
+
+### 2.8 Custom reducers — how a nested field can merge instead of overwrite
+
+Every field discussed in §2.2 and §2.7 uses LangGraph's *default* merge rule: whatever a node returns for a key replaces that key's old value outright. That's fine for scalars (`reason_code`, `decision`) — there's only one right answer for "what is the reason code now," so overwrite is correct. It breaks down the moment a single key holds a nested dict that different nodes each want to contribute one piece of: if `_extract_code_node` returns `{"case_context": {"reason_code": "U002"}}` and a later node returns `{"case_context": {"utr": "..."}}`, default overwrite means the second call wipes the first node's key entirely — the state ends up with only `utr`, not both.
+
+LangGraph's fix is a **custom reducer**: instead of `case_context: CaseContext`, you write `case_context: Annotated[CaseContext, _merge_dict]`, where `_merge_dict(old, new)` is a plain function you supply:
+
+```python
+def _merge_dict(old: dict, new: dict) -> dict:
+    if old is None:
+        old = {}
+    if new is None:
+        new = {}
+    return {**old, **new}   # shallow merge: new keys win, old keys survive
+```
+
+`Annotated[CaseContext, _merge_dict]` tells LangGraph "when two updates target this key, don't overwrite — call `_merge_dict(old_value, new_value)` and store the result instead." With that in place, the two partial updates above merge into `{"reason_code": "U002", "utr": "..."}`, and — the harder question, since this project's checkpointer discussion in §2.7 already found one merge failure mode — the same reducer applies when a *new* `.invoke()` call's input lands on top of a value already restored from a checkpoint for that `thread_id`, not just between two nodes in one run. Both cases were verified empirically with a standalone spike script (a trivial two-node graph, then a real `SqliteSaver` checkpoint round-trip) before any real node was touched, specifically because §2.7 already documented one related merge assumption turning out to be wrong for this project's flat-dict design — the lesson being that "the library supports X" and "X behaves the way this project's call pattern needs" are different claims worth checking separately.
+
+`chargeback_agent.py` now has three such fields — `case_context`, `conversation`, `decision_ctx` — added as Phase 1 of an in-progress refactor consolidating ~20 of `ChargebackState`'s ~40 flat fields into structured, reducer-backed groups. As of this phase, every node *dual-writes*: the original flat field is still returned exactly as before, alongside the same value nested under one of the three dicts (search the file for `"# Phase 1 dual-write"` to see every site). Nothing reads the nested fields yet, so this is additive infrastructure, not a behavior change — the next phase migrates node *reads* over to the nested shape, one node at a time, dropping the flat field only once nothing depends on it anymore.
 
 ## Part 3: Walking through one real request
 
@@ -443,6 +464,7 @@ LangChain and LangGraph offer a lot more than what's used here. This section is 
 **Present as infrastructure, but not actually exercised:**
 
 - **Checkpointing** — a real `SqliteSaver` is wired up and every response carries a `thread_id` (§2.7), but `chat.html` never resends that `thread_id`, so nothing ever resumes from a saved checkpoint. Verified by grepping `chat.html` for `thread_id` — zero hits. `thread_id`'s actual job today is security scoping, not resumption.
+- **Custom reducers** — `ChargebackState` now has three `Annotated[dict, _merge_dict]` fields (`case_context`, `conversation`, `decision_ctx`), with `_merge_dict` doing a plain shallow `{**old, **new}` merge instead of LangGraph's default whole-key overwrite — real, and confirmed (via a standalone spike script, then the full node migration) to correctly merge partial nested-dict updates from different nodes in one run. But every node currently *dual-writes*: it still returns the original flat field (`reason_code`, `decision`, ...) AND the same value nested under one of these three dicts. Nothing reads the nested dicts yet — they're populated but functionally inert, a deliberate first phase of a larger refactor (see the file's own "Phase 1 dual-write" comments) rather than a live behavior change.
 
 **Approximated with project-specific code, not the LangGraph-native version:**
 
@@ -452,7 +474,6 @@ LangChain and LangGraph offer a lot more than what's used here. This section is 
 
 **Not used at all, verified by direct inspection:**
 
-- **Custom reducers** — zero uses of `Annotated`/`operator.add`/`add_messages` anywhere in `chargeback_agent.py`. Every state field is plain last-write-wins overwrite, described precisely in §2.7's surrounding discussion of LangGraph's merge behavior.
 - **In-graph cycles/loops** — the graph is a DAG; no edge ever routes back to an earlier node. The 4-round loop in `_build_case_intro()` is a plain Python `for` loop inside one node's method body, not a graph-level cycle.
 - **Self-correcting retry loops** — `reflect_node` scores groundedness and confidence but has only one outgoing edge, straight to `END`. A low-confidence or ungrounded result is reported, never fed back into another retrieval/generation attempt. `planner_node` now does compute a real retrieval-sufficiency SIGNAL (`retrieval_evaluator.evaluate_retrieval()` — checks whether the retrieved documents' own `network` payload field actually matches the network just detected for the query, not just whether they scored well on similarity) and writes it to `retrieval_status`/`retrieval_issues` — but nothing yet routes on it or retries retrieval when it comes back "bad." That's a deliberate first step (an evaluator with no corrective action wired to it yet), not the same thing as a correction loop.
 
@@ -462,7 +483,7 @@ LangChain and LangGraph offer a lot more than what's used here. This section is 
 - **Formal query rewriting** — the closest is `planner_node`'s step 3, which concatenates `f"{network} {code} {query}"` for a supplemental search; there's no LLM-driven query expansion/rewrite step.
 - **Tracing/observability tooling** — `AuditLogger` logs query, decision, and latency per request (real, but simple), but there's no LangSmith or comparable tracing integration anywhere in the repo.
 
-If you're using this project to practice LangGraph concepts you haven't built yet, the gaps above — subgraphs, multi-agent collaboration, real `interrupt()`-based HITL, a self-correcting RAG retry loop, custom reducers — are the genuinely open territory; everything else on this list is already a working, real example to read.
+If you're using this project to practice LangGraph concepts you haven't built yet, the gaps above — subgraphs, multi-agent collaboration, real `interrupt()`-based HITL, a self-correcting RAG retry loop — are the genuinely open territory; everything else on this list is already a working, real example to read.
 
 ## Quick glossary
 

@@ -32,7 +32,7 @@ Requires:
 """
 
 import re
-from typing import Callable, List, Literal, Optional, TypedDict
+from typing import Annotated, Callable, List, Literal, Optional, TypedDict
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
@@ -136,6 +136,103 @@ def get_reason_code_info(network: str, reason_code: str) -> str:
 # Shared state
 # ---------------------------------------------------------------------------
 
+def _merge_dict(old: dict, new: dict) -> dict:
+    """
+    Reducer for the three nested state sub-objects below (case_context,
+    conversation, decision_ctx). Without this, LangGraph's default
+    per-field merge (last-write-wins, confirmed live — see
+    LANGCHAIN_LANGGRAPH_GUIDE.md §2.3/§2.7 — this file uses zero
+    Annotated/operator.add/add_messages reducers anywhere else) would
+    treat a nested dict field the SAME way as a plain string field: the
+    whole dict gets replaced, not deep-merged. That's fatal for a shared
+    sub-object multiple nodes write to in the same run — one node setting
+    {"case_context": {"reason_code": "U002"}} would silently wipe
+    whatever a DIFFERENT node already put in case_id, ledger_decision,
+    etc. this same turn, and would wipe an entire checkpoint-restored
+    sub-object the same way across turns.
+
+    Verified empirically before wiring this in for real (Phase 0 spike,
+    against this project's actual pinned langgraph==1.2.6 /
+    langgraph-checkpoint-sqlite==3.1.0): a shallow {**old, **new} merge
+    correctly (a) lets two different nodes update different keys of the
+    same nested dict within one run without either overwriting the
+    other's write, and (b) merges a NEW .invoke() call's partial input on
+    top of a PRIOR checkpoint for the same thread_id, provided the caller
+    passes only the genuinely-new-this-turn keys rather than a full blank
+    state (see run()'s own docstring for why it still does the latter
+    today — Phase 1 of the structured-state plan populates this shape in
+    parallel with the existing flat fields without changing that yet).
+    """
+    if old is None:
+        old = {}
+    if new is None:
+        new = {}
+    return {**old, **new}
+
+
+class CaseContext(TypedDict, total=False):
+    """
+    Case-identity facts: who/what this dispute is about, independent of
+    where the conversation currently stands or what's been decided.
+    Mirrors chargeback_analysis.Analysis's own fields for the
+    ledger_*/deadline_expired ones — see that module for the deterministic
+    logic that actually computes them.
+
+    total=False: every key is optional. A case-anchored conversation may
+    only ever populate a subset (e.g. no ledger_decision at all until
+    planner_node's lookup actually runs), and an entirely case-less
+    generic Q&A turn populates none of them.
+    """
+    case_id:                   str
+    utr:                       str
+    network:                   str
+    reason_code:                str
+    case_ref_not_found:         str
+    deadline_expired:           bool
+    ledger_decision:             str   # "fight" | "refund" | ""
+    ledger_decision_reason:      str
+    ledger_no_decision_reason:   str
+
+
+class ConversationState(TypedDict, total=False):
+    """
+    Turn-taking / clarification mechanics: what kind of turn this is and
+    whether the graph needs to stop and ask the merchant something.
+    Deliberately does NOT include case facts or business-decision output
+    — see CaseContext/DecisionContext for those, and ChargebackState's
+    own docstring (the six-field "cross-bucket" list) for the handful of
+    fields that genuinely straddle more than one of these three.
+    """
+    query_type:                    str   # "dispute" | "question" | "invalid"
+    needs_more_info:               bool
+    missing_info_question:         str
+    clarification_round:           int
+    clarification_reason:          str
+    merchant_is_asking_question:   bool
+    explicit_resolution_requested: bool
+
+
+class DecisionContext(TypedDict, total=False):
+    """
+    Business-decision output: the main pipeline's evidence-informed
+    fight/refund recommendation and the evidence it was based on.
+    Deliberately does NOT include case_intro_action/reason/source (the
+    OTHER, evidence-BLIND recommendation representation from
+    _build_case_intro()) — unifying those two is a real semantic change,
+    scoped separately (Phase 4 of the structured-state plan), not bundled
+    into this mechanical regroup.
+    """
+    decision:              str   # "fight" | "refund" | ""
+    decision_reason:        str
+    decision_source:        str   # "ledger" | "rules" | "llm"
+    evidence_present:       List[str]
+    evidence_missing:       List[str]
+    is_settlement_issue:    bool
+    confidence_score:       int
+    is_grounded:             bool
+    groundedness_issues:     str
+
+
 class ChargebackState(TypedDict):
     """
     Shared state passed between every node in the LangGraph workflow.
@@ -160,6 +257,35 @@ class ChargebackState(TypedDict):
                                              bigger, separately-tracked piece of work) — this is one
                                              plain string, re-validated server-side on every call,
                                              not a resumed session.
+        case_context          (CaseContext):     Phase 1 of the structured-state refactor
+                                             (see LANGCHAIN_LANGGRAPH_GUIDE.md and the plan
+                                             this session's git history references). DUAL-
+                                             WRITTEN alongside the existing flat case fields
+                                             below (reason_code, card_network,
+                                             case_deadline_expired, resolved_case_id,
+                                             resolved_utr, ledger_decision,
+                                             ledger_decision_reason,
+                                             ledger_no_decision_reason, case_ref_not_found)
+                                             by every node that already writes them — nothing
+                                             reads FROM case_context yet, so this phase is
+                                             pure "start populating the new shape," not a
+                                             behavior change. Uses the _merge_dict reducer so
+                                             two nodes updating different keys in the same run
+                                             — or a checkpoint-restored value merging with a
+                                             new turn's partial update, once Phase 3 wires the
+                                             checkpointer for real — don't clobber each other.
+        conversation          (ConversationState): Same Phase 1 status, mirroring query_type,
+                                             needs_more_info, missing_info_question,
+                                             clarification_round, clarification_reason,
+                                             merchant_is_asking_question,
+                                             explicit_resolution_requested.
+        decision_ctx          (DecisionContext): Same Phase 1 status, mirroring decision,
+                                             decision_reason, decision_source,
+                                             evidence_present, evidence_missing,
+                                             is_settlement_issue, confidence_score,
+                                             is_grounded, groundedness_issues. Deliberately
+                                             does NOT mirror case_intro_action/reason/source
+                                             — see DecisionContext's own docstring.
         is_valid_query        (bool):       False → validate_node rejected input; graph ends.
         query_type            (str):        "dispute" | "question" | "invalid" — set by validate_node.
         reason_code           (str):        e.g. "13.1" — set by planner_node / extract_code_node.
@@ -241,7 +367,6 @@ class ChargebackState(TypedDict):
         confidence_score      (int):        1-10 rating of answer quality — set by reflect_node.
         is_grounded           (bool):       True if answer is based only on retrieved docs.
         groundedness_issues   (str):        Description of any ungrounded claims found.
-        reflection_feedback   (str):        What the peer-reviewer improved.
         final_answer          (str):        Polished final output — set by reflect_node.
         case_ref_not_found    (str):        A UTR/case_id the merchant named in free text that
                                              didn't resolve to a row scoped to their own
@@ -321,6 +446,9 @@ class ChargebackState(TypedDict):
     additional_context:    str
     anchored_case_id:      str
     merchant_id:           str
+    case_context:          Annotated[CaseContext, _merge_dict]
+    conversation:          Annotated[ConversationState, _merge_dict]
+    decision_ctx:          Annotated[DecisionContext, _merge_dict]
     is_valid_query:        bool
     query_type:            str   # "dispute" | "question" | "invalid"
     reason_code:           str
@@ -355,7 +483,6 @@ class ChargebackState(TypedDict):
     confidence_score:      int
     is_grounded:           bool
     groundedness_issues:   str
-    reflection_feedback:   str
     final_answer:          str
 
 
@@ -579,6 +706,29 @@ class DisputeAgent:
             dict with final_answer=message, needs_more_info, and sane
             confidence/groundedness defaults, plus **extra merged in.
         """
+        # Phase 1 dual-write (structured-state refactor) — pulled out here
+        # rather than at each of _uncertain()'s call sites, since this one
+        # helper already centralizes the "not confident, ask/decline"
+        # shape for all of them. Only mirrors the specific extra keys this
+        # helper's actual callers pass (clarification_reason/round,
+        # decision) — not a generic pass-through of **extra, since not
+        # every kwarg a future caller might add belongs in either bucket.
+        conversation_updates = {"needs_more_info": needs_more_info}
+        if "clarification_reason" in extra:
+            conversation_updates["clarification_reason"] = extra["clarification_reason"]
+        if "clarification_round" in extra:
+            conversation_updates["clarification_round"] = extra["clarification_round"]
+
+        decision_updates = {
+            "confidence_score":    0,
+            "is_grounded":         True,
+            "groundedness_issues": "",
+        }
+        if "decision" in extra:
+            decision_updates["decision"] = extra["decision"]
+        if "decision_reason" in extra:
+            decision_updates["decision_reason"] = extra["decision_reason"]
+
         return {
             "final_answer":        message,
             "needs_more_info":     needs_more_info,
@@ -586,6 +736,8 @@ class DisputeAgent:
             "is_grounded":         True,
             "groundedness_issues": "",
             **extra,
+            "conversation":  conversation_updates,
+            "decision_ctx":  decision_updates,
         }
 
     # ── LLM call with automatic fallback ─────────────────────────────────
@@ -1428,6 +1580,27 @@ class DisputeAgent:
                             "case_intro_reason": intro["case_intro_reason"],
                             "case_intro_source": intro["case_intro_source"],
                             "case_deadline_expired": intro["case_deadline_expired"],
+                            # Phase 1 dual-write (structured-state refactor).
+                            # case_intro_action/reason/source deliberately
+                            # NOT mirrored here — see DecisionContext's own
+                            # docstring for why unifying those is a
+                            # separate, later phase.
+                            "case_context": {
+                                "case_id":          intro["case_id"],
+                                "reason_code":      intro["reason_code"],
+                                "network":          intro["card_network"],
+                                "deadline_expired": intro["case_deadline_expired"],
+                            },
+                            "conversation": {
+                                "needs_more_info":     True,
+                                "clarification_reason": "",
+                                "clarification_round":  clarification_round,
+                            },
+                            "decision_ctx": {
+                                "confidence_score":    8,
+                                "is_grounded":         True,
+                                "groundedness_issues": "",
+                            },
                         }
                     # intro build failed (e.g. tool loop never resolved a
                     # row) — fall through to planner_node's step 4b, same
@@ -1537,6 +1710,23 @@ class DisputeAgent:
                         "case_intro_reason": intro["case_intro_reason"],
                         "case_intro_source": intro["case_intro_source"],
                         "case_deadline_expired": intro["case_deadline_expired"],
+                        # Phase 1 dual-write (structured-state refactor).
+                        "case_context": {
+                            "case_id":          intro["case_id"],
+                            "reason_code":      intro["reason_code"],
+                            "network":          intro["card_network"],
+                            "deadline_expired": intro["case_deadline_expired"],
+                        },
+                        "conversation": {
+                            "needs_more_info":     True,
+                            "clarification_reason": "",
+                            "clarification_round":  clarification_round,
+                        },
+                        "decision_ctx": {
+                            "confidence_score":    8,
+                            "is_grounded":         True,
+                            "groundedness_issues": "",
+                        },
                     }
                 masked_query = f"Help me with case {resolved}"
             elif classifier.is_out_of_range_case_reference(raw_context_preview, shown):
@@ -1578,6 +1768,16 @@ class DisputeAgent:
                         "is_grounded":      True,
                         "groundedness_issues": "",
                         "clarification_round": clarification_round,
+                        # Phase 1 dual-write (structured-state refactor).
+                        "conversation": {
+                            "needs_more_info":    False,
+                            "clarification_round": clarification_round,
+                        },
+                        "decision_ctx": {
+                            "confidence_score":    8,
+                            "is_grounded":         True,
+                            "groundedness_issues": "",
+                        },
                     }
                 lines = [f"You only have {len(shown)} {case_label} right now — there's no case at that position. Here they are again:\n"]
                 for i, c in enumerate(shown, 1):
@@ -1596,6 +1796,17 @@ class DisputeAgent:
                     "groundedness_issues": "",
                     "clarification_reason": CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
                     "clarification_round":  clarification_round,
+                    # Phase 1 dual-write (structured-state refactor).
+                    "conversation": {
+                        "needs_more_info":     True,
+                        "clarification_reason": CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
+                        "clarification_round":  clarification_round,
+                    },
+                    "decision_ctx": {
+                        "confidence_score":    8,
+                        "is_grounded":         True,
+                        "groundedness_issues": "",
+                    },
                 }
             elif classifier.looks_like_relative_case_reference(raw_context_preview):
                 # "What about the other one?" — refers to a specific case
@@ -1975,6 +2186,12 @@ class DisputeAgent:
             # that bypass ask_user_node entirely.
             "clarification_round": clarification_round,
             "explicit_resolution_requested": explicit_resolution_requested,
+            # Phase 1 dual-write (structured-state refactor).
+            "conversation": {
+                "query_type":                    query_type,
+                "clarification_round":            clarification_round,
+                "explicit_resolution_requested":  explicit_resolution_requested,
+            },
         }
 
     def _planner_node(self, state: ChargebackState) -> dict:
@@ -2247,6 +2464,19 @@ class DisputeAgent:
             "case_deadline_expired":     case_deadline_expired,
             "resolved_case_id":          resolved_case_id,
             "resolved_utr":              resolved_utr,
+            # Phase 1 dual-write (structured-state refactor) — parallel to
+            # the flat fields above, nothing reads this yet.
+            "case_context": {
+                "case_id":                  resolved_case_id,
+                "utr":                      resolved_utr,
+                "network":                  network,
+                "reason_code":              code,
+                "case_ref_not_found":       case_ref_not_found,
+                "deadline_expired":         case_deadline_expired,
+                "ledger_decision":          ledger_decision,
+                "ledger_decision_reason":   ledger_decision_reason,
+                "ledger_no_decision_reason": ledger_no_decision_reason,
+            },
         }
 
     def _detect_settlement_node(self, state: ChargebackState) -> dict:
@@ -2261,23 +2491,31 @@ class DisputeAgent:
         Writes: is_settlement_issue, missing_info_question
         """
         is_settlement = classifier.detect_settlement_issue(state["user_query"])
+        missing_info_question = (
+            "Before I can advise you, one critical question:\n\n"
+            "Was the customer's card actually charged? "
+            "Check your payment processor dashboard or statement.\n\n"
+            "A) Yes — the customer was charged, but the funds never reached my account.\n\n"
+            "B) No — the transaction appears to have failed at the bank or processor level. "
+            "The customer may not have been charged at all.\n\n"
+            "C) I am not sure — I cannot verify this right now.\n\n"
+            "The answer changes everything: if the customer was not charged, there is no "
+            "valid chargeback and you should ask them to retry payment. "
+            "If they were charged, your recourse is against your payment processor — "
+            "but whether to fight or accept any chargeback depends on whether you "
+            "delivered the goods."
+        ) if is_settlement else ""
+        clarification_reason = CLARIFICATION_REASON_SETTLEMENT_AMBIGUITY if is_settlement else ""
         return {
             "is_settlement_issue": is_settlement,
-            "missing_info_question": (
-                "Before I can advise you, one critical question:\n\n"
-                "Was the customer's card actually charged? "
-                "Check your payment processor dashboard or statement.\n\n"
-                "A) Yes — the customer was charged, but the funds never reached my account.\n\n"
-                "B) No — the transaction appears to have failed at the bank or processor level. "
-                "The customer may not have been charged at all.\n\n"
-                "C) I am not sure — I cannot verify this right now.\n\n"
-                "The answer changes everything: if the customer was not charged, there is no "
-                "valid chargeback and you should ask them to retry payment. "
-                "If they were charged, your recourse is against your payment processor — "
-                "but whether to fight or accept any chargeback depends on whether you "
-                "delivered the goods."
-            ) if is_settlement else "",
-            "clarification_reason": CLARIFICATION_REASON_SETTLEMENT_AMBIGUITY if is_settlement else "",
+            "missing_info_question": missing_info_question,
+            "clarification_reason": clarification_reason,
+            # Phase 1 dual-write (structured-state refactor).
+            "decision_ctx": {"is_settlement_issue": is_settlement},
+            "conversation": {
+                "missing_info_question": missing_info_question,
+                "clarification_reason":  clarification_reason,
+            },
         }
 
     def _extract_code_node(self, state: ChargebackState) -> dict:
@@ -2341,6 +2579,15 @@ class DisputeAgent:
             "card_network":           card_network,
             "missing_info_question":  missing_info_question,
             "clarification_reason":   clarification_reason,
+            # Phase 1 dual-write (structured-state refactor).
+            "case_context": {
+                "reason_code": reason_code,
+                "network":     card_network,
+            },
+            "conversation": {
+                "missing_info_question": missing_info_question,
+                "clarification_reason":  clarification_reason,
+            },
         }
 
     def _detect_clarification_node(self, state: ChargebackState) -> dict:
@@ -2375,8 +2622,14 @@ class DisputeAgent:
         """
         context = state.get("additional_context", "")
         if not context and state.get("resolved_case_id"):
-            return {"merchant_is_asking_question": classifier.is_clarifying_question(state.get("user_query", ""))}
-        return {"merchant_is_asking_question": classifier.is_clarifying_question(context)}
+            is_question = classifier.is_clarifying_question(state.get("user_query", ""))
+        else:
+            is_question = classifier.is_clarifying_question(context)
+        return {
+            "merchant_is_asking_question": is_question,
+            # Phase 1 dual-write (structured-state refactor).
+            "conversation": {"merchant_is_asking_question": is_question},
+        }
 
     def _answer_clarification_node(self, state: ChargebackState) -> dict:
         """
@@ -2579,7 +2832,12 @@ class DisputeAgent:
             )),
         ])
         answer = _parse_json_safe(response.content, {"answer": ""}).get("answer", "").strip()
-        return {"missing_info_question": answer or latest}
+        result_answer = answer or latest
+        return {
+            "missing_info_question": result_answer,
+            # Phase 1 dual-write (structured-state refactor).
+            "conversation": {"missing_info_question": result_answer},
+        }
 
     def _extract_evidence_node(self, state: ChargebackState) -> dict:
         """
@@ -2636,21 +2894,32 @@ class DisputeAgent:
             # intercepts that case — so this only ever fires on a real,
             # already-anchored follow-up, never a fresh conversation.
             if not state.get("explicit_resolution_requested"):
+                scope_question = (
+                    "Want me to explain the evidence in more detail, "
+                    "or should I go ahead and draft the response now?"
+                )
                 return {
                     "evidence_present":      [],
                     "evidence_missing":      [],
                     "needs_more_info":       True,
-                    "missing_info_question": (
-                        "Want me to explain the evidence in more detail, "
-                        "or should I go ahead and draft the response now?"
-                    ),
+                    "missing_info_question": scope_question,
                     "clarification_reason":  CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE,
+                    # Phase 1 dual-write (structured-state refactor).
+                    "decision_ctx": {"evidence_present": [], "evidence_missing": []},
+                    "conversation": {
+                        "needs_more_info":       True,
+                        "missing_info_question": scope_question,
+                        "clarification_reason":  CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE,
+                    },
                 }
             return {
                 "evidence_present":      [],
                 "evidence_missing":      [],
                 "needs_more_info":       False,
                 "missing_info_question": "",
+                # Phase 1 dual-write (structured-state refactor).
+                "decision_ctx": {"evidence_present": [], "evidence_missing": []},
+                "conversation": {"needs_more_info": False, "missing_info_question": ""},
             }
 
         # A real bank-side blocker (pending entry / reconciliation mismatch)
@@ -2664,6 +2933,12 @@ class DisputeAgent:
                 "evidence_missing":      [],
                 "needs_more_info":       True,
                 "missing_info_question": no_decision_reason,
+                # Phase 1 dual-write (structured-state refactor).
+                "decision_ctx": {"evidence_present": [], "evidence_missing": []},
+                "conversation": {
+                    "needs_more_info":       True,
+                    "missing_info_question": no_decision_reason,
+                },
             }
 
         docs_text    = "\n\n".join(state.get("retrieved_docs", [])[:2])
@@ -2834,12 +3109,23 @@ class DisputeAgent:
                 "Please provide: " + ", ".join(humanize_evidence(evidence_missing)) + "."
             )
 
+        evidence_clarification_reason = CLARIFICATION_REASON_MISSING_EVIDENCE if needs_more_info else ""
         return {
             "evidence_present":      evidence_present,
             "evidence_missing":      evidence_missing,
             "needs_more_info":       needs_more_info,
             "missing_info_question": missing_info_question,
-            "clarification_reason":  CLARIFICATION_REASON_MISSING_EVIDENCE if needs_more_info else "",
+            "clarification_reason":  evidence_clarification_reason,
+            # Phase 1 dual-write (structured-state refactor).
+            "decision_ctx": {
+                "evidence_present": evidence_present,
+                "evidence_missing": evidence_missing,
+            },
+            "conversation": {
+                "needs_more_info":       needs_more_info,
+                "missing_info_question": missing_info_question,
+                "clarification_reason":  evidence_clarification_reason,
+            },
         }
 
     def _ask_user_node(self, state: ChargebackState) -> dict:
@@ -2911,7 +3197,12 @@ class DisputeAgent:
             and not state.get("merchant_is_asking_question")
             and state.get("clarification_reason") != CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE
         ):
-            return {"final_answer": self._CLARIFICATION_LIMIT_MESSAGE, "needs_more_info": False}
+            return {
+                "final_answer": self._CLARIFICATION_LIMIT_MESSAGE,
+                "needs_more_info": False,
+                # Phase 1 dual-write (structured-state refactor).
+                "conversation": {"needs_more_info": False},
+            }
 
         # `or`, not `.get(key, default)`: the fallback must also cover an
         # EMPTY string, not just a missing key. missing_info_question is
@@ -2941,9 +3232,19 @@ class DisputeAgent:
         # returns needs_more_info=False itself whenever ledger_decision is
         # set, so this can't misfire on a genuine evidence-gathering ask.
         if state.get("merchant_is_asking_question") and state.get("ledger_decision"):
-            return {"final_answer": question, "needs_more_info": False}
+            return {
+                "final_answer": question,
+                "needs_more_info": False,
+                # Phase 1 dual-write (structured-state refactor).
+                "conversation": {"needs_more_info": False},
+            }
 
-        return {"final_answer": question, "needs_more_info": True}
+        return {
+            "final_answer": question,
+            "needs_more_info": True,
+            # Phase 1 dual-write (structured-state refactor).
+            "conversation": {"needs_more_info": True},
+        }
 
     def _answer_question_node(self, state: ChargebackState) -> dict:
         """
@@ -3019,6 +3320,12 @@ class DisputeAgent:
                     "confidence_score":    0,
                     "is_grounded":         True,
                     "groundedness_issues": "",
+                    # Phase 1 dual-write (structured-state refactor).
+                    "decision_ctx": {
+                        "confidence_score":    0,
+                        "is_grounded":         True,
+                        "groundedness_issues": "",
+                    },
                 }
             intent = self._resolve_data_lookup_intent(merchant_id, query)
 
@@ -3057,6 +3364,13 @@ class DisputeAgent:
                         "is_grounded":         True,
                         "groundedness_issues": "",
                         "needs_more_info":     False,
+                        # Phase 1 dual-write (structured-state refactor).
+                        "decision_ctx": {
+                            "confidence_score":    8,
+                            "is_grounded":         True,
+                            "groundedness_issues": "",
+                        },
+                        "conversation": {"needs_more_info": False},
                     }
                 # Urgency summary + per-case tag, requested live: a flat
                 # list gave no sense of which cases actually need
@@ -3132,6 +3446,16 @@ class DisputeAgent:
                     # clarification_reason must be non-empty for chat.html's
                     # banner logic to still show it as one.
                     "clarification_reason": CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
+                    # Phase 1 dual-write (structured-state refactor).
+                    "decision_ctx": {
+                        "confidence_score":    8,
+                        "is_grounded":         True,
+                        "groundedness_issues": "",
+                    },
+                    "conversation": {
+                        "needs_more_info":      True,
+                        "clarification_reason": CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
+                    },
                 }
 
             if intent and intent["type"] == "aggregate":
@@ -3145,6 +3469,12 @@ class DisputeAgent:
                     "confidence_score":    8,
                     "is_grounded":         True,
                     "groundedness_issues": "",
+                    # Phase 1 dual-write (structured-state refactor).
+                    "decision_ctx": {
+                        "confidence_score":    8,
+                        "is_grounded":         True,
+                        "groundedness_issues": "",
+                    },
                 }
 
             # looks_like_data_lookup() fired (loose pre-filter) but the
@@ -3417,6 +3747,12 @@ class DisputeAgent:
                 "confidence_score":    8,
                 "is_grounded":         True,
                 "groundedness_issues": "",
+                # Phase 1 dual-write (structured-state refactor).
+                "decision_ctx": {
+                    "confidence_score":    8,
+                    "is_grounded":         True,
+                    "groundedness_issues": "",
+                },
             }
 
         # Build the docs_text to pass to the LLM.
@@ -3487,6 +3823,12 @@ class DisputeAgent:
                 "confidence_score":    0,
                 "is_grounded":         True,
                 "groundedness_issues": "",
+                # Phase 1 dual-write (structured-state refactor).
+                "decision_ctx": {
+                    "confidence_score":    0,
+                    "is_grounded":         True,
+                    "groundedness_issues": "",
+                },
             }
 
         if stage_intent:
@@ -3708,6 +4050,12 @@ class DisputeAgent:
             "confidence_score":    8,
             "is_grounded":         True,
             "groundedness_issues": "",
+            # Phase 1 dual-write (structured-state refactor).
+            "decision_ctx": {
+                "confidence_score":    8,
+                "is_grounded":         True,
+                "groundedness_issues": "",
+            },
         }
 
     def _decide_node(self, state: ChargebackState) -> dict:
@@ -3731,10 +4079,17 @@ class DisputeAgent:
         # "refund," but the ledger may have already confirmed "fight").
         ledger_decision = state.get("ledger_decision", "")
         if ledger_decision:
+            ledger_decision_reason = state.get("ledger_decision_reason", "")
             return {
                 "decision":        ledger_decision,
-                "decision_reason": state.get("ledger_decision_reason", ""),
+                "decision_reason": ledger_decision_reason,
                 "decision_source": "ledger",
+                # Phase 1 dual-write (structured-state refactor).
+                "decision_ctx": {
+                    "decision":        ledger_decision,
+                    "decision_reason": ledger_decision_reason,
+                    "decision_source": "ledger",
+                },
             }
 
         # Settlement scenario — merchant answered the "was customer charged?" question.
@@ -3750,6 +4105,11 @@ class DisputeAgent:
                 return {
                     "decision":        "",
                     "decision_reason": "Transaction failed — customer was not charged",
+                    # Phase 1 dual-write (structured-state refactor).
+                    "decision_ctx": {
+                        "decision":        "",
+                        "decision_reason": "Transaction failed — customer was not charged",
+                    },
                     "final_answer": (
                         "Since the customer was not actually charged, there is no valid chargeback.\n\n"
                         "What to do:\n\n"
@@ -3767,6 +4127,11 @@ class DisputeAgent:
                 return {
                     "decision":        "",
                     "decision_reason": "Settlement failure — customer was charged but merchant not settled",
+                    # Phase 1 dual-write (structured-state refactor).
+                    "decision_ctx": {
+                        "decision":        "",
+                        "decision_reason": "Settlement failure — customer was charged but merchant not settled",
+                    },
                     "final_answer": (
                         "The customer was charged but the funds never reached you — "
                         "this is a settlement failure by your payment processor.\n\n"
@@ -3791,6 +4156,11 @@ class DisputeAgent:
                 return {
                     "decision":        "",
                     "decision_reason": "Settlement status unclear",
+                    # Phase 1 dual-write (structured-state refactor).
+                    "decision_ctx": {
+                        "decision":        "",
+                        "decision_reason": "Settlement status unclear",
+                    },
                     "final_answer": (
                         "I need one clear answer: was the customer's card actually charged?\n\n"
                         "Log into your payment processor dashboard and look up the transaction. "
@@ -3812,7 +4182,17 @@ class DisputeAgent:
         )
         if rule_result is not None:
             decision, decision_reason = rule_result
-            return {"decision": decision, "decision_reason": decision_reason, "decision_source": "rules"}
+            return {
+                "decision": decision,
+                "decision_reason": decision_reason,
+                "decision_source": "rules",
+                # Phase 1 dual-write (structured-state refactor).
+                "decision_ctx": {
+                    "decision": decision,
+                    "decision_reason": decision_reason,
+                    "decision_source": "rules",
+                },
+            }
 
         docs_text = "\n\n".join(state.get("retrieved_docs", [])[:1])
 
@@ -3870,6 +4250,12 @@ class DisputeAgent:
             "decision":        decision,
             "decision_reason": decision_reason,
             "decision_source": "llm",
+            # Phase 1 dual-write (structured-state refactor).
+            "decision_ctx": {
+                "decision":        decision,
+                "decision_reason": decision_reason,
+                "decision_source": "llm",
+            },
         }
 
     def _generate_node(self, state: ChargebackState) -> dict:
@@ -4138,8 +4524,7 @@ class DisputeAgent:
 
         Reads:  draft_response, reason_code, card_network, evidence_present,
                 retrieved_docs, resolved_case_id, resolved_utr
-        Writes: final_answer, reflection_feedback, confidence_score,
-                is_grounded, groundedness_issues
+        Writes: final_answer, confidence_score, is_grounded, groundedness_issues
         """
         draft        = state.get("draft_response", "")
         reason_code  = (state.get("reason_code",  "") or "").strip()
@@ -4247,24 +4632,18 @@ class DisputeAgent:
         # Length cap — applied to the (possibly case-ID-corrected) draft
         final = draft[:2997] + "…" if len(draft) > 3000 else draft
 
-        feedback = (
-            "Grounded — all cited codes found in docs/rule table."
-            if is_grounded else
-            f"Groundedness issues detected: {groundedness_issues}"
-        )
-        if id_corrected:
-            feedback += (
-                f" Corrected a mismatched case_id/UTR in the draft to the "
-                f"confirmed value (case {resolved_case_id or '(n/a)'}, "
-                f"UTR {resolved_utr or '(n/a)'})."
-            )
-
         return {
-            "reflection_feedback": feedback,
             "final_answer":        final,
             "confidence_score":    confidence,
             "is_grounded":         is_grounded,
             "groundedness_issues": groundedness_issues,
+            # Phase 1 dual-write (structured-state refactor) — parallel to
+            # the flat fields above, nothing reads this yet.
+            "decision_ctx": {
+                "confidence_score":    confidence,
+                "is_grounded":         is_grounded,
+                "groundedness_issues": groundedness_issues,
+            },
         }
 
     # ── Routing ───────────────────────────────────────────────────────────
@@ -4508,6 +4887,12 @@ class DisputeAgent:
             "additional_context":    additional_context,
             "anchored_case_id":      anchored_case_id,
             "merchant_id":           merchant_id,
+            # Phase 1 of the structured-state refactor — dual-written
+            # alongside the flat fields below by every node that writes
+            # them; nothing reads from these yet.
+            "case_context":          {},
+            "conversation":          {},
+            "decision_ctx":          {},
             "is_valid_query":        False,
             "query_type":            "",
             "reason_code":           "",
@@ -4542,7 +4927,6 @@ class DisputeAgent:
             "confidence_score":      0,
             "is_grounded":           True,
             "groundedness_issues":   "",
-            "reflection_feedback":   "",
             "final_answer":          "",
         }
 
