@@ -214,14 +214,15 @@ Every LangGraph workflow has one **state** shape — a dictionary-like object th
 class ChargebackState(TypedDict):
     user_query:            str          # the merchant's original message
     additional_context:    str          # their reply to a follow-up question
-    reason_code:           str          # e.g. "13.1" — filled in partway through
-    card_network:          str          # e.g. "Visa"
-    evidence_present:      List[str]    # filled in partway through
-    decision:               str         # "fight" or "refund" — filled in partway through
     final_answer:            str        # the finished output
-    # ...and more — see the real file for the full ~40-field shape, including
-    # three Annotated[dict, _merge_dict] fields (case_context, conversation,
-    # decision_ctx) added as part of an in-progress refactor — see §2.8.
+    # Structured, reducer-backed groups (see §2.8) — reason_code/card_network
+    # live in case_context, evidence_present/decision in decision_ctx, etc.
+    # Nothing in this project keeps those as separate top-level flat fields
+    # any more — see the real file for the full ~20-field shape.
+    case_context:          Annotated[CaseContext, _merge_dict]
+    conversation:          Annotated[ConversationState, _merge_dict]
+    decision_ctx:          Annotated[DecisionContext, _merge_dict]
+    # ...and a few more (is_valid_query, retrieved_docs, draft_response, ...)
 ```
 
 Think of it as a form that starts almost entirely blank and gets filled in, field by field, as it passes through the graph — never all at once.
@@ -235,7 +236,7 @@ A **node** is just a Python function (or, here, a method) that takes the current
 def _detect_settlement_node(self, state: ChargebackState) -> dict:
     query = state["user_query"]
     is_settlement = classifier.detect_settlement_issue(query)   # plain regex — no LLM
-    return {"is_settlement_issue": is_settlement}
+    return {"decision_ctx": {"is_settlement_issue": is_settlement}}
 ```
 
 Notice this particular node doesn't call an LLM at all — it just runs a regex check from `classifier.py` and hands back one field. Compare that to `_extract_evidence_node` from Part 1, which *does* call the LLM. Both are equally valid nodes; LangGraph doesn't care what happens inside one, only that it's a function taking state and returning a partial update.
@@ -330,7 +331,7 @@ Two honest takeaways: (1) a library offering a feature doesn't mean a project ac
 
 ### 2.8 Custom reducers — how a nested field can merge instead of overwrite
 
-Every field discussed in §2.2 and §2.7 uses LangGraph's *default* merge rule: whatever a node returns for a key replaces that key's old value outright. That's fine for scalars (`reason_code`, `decision`) — there's only one right answer for "what is the reason code now," so overwrite is correct. It breaks down the moment a single key holds a nested dict that different nodes each want to contribute one piece of: if `_extract_code_node` returns `{"case_context": {"reason_code": "U002"}}` and a later node returns `{"case_context": {"utr": "..."}}`, default overwrite means the second call wipes the first node's key entirely — the state ends up with only `utr`, not both.
+Every top-level scalar key (`draft_response`, `final_answer`, `is_valid_query`, ...) uses LangGraph's *default* merge rule: whatever a node returns for a key replaces that key's old value outright. That's fine for scalars — there's only one right answer for "what is the draft response now," so overwrite is correct. It breaks down the moment a single key holds a nested dict that different nodes each want to contribute one piece of: if `_extract_code_node` returns `{"case_context": {"reason_code": "U002"}}` and a later node returns `{"case_context": {"utr": "..."}}`, default overwrite means the second call wipes the first node's key entirely — the state ends up with only `utr`, not both.
 
 LangGraph's fix is a **custom reducer**: instead of `case_context: CaseContext`, you write `case_context: Annotated[CaseContext, _merge_dict]`, where `_merge_dict(old, new)` is a plain function you supply:
 
@@ -345,7 +346,7 @@ def _merge_dict(old: dict, new: dict) -> dict:
 
 `Annotated[CaseContext, _merge_dict]` tells LangGraph "when two updates target this key, don't overwrite — call `_merge_dict(old_value, new_value)` and store the result instead." With that in place, the two partial updates above merge into `{"reason_code": "U002", "utr": "..."}`, and — the harder question, since this project's checkpointer discussion in §2.7 already found one merge failure mode — the same reducer applies when a *new* `.invoke()` call's input lands on top of a value already restored from a checkpoint for that `thread_id`, not just between two nodes in one run. Both cases were verified empirically with a standalone spike script (a trivial two-node graph, then a real `SqliteSaver` checkpoint round-trip) before any real node was touched, specifically because §2.7 already documented one related merge assumption turning out to be wrong for this project's flat-dict design — the lesson being that "the library supports X" and "X behaves the way this project's call pattern needs" are different claims worth checking separately.
 
-`chargeback_agent.py` now has three such fields — `case_context`, `conversation`, `decision_ctx` — added as Phase 1 of an in-progress refactor consolidating ~20 of `ChargebackState`'s ~40 flat fields into structured, reducer-backed groups. As of this phase, every node *dual-writes*: the original flat field is still returned exactly as before, alongside the same value nested under one of the three dicts (search the file for `"# Phase 1 dual-write"` to see every site). Nothing reads the nested fields yet, so this is additive infrastructure, not a behavior change — the next phase migrates node *reads* over to the nested shape, one node at a time, dropping the flat field only once nothing depends on it anymore.
+`chargeback_agent.py` now has three such fields — `case_context`, `conversation`, `decision_ctx` — from an in-progress refactor consolidating ~20 of `ChargebackState`'s original ~40 flat fields into structured, reducer-backed groups. Phase 1 dual-wrote (flat field and nested dict both set, nothing reading the nested copy yet); Phase 2 finished the migration — every node's *reads* now go through the nested dicts (`case_ctx.get("reason_code")`, `decision_ctx.get("evidence_present")`, etc.), and the redundant flat fields (`reason_code`, `decision`, `evidence_present`, `needs_more_info`, and ~16 others) were deleted from `ChargebackState` entirely, not just left unused — verified by grepping the whole file for `.get("<field>"` on each of the ~20 names and finding zero remaining flat reads. `run()`'s post-`invoke()` extraction and its `initial_state` seed were updated the same way. A handful of fields were deliberately NOT folded in — `case_intro_action`/`reason`/`source` (a real semantic difference from `decision_ctx`, scoped to a possible later phase) and `is_valid_query`/`retrieved_docs`/`retrieval_status`/`retrieval_issues`/`draft_response`/`iteration`/`final_answer` (never part of the three-bucket split to begin with).
 
 ## Part 3: Walking through one real request
 
@@ -357,16 +358,16 @@ Let's trace an actual message end-to-end: **"Mastercard chargeback — customer 
 2. validate_node runs:
    - length check, prompt-injection check — both pass
    - classifier.classify_query_type(...) → "dispute" (not just a policy question)
-   - returns {"is_valid_query": True, "query_type": "dispute", ...}
+   - returns {"is_valid_query": True, "conversation": {"query_type": "dispute"}, ...}
 
-3. _route_after_validate looks at query_type="dispute" → returns "classify"
-   → LangGraph runs the node registered under "planner"
+3. _route_after_validate looks at conversation.query_type=="dispute" → returns
+   "classify" → LangGraph runs the node registered under "planner"
 
 4. planner_node runs:
    - classifier.extract_network_and_code(...) → ("Mastercard", "Unknown")
      (no explicit code number in the text, so code stays Unknown for now)
    - runs a Qdrant similarity search for relevant Mastercard fraud policy docs
-   - returns {"card_network": "Mastercard", "reason_code": "Unknown",
+   - returns {"case_context": {"network": "Mastercard", "reason_code": "Unknown"},
               "retrieved_docs": [...]}
 
 5. planner → detect_settlement (plain edge, always runs next)
@@ -374,19 +375,22 @@ Let's trace an actual message end-to-end: **"Mastercard chargeback — customer 
 6. detect_settlement_node runs:
    - classifier.detect_settlement_issue(...) → False (this is a real dispute,
      not a missing-payment complaint)
-   - returns {"is_settlement_issue": False}
+   - returns {"decision_ctx": {"is_settlement_issue": False}}
 
 7. _route_after_detect_settlement: not a settlement issue → "extract_code"
 
 8. extract_code_node runs:
    - reason_code is still "Unknown", additional_context is still empty
    - sets missing_info_question to "please share the reason code..."
-   - returns {"reason_code": "Unknown", "missing_info_question": "..."}
+   - returns {"case_context": {"reason_code": "Unknown"},
+              "conversation": {"missing_info_question": "..."}}
 
-9. _route_after_extract_code: reason_code=="Unknown" and no context → "ask_user"
+9. _route_after_extract_code: case_context.reason_code=="Unknown" and no
+   context → "ask_user"
 
 10. ask_user_node runs:
-    - returns {"final_answer": "I still need one key detail...", "needs_more_info": True}
+    - returns {"final_answer": "I still need one key detail...",
+               "conversation": {"needs_more_info": True}}
 
 11. edge to END — this run stops here.
 ```
@@ -414,7 +418,7 @@ Turn 1 — "show me my open chargebacks"
      - ToolMessage(content="Found 7 matching case(s).", tool_call_id="call_1") appended
      - returns {"type": "list", "reason_code": ""}
 6. _answer_question_node deterministically renders the 7 cases (soonest
-   deadline first) and asks which one — {"needs_more_info": True, ...}
+   deadline first) and asks which one — {"conversation": {"needs_more_info": True}, ...}
 7. edge to END. api_server.py returns final_answer + needs_more_info=True.
 
 Turn 2 — chat.html resends {query: "show me my open chargebacks",
@@ -435,8 +439,9 @@ Turn 2 — chat.html resends {query: "show me my open chargebacks",
    prose synthesis with no more tool_calls.
 3. _validate_node returns EARLY (mirrors the length-check/prompt-
    injection guards from Part 2's step 2) with final_answer already set,
-   no query_type — so _route_after_validate sees query_type="" (the
-   TypedDict default), falls through its if/if chain, and returns "end".
+   no `conversation` key at all — so _route_after_validate's
+   `state.get("conversation", {}).get("query_type", "invalid")` falls
+   back to "invalid", falls through its if/if chain, and returns "end".
 4. edge to END. The merchant sees a case summary + reason-code
    explanation + evidence ask, in one turn — no separate trip through
    planner_node/extract_evidence_node needed for this landing turn.
@@ -464,7 +469,10 @@ LangChain and LangGraph offer a lot more than what's used here. This section is 
 **Present as infrastructure, but not actually exercised:**
 
 - **Checkpointing** — a real `SqliteSaver` is wired up and every response carries a `thread_id` (§2.7), but `chat.html` never resends that `thread_id`, so nothing ever resumes from a saved checkpoint. Verified by grepping `chat.html` for `thread_id` — zero hits. `thread_id`'s actual job today is security scoping, not resumption.
-- **Custom reducers** — `ChargebackState` now has three `Annotated[dict, _merge_dict]` fields (`case_context`, `conversation`, `decision_ctx`), with `_merge_dict` doing a plain shallow `{**old, **new}` merge instead of LangGraph's default whole-key overwrite — real, and confirmed (via a standalone spike script, then the full node migration) to correctly merge partial nested-dict updates from different nodes in one run. But every node currently *dual-writes*: it still returns the original flat field (`reason_code`, `decision`, ...) AND the same value nested under one of these three dicts. Nothing reads the nested dicts yet — they're populated but functionally inert, a deliberate first phase of a larger refactor (see the file's own "Phase 1 dual-write" comments) rather than a live behavior change.
+
+**Now a real, load-bearing part of the graph (not just infrastructure):**
+
+- **Custom reducers** — `ChargebackState` has three `Annotated[dict, _merge_dict]` fields (`case_context`, `conversation`, `decision_ctx`), with `_merge_dict` doing a plain shallow `{**old, **new}` merge instead of LangGraph's default whole-key overwrite. Confirmed via a standalone spike script (Phase 0), then exercised for real once every node's reads were migrated onto these dicts (Phase 2) and the old flat fields deleted — see §2.8. Every fight/refund decision, evidence tag, and clarification round in the graph now actually flows through this reducer, not a demo of it sitting inert.
 
 **Approximated with project-specific code, not the LangGraph-native version:**
 
