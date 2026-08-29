@@ -1218,9 +1218,26 @@ class DisputeAgent:
                     # confidence_score=0, which reads as a low-confidence
                     # answer in chat.html's UI despite this being a
                     # grounded, real DB+KB-backed response.
+                    #
+                    # user_query is rewritten to reference the resolved
+                    # case here too, matching the FAILURE branch just
+                    # below which already does the same — for internal
+                    # state consistency (this is what downstream nodes see
+                    # if this dict's fields are ever read again within the
+                    # same graph run). NOTE: this does NOT by itself fix
+                    # cross-turn continuity — confirmed live that
+                    # api_server.py never returns user_query in the HTTP
+                    # response at all, and chat.html's pendingQuery is set
+                    # once from the client's own first message and never
+                    # updated from any server response. The actual fix for
+                    # "what about the other one?" re-showing the full list
+                    # is classifier.looks_like_relative_case_reference(),
+                    # wired in below — it asks a clarifying question
+                    # instead of relying on any state this project's
+                    # stateless-per-call client never round-trips.
                     return {
                         "is_valid_query": True,
-                        "user_query":     masked_query,
+                        "user_query":     f"Help me with case {resolved}",
                         "final_answer":   intro["final_answer"],
                         "reason_code":    intro["reason_code"],
                         "card_network":   intro["card_network"],
@@ -1260,6 +1277,30 @@ class DisputeAgent:
                     "confidence_score": 8,
                     "is_grounded":      True,
                     "groundedness_issues": "",
+                }
+            elif classifier.looks_like_relative_case_reference(raw_context_preview):
+                # "What about the other one?" — refers to a specific case
+                # RELATIVE to whatever was just discussed, but names no
+                # ordinal/number for detect_case_selection() to resolve.
+                # Confirmed live: this used to fall straight through to
+                # the "abandon and promote" fallback below, which treated
+                # the bare text as an unrelated new topic and — since
+                # chat.html never round-trips which specific case a PRIOR
+                # turn resolved to (nothing here can know "the second
+                # one" from two turns ago was NPCI...M002008) — ended up
+                # just re-showing the entire case list from scratch, with
+                # no acknowledgment the merchant had already picked one.
+                # Rather than guess which case "other" means (this
+                # project's own state genuinely doesn't have that answer
+                # to give), ask — the same "don't silently guess" principle
+                # _uncertain() exists for elsewhere in this file.
+                return {
+                    "is_valid_query": True,
+                    "user_query":     masked_query,
+                    **self._uncertain(
+                        "Do you mean a different case from the list I just showed? "
+                        "Tell me which one (e.g. \"the first one\", \"#2\", or the case ID)."
+                    ),
                 }
             elif not classifier.is_junk_reply(raw_context_preview, query=masked_query):
                 # Confirmed live: a genuine new question typed here ("what

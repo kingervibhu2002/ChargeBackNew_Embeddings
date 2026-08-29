@@ -1101,3 +1101,46 @@ def is_out_of_range_case_reference(text: str, shown_cases: List[Dict]) -> bool:
             return True
 
     return False
+
+
+_RELATIVE_CASE_REFERENCE_RE = re.compile(
+    r"\b(the other one|another one|the other case|the other chargeback|"
+    r"a different one|the previous one)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_relative_case_reference(text: str) -> bool:
+    """
+    True if the latest turn in `text` refers to "some other case" relative
+    to whatever was just discussed ("what about the other one?", "and the
+    previous one?") WITHOUT naming a resolvable ordinal/number/case ID —
+    detect_case_selection() correctly returns None for this (it's not an
+    ordinal), but None here means something different from "not a
+    selection attempt at all": the merchant IS trying to reference a
+    specific case, just relative to conversational context this project's
+    stateless-per-call design (chat.html never round-trips which case a
+    PRIOR turn resolved to) has no way to reconstruct reliably.
+
+    Confirmed live: after resolving "the second one" to a specific case,
+    "What about the other one?" on the very next turn re-showed the
+    entire case list from scratch — because nothing tracks that a
+    specific case was just discussed, "the other one" has no ordinal for
+    detect_case_selection() to match, and the existing "abandon and
+    promote" fallback just treated the bare text as an unrelated new
+    topic. Used by _validate_node to ask a clarifying question instead of
+    guessing or restarting from the full list — same reasoning as
+    is_out_of_range_case_reference() one level up: a specific class of
+    "not a resolvable selection" deserves different handling than a
+    genuinely unrelated follow-up.
+
+    Args:
+        text: The merchant's reply — same latest-segment convention as
+              detect_case_selection().
+
+    Returns:
+        True if the latest turn names a relative "other case" reference.
+    """
+    segments = [s.strip() for s in text.split('\n\n') if s.strip()]
+    latest = segments[-1] if segments else text
+    return bool(_RELATIVE_CASE_REFERENCE_RE.search(latest))

@@ -200,11 +200,19 @@ validate_node, when additional_context is present:
       and knowledge base — then validate_node returns EARLY with the
       full answer, skipping planner_node/decide_node/generate_node
       entirely for this turn
-    → if no: promote the merchant's latest reply to be this turn's
-      query, so it gets classified and answered fresh — using only the
-      LATEST reply, never the whole accumulated conversation, so an
-      earlier turn's listing request can't bleed into and misroute a
-      later, unrelated question
+    → if no: two narrower checks run first, each catching a reply that
+      LOOKS unresolved but isn't actually a new topic — an out-of-range
+      ordinal ("what about the tenth one?" with only 7 shown) gets told
+      the real count instead of a hallucinated answer
+      (is_out_of_range_case_reference()), and a relative reference with
+      no ordinal at all ("what about the other one?") gets a clarifying
+      question instead of a silent guess or a from-scratch re-list
+      (looks_like_relative_case_reference()) — only then does the
+      merchant's latest reply get promoted to be this turn's query, so
+      it gets classified and answered fresh — using only the LATEST
+      reply, never the whole accumulated conversation, so an earlier
+      turn's listing request can't bleed into and misroute a later,
+      unrelated question
 ```
 
 Full explanation of the tool-calling mechanics (`@tool`, `.bind_tools()`, `AIMessage.tool_calls`, `ToolMessage`, and why some of this needs multiple rounds) is in [`LANGCHAIN_LANGGRAPH_GUIDE.md`'s tool-calling section](LANGCHAIN_LANGGRAPH_GUIDE.md#16-tool-calling--letting-the-model-ask-for-real-data), including a full second request trace through this exact path.
