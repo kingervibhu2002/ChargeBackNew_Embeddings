@@ -752,6 +752,30 @@ class DisputeAgent:
             answer = result.get("answer") or result.get("error") or "No matching data found."
             return {"type": "aggregate", "answer": answer}
 
+        # Same deterministic short-circuit, same reasoning again, for a
+        # direct "show me/tell me about my own cases" request. Confirmed
+        # live via a debug trace on ai_msg.tool_calls: for "Tell me about
+        # my chargebacks." the LLM tool-call returned ZERO tool calls at
+        # all — not a wrong tool, no tool — so this fell all the way
+        # through to a plain knowledge-base search and answered with a
+        # generic, US-centric explanation of what a chargeback is in
+        # general (MATCH list, $15-$100 fees, none of it grounded in the
+        # merchant's real data or even this platform's actual RuPay/UPI
+        # domain), despite the tool's own docstring saying almost exactly
+        # this phrasing should call it ("use this when the merchant wants
+        # to SEE or SELECT a case"). Reuses looks_like_new_request() (built
+        # earlier this session for a different purpose — recognizing a
+        # fresh imperative ask on a case-anchored conversation) since it
+        # already correctly distinguishes "tell me about/show me my X" (a
+        # listing request) from "how many/how much" aggregate phrasing —
+        # confirmed no overlap with either aggregate check above.
+        if classifier.looks_like_new_request(query):
+            return {
+                "type": "list",
+                "reason_code": "",
+                "active_deadline_only": classifier.looks_like_active_deadline_filter(query),
+            }
+
         messages = [
             SystemMessage(content=(
                 "You are a chargeback assistant for a merchant. Decide "
