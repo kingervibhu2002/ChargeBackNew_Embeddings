@@ -811,6 +811,43 @@ def looks_like_aggregate_question(query: str) -> bool:
     return bool(_AGGREGATE_QUESTION_RE.search(query))
 
 
+# Deterministic, not left to the LLM tool-call — matches this project's
+# general pattern (see looks_like_aggregate_question above) of pulling a
+# reliably keyword-detectable filter out of the LLM's judgment entirely
+# rather than trusting it to notice every time. Requires BOTH a deadline
+# word AND a temporal-status word somewhere in the query, not either
+# alone — "deadline" alone appears in plenty of questions that aren't
+# asking to exclude expired cases (e.g. "what's the deadline for
+# NPCI...").
+_DEADLINE_WORD_RE = re.compile(r"\b(deadline|due date)\b", re.IGNORECASE)
+_DEADLINE_STATUS_WORD_RE = re.compile(
+    r"\b(passed|expired|remaining|left|still|not over|not due|not passed|active)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_active_deadline_filter(query: str) -> bool:
+    """
+    True if `query` is asking to list/filter cases to ones whose response
+    deadline hasn't passed yet ("deadline is also due not passed,"
+    "still has time left," "deadline not expired") — as opposed to a
+    plain listing request with no deadline qualifier at all.
+
+    _filtered_open_cases() (chargeback_agent.py) only ever filters by
+    status='Open' — status='Open' does NOT imply the deadline hasn't
+    passed in this schema (that's a separate field, and this demo data
+    doesn't guarantee the two stay in sync). Confirmed live: "which all
+    chargeback cases are currently open and deadline is also due not
+    passed?" returned every Open case regardless of whether its deadline
+    had already passed, silently dropping the second half of the
+    question — text_to_sql.py's own NL->SQL path already handles this
+    correctly (its rule 7 for "due in N days"/"expiring soon" phrasing),
+    but the deterministic list_merchant_cases path chargeback_agent.py
+    uses for case-selection continuity had no equivalent at all.
+    """
+    return bool(_DEADLINE_WORD_RE.search(query) and _DEADLINE_STATUS_WORD_RE.search(query))
+
+
 # Ordinal words a merchant might use to refer back to one of the cases
 # just listed, mapped to a 0-based index into that list (in display order,
 # i.e. the same order list_open_chargebacks() already returns — soonest

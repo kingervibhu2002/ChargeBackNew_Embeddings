@@ -460,7 +460,9 @@ class DisputeAgent:
             pass
         return context
 
-    def _filtered_open_cases(self, merchant_id: str, reason_code: str = "") -> list:
+    def _filtered_open_cases(
+        self, merchant_id: str, reason_code: str = "", active_deadline_only: bool = False,
+    ) -> list:
         """
         The open-chargebacks list a case-list query should show/resolve
         against — shared by _answer_question_node (rendering the list) and
@@ -481,15 +483,30 @@ class DisputeAgent:
             merchant_id: Server-resolved merchant scope.
             reason_code: An explicit code to filter to (e.g. "U002"), or
                         "" for no filter.
+            active_deadline_only: When True, also drop any case whose
+                        response_deadline has already passed. status='Open'
+                        does NOT imply this in this schema — confirmed live
+                        a merchant asking for open cases "with deadline not
+                        passed" got every Open case regardless, including
+                        several with a response_deadline weeks in the
+                        past. Decided by classifier.
+                        looks_like_active_deadline_filter() upstream, same
+                        pattern as reason_code above — deterministic, not
+                        an LLM tool-call judgment.
 
         Returns:
             list[dict]: rows from merchant_db.list_open_chargebacks(),
-                       filtered to reason_code if given.
+                       filtered to reason_code and/or an active deadline
+                       if given.
         """
+        from datetime import date
         from merchant_db import list_open_chargebacks
         cases = list_open_chargebacks(merchant_id, limit=100)
         if reason_code:
             cases = [c for c in cases if c["reason_code"] == reason_code]
+        if active_deadline_only:
+            today = date.today().isoformat()
+            cases = [c for c in cases if c["response_deadline"] >= today]
         return cases
 
     def _resolve_data_lookup_intent(self, merchant_id: str, query: str) -> Optional[dict]:
@@ -574,12 +591,17 @@ class DisputeAgent:
 
         if tool_call["name"] == "list_merchant_cases":
             reason_code = (tool_call["args"].get("reason_code") or "").strip().upper()
-            cases = self._filtered_open_cases(merchant_id, reason_code)
+            active_deadline_only = classifier.looks_like_active_deadline_filter(query)
+            cases = self._filtered_open_cases(merchant_id, reason_code, active_deadline_only)
             messages.append(ToolMessage(
                 content=f"Found {len(cases)} matching case(s).",
                 tool_call_id=tool_call["id"],
             ))
-            return {"type": "list", "reason_code": reason_code}
+            return {
+                "type": "list",
+                "reason_code": reason_code,
+                "active_deadline_only": active_deadline_only,
+            }
 
         if tool_call["name"] == "query_chargeback_data":
             from text_to_sql import query_chargebacks
@@ -919,7 +941,10 @@ class DisputeAgent:
                 if intent["type"] == "list":
                     list_intent = intent
         if list_intent is not None:
-            shown = self._filtered_open_cases(merchant_id_preview, list_intent["reason_code"])
+            shown = self._filtered_open_cases(
+                merchant_id_preview, list_intent["reason_code"],
+                list_intent.get("active_deadline_only", False),
+            )
             resolved = classifier.detect_case_selection(raw_context_preview, shown)
             if resolved:
                 # Rich case-intro: a real DB lookup + a real knowledge-base
@@ -1982,7 +2007,9 @@ class DisputeAgent:
                 # additional_context for any needs_more_info=True response,
                 # no frontend changes needed.
                 reason_code = intent["reason_code"]
-                cases = self._filtered_open_cases(merchant_id, reason_code)
+                cases = self._filtered_open_cases(
+                    merchant_id, reason_code, intent.get("active_deadline_only", False),
+                )
                 case_label = f"open {reason_code} case(s)" if reason_code else "open chargeback case(s)"
                 if not cases:
                     no_match = (
