@@ -75,6 +75,35 @@ def refers_to_current_case(text: str) -> bool:
     return bool(_SAME_CASE_DEMONSTRATIVE_RE.search(text))
 
 
+_NEW_REQUEST_STARTER_RE = re.compile(
+    r"^\s*(help me( with| to)?|please help|can you help|i need help|"
+    r"show me|tell me|list |give me|explain( to me)?)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_new_request(text: str) -> bool:
+    """
+    True if `text` opens with an imperative request pattern ("help me
+    with...", "show me...", "list...") rather than reading as a direct
+    answer to a question. Confirmed live: "help me with all open
+    questions" — typed as a follow-up on an already-case-anchored
+    conversation, matching none of looks_like_data_lookup() (no "case"/
+    "chargeback"/"dispute" keyword), refers_to_current_case(), or an
+    escalation phrase — fell through every existing check and got
+    silently treated as evidence for the anchored case, producing a
+    complete rebuttal letter regardless of what was actually asked.
+
+    Deliberately checked only at the START of the text (re.match, not
+    re.search) — a genuine evidence answer ("we have the tracking
+    number and the customer's delivery confirmation") can legitimately
+    contain phrases like "show" or "tell" mid-sentence without being a
+    new request; what actually distinguishes a fresh ask is opening
+    with one.
+    """
+    return bool(_NEW_REQUEST_STARTER_RE.match(text.strip()))
+
+
 # ---------------------------------------------------------------------------
 # Query type classification
 # ---------------------------------------------------------------------------

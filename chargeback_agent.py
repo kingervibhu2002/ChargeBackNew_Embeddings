@@ -1181,11 +1181,11 @@ class DisputeAgent:
             # other cases" (calls list_merchant_cases/query_chargeback_data).
             segments = [s.strip() for s in raw_context_preview.split('\n\n') if s.strip()]
             latest_segment = segments[-1] if segments else raw_context_preview
-            if (
-                classifier.looks_like_data_lookup(latest_segment)
-                and not classifier.refers_to_current_case(latest_segment)
+            not_same_case_and_not_junk = (
+                not classifier.refers_to_current_case(latest_segment)
                 and not classifier.is_junk_reply(raw_context_preview, query=masked_query)
-            ):
+            )
+            if classifier.looks_like_data_lookup(latest_segment) and not_same_case_and_not_junk:
                 # refers_to_current_case() is checked BEFORE the LLM
                 # tool-call, not just alongside it — confirmed live the
                 # tool-call alone isn't reliable enough here: given
@@ -1196,6 +1196,26 @@ class DisputeAgent:
                 new_topic_intent = self._resolve_data_lookup_intent(merchant_id_preview, latest_segment)
                 if new_topic_intent:
                     masked_query = mask_pii(latest_segment)
+            elif classifier.looks_like_new_request(latest_segment) and not_same_case_and_not_junk:
+                # Not data-lookup-shaped, but still clearly a fresh
+                # imperative ask ("help me with all open questions"),
+                # not an evidence answer for the anchored case at all.
+                # Confirmed live: this phrasing matches NONE of the
+                # other checks in this branch (no "case"/"chargeback"/
+                # "dispute" keyword for looks_like_data_lookup, no
+                # demonstrative reference, not an escalation phrase
+                # either — that's checked separately, earlier in this
+                # function) — so it fell all the way through to being
+                # silently treated as evidence, and since this case's
+                # ledger_decision was already set, extract_evidence_node
+                # short-circuits straight past evidence-gathering
+                # regardless of content, producing a complete rebuttal
+                # letter for a message that never asked for one.
+                # Promoted directly, no LLM confirmation needed — an
+                # imperative opener is unambiguous enough on its own,
+                # the same reasoning as refers_to_current_case()'s veto
+                # just above needing no LLM confirmation either.
+                masked_query = mask_pii(latest_segment)
 
         # Guard 4 — deterministic intent classification (no LLM call)
         query_type = classifier.classify_query_type(masked_query)
