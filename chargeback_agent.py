@@ -2282,6 +2282,13 @@ class DisputeAgent:
         asked isn't covered by what's on file, rather than answering as if
         it had been checked.
 
+        That "lead with case facts" instinct only applies to a question
+        actually ABOUT the anchored case — see is_case_specific_question
+        below, which gates both the lead-in and closing instructions on
+        classifier.refers_to_current_case()/extract_case_reference() so a
+        generic, conceptual question ("does U002 mean the customer won?")
+        gets answered conceptually instead of with a case-status recap.
+
         Reads:  user_query, additional_context, reason_code, card_network,
                 retrieved_docs
         Writes: missing_info_question
@@ -2310,7 +2317,30 @@ class DisputeAgent:
         # same deterministic signals extract_code_node/decide_node already
         # use to know what's actually missing, rather than leaving the
         # LLM to guess a generic closing line from context alone.
-        if reason_code == "Unknown" or card_network == "Unknown":
+        # Whether the LATEST question is actually asking about THIS anchored
+        # case, or is phrased in general/conceptual terms despite one being
+        # anchored — reuses refers_to_current_case()/extract_case_reference(),
+        # the same deterministic signals _validate_node already trusts for
+        # this exact distinction elsewhere in this file. Reported live:
+        # "Does U002 mean the customer won?" (no "this case," no case ID)
+        # got back a full case-status recap (status/resolution/deadline/
+        # recommendation for NPCI20260530M002010) instead of a short,
+        # conceptual "no, it's a reason code, not an outcome" — both the
+        # "lead with case-specific facts" instruction AND the closing line
+        # below were firing for every question once a case was anchored,
+        # with no signal to turn either off for a question that was never
+        # asking about this case at all.
+        is_case_specific_question = bool(
+            classifier.refers_to_current_case(latest) or classifier.extract_case_reference(latest)
+        )
+
+        if not is_case_specific_question:
+            closing_instruction = (
+                "End with a short, direct answer to the conceptual question "
+                "asked — do not reference the anchored case's status, "
+                "recommendation, or evidence needs; that isn't what was asked."
+            )
+        elif reason_code == "Unknown" or card_network == "Unknown":
             closing_instruction = (
                 "End with one short sentence asking them to share the chargeback "
                 "reason code (e.g. 'Visa 13.1', 'RuPay U002') so you can continue — "
@@ -2334,11 +2364,8 @@ class DisputeAgent:
                 "actual evidence once they have it."
             )
 
-        response = self._invoke([
-            SystemMessage(content=(
-                "You are a chargeback evidence analyst. The merchant is asking a "
-                "clarifying QUESTION about their dispute — they have NOT yet "
-                "provided the evidence itself.\n"
+        if is_case_specific_question:
+            lead_instruction = (
                 "First check whether the 'Relevant context' below includes a "
                 "case-specific record (a line starting with \"Case <id>\" — the "
                 "system's own on-file status/recommendation for this exact "
@@ -2358,6 +2385,29 @@ class DisputeAgent:
                 "never omit it). If asked specifically about 'resolution,' "
                 "answer that exact question (resolved or not, and why) rather "
                 "than substituting the recommended action for it.\n"
+            )
+        else:
+            lead_instruction = (
+                "This question is phrased in GENERAL/conceptual terms — it "
+                "does not say 'this case' and does not name a specific case "
+                "ID or UTR, even though one happens to be anchored in this "
+                "conversation. Answer it the way a knowledge-base question "
+                "would be answered: 2-4 sentences, conceptual, no case-status "
+                "recap. Do NOT lead with or recite the anchored case's "
+                "status/resolution/deadline/recommendation — a reason code's "
+                "general meaning is not the same question as what happened "
+                "to one specific case, and answering the wrong one is a real "
+                "error even if the case facts are accurate. Only mention the "
+                "anchored case at all if doing so is the only way to answer "
+                "what was actually asked.\n"
+            )
+
+        response = self._invoke([
+            SystemMessage(content=(
+                "You are a chargeback evidence analyst. The merchant is asking a "
+                "clarifying QUESTION about their dispute — they have NOT yet "
+                "provided the evidence itself.\n"
+                f"{lead_instruction}"
                 "Only fall back to generic procedural guidance (which dashboard, "
                 "report, or party holds that data) for whatever the case record "
                 "does NOT cover. Never imply you checked something the record "
@@ -3331,6 +3381,23 @@ class DisputeAgent:
                 "You are a chargeback expert. Answer the question clearly and "
                 "concisely using only the provided knowledge base documents. "
                 "Explain in plain English. Do not use jargon without explaining it.\n\n"
+                "LENGTH: 2-5 sentences, not a document. No headers, no multi-row "
+                "tables, no numbered evidence checklists — those are appropriate "
+                "once a merchant is actually working a specific case (a different "
+                "part of this system handles that), not for a general knowledge "
+                "question. Reported live: 'What is the resolution of U002 cases?' "
+                "got back a multi-section reference document with a 6-row table "
+                "and a bolded 'Bottom line' verdict — merchants asking a general "
+                "question need a short, direct answer, not a document dump.\n\n"
+                "NEVER STATE A DEFINITIVE OUTCOME for a reason code in the "
+                "abstract (e.g. 'the resolution is a refund,' 'the dispute is "
+                "usually settled in the merchant's favour'). A reason code "
+                "describes the dispute ALLEGED — it does not by itself determine "
+                "how any particular case resolves; that depends on that case's "
+                "own evidence, deadline, and facts. Say plainly that the outcome "
+                "depends on the specific case, and if no case was named, offer "
+                "to look one up rather than describing a typical/likely result "
+                "as if it were settled.\n\n"
                 "If the retrieved documents cover more than one card network, "
                 "attribute network-specific facts (fees, deadlines, thresholds) to the "
                 "network they actually describe — do not present one network's "
