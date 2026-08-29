@@ -46,7 +46,8 @@ def _make_test_db() -> str:
     conn.execute("""
         CREATE TABLE chargebacks (
             utr TEXT NOT NULL,
-            reason_code TEXT NOT NULL
+            reason_code TEXT NOT NULL,
+            response_deadline TEXT NOT NULL DEFAULT '2099-01-01'
         )
     """)
     create_schema(conn)
@@ -333,9 +334,15 @@ def test_get_ledger_entries_ordered() -> bool:
         os.remove(db)
 
 
-def _insert_chargeback(db_path, utr, reason_code):
+def _insert_chargeback(db_path, utr, reason_code, response_deadline=None):
     conn = get_connection(db_path)
-    conn.execute("INSERT INTO chargebacks (utr, reason_code) VALUES (?, ?)", (utr, reason_code))
+    if response_deadline is None:
+        conn.execute("INSERT INTO chargebacks (utr, reason_code) VALUES (?, ?)", (utr, reason_code))
+    else:
+        conn.execute(
+            "INSERT INTO chargebacks (utr, reason_code, response_deadline) VALUES (?, ?, ?)",
+            (utr, reason_code, response_deadline),
+        )
     conn.commit()
     conn.close()
 
@@ -530,6 +537,69 @@ def test_non_u002_code_unaffected_by_ledger_check() -> bool:
         os.remove(db)
 
 
+def test_deadline_expired_true_when_response_deadline_is_past() -> bool:
+    # The exact live gap this was built to close: a case's deadline being
+    # in the past used to be mentioned nowhere in the deterministic
+    # recommendation itself -- only as decorative text bolted on
+    # elsewhere. deadline_expired must be True regardless of WHICH branch
+    # produced the recommendation (here: the reconciled-single-credit
+    # "fight" case via the network check).
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_PASTDUE", "U002", response_deadline="2020-01-01")
+        _insert_ledger_entry(db, "UTR_PASTDUE", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_PASTDUE", 500)
+        _insert_network_attempt(db, "UTR_PASTDUE", 1, "success")
+        row = _get_chargeback_row(db, "UTR_PASTDUE")
+        result = analyze_chargeback(row, db_path=db)
+        return _check(
+            "U002 with a past response_deadline -> deadline_expired=True, action still 'fight'",
+            result.deadline_expired is True and result.action == "fight",
+            detail=str(result),
+        )
+    finally:
+        os.remove(db)
+
+
+def test_deadline_expired_false_when_response_deadline_is_future() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_NOTDUE", "U002", response_deadline="2099-01-01")
+        _insert_ledger_entry(db, "UTR_NOTDUE", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_NOTDUE", 500)
+        _insert_network_attempt(db, "UTR_NOTDUE", 1, "success")
+        row = _get_chargeback_row(db, "UTR_NOTDUE")
+        result = analyze_chargeback(row, db_path=db)
+        return _check(
+            "U002 with a future response_deadline -> deadline_expired=False",
+            result.deadline_expired is False,
+            detail=str(result),
+        )
+    finally:
+        os.remove(db)
+
+
+def test_deadline_expired_set_even_with_no_recommendation() -> bool:
+    # deadline_expired must survive the action=None paths too (e.g. no
+    # network reconciliation on file yet) -- it's an independent fact
+    # about the case, not something only "fight"/"refund" branches carry.
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_PASTDUE_NODATA", "U002", response_deadline="2020-01-01")
+        _insert_ledger_entry(db, "UTR_PASTDUE_NODATA", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_PASTDUE_NODATA", 500)
+        # No network_debit_attempts rows -- action stays None.
+        row = _get_chargeback_row(db, "UTR_PASTDUE_NODATA")
+        result = analyze_chargeback(row, db_path=db)
+        return _check(
+            "Past deadline + no network data -> action=None but deadline_expired still True",
+            result.action is None and result.deadline_expired is True,
+            detail=str(result),
+        )
+    finally:
+        os.remove(db)
+
+
 def main() -> None:
     tests = [
         test_count_credits_zero_when_no_entries,
@@ -560,6 +630,9 @@ def main() -> None:
         test_u002_zero_credits_falls_through_to_rule_table,
         test_cbs_refund_check_still_takes_priority_over_ledger_check,
         test_non_u002_code_unaffected_by_ledger_check,
+        test_deadline_expired_true_when_response_deadline_is_past,
+        test_deadline_expired_false_when_response_deadline_is_future,
+        test_deadline_expired_set_even_with_no_recommendation,
     ]
     print(f"Running {len(tests)} cbs.py / chargeback_analysis.py tests...\n")
     results = [t() for t in tests]

@@ -69,6 +69,35 @@ def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+def deadline_bucket(response_deadline: str) -> str:
+    """
+    Classify a chargebacks.response_deadline value against today's date into
+    "overdue" | "due_this_week" | "later". status='Open' does NOT imply the
+    deadline hasn't passed in this schema — a case can sit visually identical
+    whether its deadline was weeks ago or is a month out.
+
+    Lives here, not in chargeback_agent.py (where it originated, for the
+    open-case list's urgency summary) or chargeback_analysis.py (which now
+    also needs it, to compute Analysis.deadline_expired) — this module sits
+    below both in the import graph (chargeback_analysis.py -> cbs.py ->
+    merchant_db.py; chargeback_agent.py -> chargeback_analysis.py), so it's
+    the only place both can import it from without a cycle. Moved here
+    rather than duplicated after the exact "mentioned in prose but never
+    checked" bug this was built to close: a case's recommended action used
+    to say "fight, submit evidence" with zero acknowledgment that the
+    response window had already closed, because deadline_bucket() lived
+    somewhere chargeback_analysis.py's decision logic couldn't reach it.
+    """
+    from datetime import date, timedelta
+    deadline = date.fromisoformat(response_deadline)
+    today = date.today()
+    if deadline < today:
+        return "overdue"
+    if deadline <= today + timedelta(days=7):
+        return "due_this_week"
+    return "later"
+
+
 def create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS chargebacks (

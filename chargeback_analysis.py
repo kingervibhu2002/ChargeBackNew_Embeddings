@@ -16,6 +16,7 @@ from cbs import (
     has_pending_suspense,
     reconcile_utr,
 )
+from merchant_db import deadline_bucket
 
 # All chargebacks in this schema are NPCI/UPI disputes — see
 # auto_decision_poller.py's matching comment for why this is a constant
@@ -30,6 +31,20 @@ class Analysis(NamedTuple):
                               # ("" only when action is None from decision_rules —
                               # every ledger/network-derived branch, including the
                               # action=None ones, sets a real source string)
+    deadline_expired: bool = False  # True when response_deadline is already in the
+                              # past. Reported live: a case's recommendation said
+                              # "fight, submit evidence" with the deadline mentioned
+                              # only as decorative prose elsewhere — never actually
+                              # checked as part of the recommendation itself, so
+                              # nothing changed about the advice once the response
+                              # window had already closed. Computed once here so it
+                              # travels with the recommendation everywhere Analysis
+                              # goes, rather than being recomputed (or forgotten)
+                              # ad hoc at each call site. Default False, not
+                              # Optional — every call site below sets it explicitly;
+                              # the default only covers a future call site that
+                              # forgets to, which should degrade to "not flagged"
+                              # rather than crash.
 
 
 def analyze_chargeback(row, db_path: str) -> Analysis:
@@ -88,6 +103,8 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
        as before: known reason codes resolve to "refund", unmapped codes
        return no recommendation (action=None) rather than guessing.
     """
+    deadline_expired = deadline_bucket(row["response_deadline"]) == "overdue"
+
     cbs_refund = find_refund_for_utr(row["utr"], db_path=db_path)
     if cbs_refund:
         return Analysis(
@@ -99,6 +116,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 f"Disputing it should prevent a second payout for the same transaction."
             ),
             source="cbs",
+            deadline_expired=deadline_expired,
         )
 
     if row["reason_code"] == "U002":
@@ -115,6 +133,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                     f"merely unrebutted. The duplicate amount should be refunded."
                 ),
                 source="ledger",
+                deadline_expired=deadline_expired,
             )
         if has_pending_suspense(row["utr"], db_path=db_path):
             return Analysis(
@@ -124,6 +143,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                     "cannot confidently recommend fight or refund until it settles."
                 ),
                 source="ledger",
+                deadline_expired=deadline_expired,
             )
         if credits == 1:
             recon = reconcile_utr(row["utr"], db_path=db_path)
@@ -138,6 +158,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         f"investigated."
                     ),
                     source="ledger",
+                deadline_expired=deadline_expired,
                 )
             # A reconciled ledger only proves what reached the MERCHANT — it
             # can't by itself rule out a duplicate debit upstream that was
@@ -159,6 +180,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         "PSP/NPCI before responding."
                     ),
                     source="network",
+                deadline_expired=deadline_expired,
                 )
             if debit["status"] == "duplicate_unreversed":
                 return Analysis(
@@ -173,6 +195,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         f"reconciling the missing settlement with the acquiring bank."
                     ),
                     source="network",
+                deadline_expired=deadline_expired,
                 )
             if debit["status"] == "duplicate_reversed":
                 return Analysis(
@@ -185,6 +208,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         "twice, even though a duplicate attempt did occur upstream."
                     ),
                     source="network",
+                deadline_expired=deadline_expired,
                 )
             return Analysis(
                 action="fight",
@@ -196,6 +220,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                     "either the merchant's ledger or the network's own transaction record."
                 ),
                 source="network",
+                deadline_expired=deadline_expired,
             )
         # credits == 0: no credit ever posted for this UTR at all — an odd
         # situation the ledger itself can't resolve either way (not "one
@@ -209,7 +234,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
         evidence_missing=[],
     )
     if result is None:
-        return Analysis(action=None, reason="", source="")
+        return Analysis(action=None, reason="", source="", deadline_expired=deadline_expired)
 
     decision, reason = result
-    return Analysis(action=decision, reason=reason, source="rules")
+    return Analysis(action=decision, reason=reason, source="rules", deadline_expired=deadline_expired)

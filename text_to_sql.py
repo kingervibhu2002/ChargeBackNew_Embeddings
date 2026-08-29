@@ -300,9 +300,20 @@ def _check_conversational(question: str):
         if keyword in q:
             return True, answer
     if _CONVERSATIONAL_PATTERN.match(question):
+        # Reported live: a general policy/reason-code question ("What is
+        # the resolution of U002 cases?") typed into this tab got this
+        # dead-end message with no indication of where the real answer
+        # lives — the merchant has no way to know this tab only ever
+        # queries THEIR OWN records and was never going to answer a
+        # conceptual question, in any tab, without being told so
+        # explicitly. Named the other tab directly rather than leaving
+        # the merchant to rediscover chat.html's tab layout on their own.
         return True, (
-            "I can only answer questions about your chargeback data. "
-            "Try: 'show open cases', 'what is my win rate', "
+            "This tab answers questions about YOUR OWN chargeback records — "
+            "it can't answer general questions about how a reason code or "
+            "dispute process works. For a question like that, use the "
+            "**Dispute Assistant** tab instead.\n\n"
+            "Here, try: 'show open cases', 'what is my win rate', "
             "'which cases expire this week'."
         )
     return False, ""
@@ -921,7 +932,9 @@ def query_chargebacks(
                              pipeline below regardless of what previous_sql says.
 
     Returns:
-        dict: sql, answer, rows, error
+        dict: sql, answer, rows, error, and (only set True on the Step 0
+        conversational bail-out below) conversational — callers must check
+        this before treating `answer` as a real, data-derived answer.
     """
     is_admin = role in ADMIN_ROLES
     if not is_admin and role != "merchant":
@@ -948,8 +961,19 @@ def query_chargebacks(
     # Step 0 — conversational questions (download, how-to, etc.) → text answer
     is_conv, conv_answer = _check_conversational(question)
     if is_conv:
+        # "conversational": True is the only thing that distinguishes this
+        # from a real, SQL-derived answer — same shape otherwise (error="",
+        # answer=<text>). Reported live: chargeback_agent.py calls this
+        # function directly (code reuse, not an HTTP hop) from several
+        # spots when it detects a data-lookup intent, and blindly trusted
+        # result["answer"] as if it always meant "here's the merchant's
+        # data" — surfacing THIS tab's own "I can't answer that here, try
+        # the other tab" bail-out as the Dispute Assistant's own answer,
+        # nonsensically telling the merchant to go to the tab they were
+        # already in. Callers must check this flag before treating
+        # `answer` as real content.
         return {"sql": "", "answer": conv_answer, "rows": 0, "error": "",
-                "suspicious": False, "rows_data": []}
+                "suspicious": False, "rows_data": [], "conversational": True}
 
     # Step 1 — question injection guard + suspicious intent flag
     safe_q, reason_q = _is_safe_question(question, role, merchant_id)

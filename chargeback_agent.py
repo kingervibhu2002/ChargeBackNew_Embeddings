@@ -53,6 +53,7 @@ from network_detection import (
 import classifier
 import decision_rules
 import retrieval_evaluator
+from merchant_db import deadline_bucket
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +261,18 @@ class ChargebackState(TypedDict):
                                              extract_evidence_node surfaces this reason directly
                                              instead of asking the merchant to "confirm" evidence
                                              that was never the actual blocker.
+        case_deadline_expired (bool):        Mirrors chargeback_analysis.Analysis.deadline_expired
+                                             for whichever case planner_node/_build_case_intro
+                                             resolved — set independently of ledger_decision/
+                                             ledger_no_decision_reason (a case can have BOTH a
+                                             confident recommendation AND an expired deadline).
+                                             Reported live: a case's deadline being in the past
+                                             was mentioned as prose in one answer but never
+                                             actually changed what was recommended — this field
+                                             is what answer_clarification_node/generate_node
+                                             check to give real, deadline-aware guidance (contact
+                                             the acquiring bank/PSP) instead of presenting
+                                             evidence submission as routine.
         resolved_case_id      (str):        Set by planner_node whenever a named UTR/case_id in
                                              the query resolved to a real row for this merchant —
                                              regardless of whether analyze_chargeback() reached a
@@ -301,6 +314,7 @@ class ChargebackState(TypedDict):
     ledger_decision:       str
     ledger_decision_reason: str
     ledger_no_decision_reason: str
+    case_deadline_expired: bool
     resolved_case_id:      str
     resolved_utr:          str
     evidence_present:      List[str]
@@ -413,26 +427,6 @@ class DecisionOutput(BaseModel):
         description="One or two sentences explaining the recommendation."
     )
 
-
-def _deadline_bucket(response_deadline: str) -> str:
-    """
-    Classify a case's response_deadline against today's date into
-    "overdue" | "due_this_week" | "later" — used to give a merchant's
-    open-case listing an urgency summary instead of a flat, undifferentiated
-    list. status='Open' does NOT imply the deadline hasn't passed in this
-    schema (see active_deadline_only elsewhere in this file) — a case can
-    sit visually identical whether its deadline was weeks ago or is a
-    month out, which a merchant scanning the list has no way to tell apart
-    without this.
-    """
-    from datetime import date, timedelta
-    deadline = date.fromisoformat(response_deadline)
-    today = date.today()
-    if deadline < today:
-        return "overdue"
-    if deadline <= today + timedelta(days=7):
-        return "due_this_week"
-    return "later"
 
 
 # Hard cap on how many clarification rounds a single conversation can go
@@ -840,6 +834,17 @@ class DisputeAgent:
         if classifier.looks_like_aggregate_question(query):
             from text_to_sql import query_chargebacks
             result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
+            # "conversational": True means text_to_sql.py itself decided
+            # this ISN'T actually a data-lookup question — surfacing its
+            # answer here would be presenting a "this tab can't answer
+            # that" bail-out as if it settled the merchant's real
+            # question. Reported live: this exact path surfaced "This tab
+            # answers questions about YOUR OWN chargeback records... use
+            # the Dispute Assistant tab instead" AS the Dispute
+            # Assistant's own answer. Fall through (return None) so the
+            # normal non-data-lookup handling in this node runs instead.
+            if result.get("conversational"):
+                return None
             answer = result.get("answer") or result.get("error") or "No matching data found."
             return {"type": "aggregate", "answer": answer}
 
@@ -854,6 +859,8 @@ class DisputeAgent:
         if classifier.looks_like_status_question(query):
             from text_to_sql import query_chargebacks
             result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
+            if result.get("conversational"):
+                return None
             answer = result.get("answer") or result.get("error") or "No matching data found."
             return {"type": "aggregate", "answer": answer}
 
@@ -940,6 +947,20 @@ class DisputeAgent:
             # the tool call's only job here is deciding to route to it,
             # not rewriting what gets asked.
             result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
+            if result.get("conversational"):
+                # text_to_sql.py itself decided this isn't a real data
+                # lookup — the LLM tool-call above chose this tool anyway
+                # (a wrong call, not a wrong text_to_sql answer). Don't
+                # surface its tab-specific bail-out text as if it answered
+                # the merchant's question; a real ToolMessage still needs
+                # to close out this tool_call, so record the fact plainly
+                # for any downstream re-planning, then let the caller fall
+                # through to normal (non-data-lookup) handling.
+                messages.append(ToolMessage(
+                    content="Not a data-lookup question about the merchant's own records.",
+                    tool_call_id=tool_call["id"],
+                ))
+                return None
             answer = result.get("answer") or result.get("error") or "No matching data found."
             messages.append(ToolMessage(content=answer, tool_call_id=tool_call["id"]))
             return {"type": "aggregate", "answer": answer}
@@ -976,14 +997,13 @@ class DisputeAgent:
             return f"No case found with ID {case_id} for this merchant.", None
 
         analysis = analyze_chargeback(row, db_path="chargebacks.db")
-        deadline_passed = _deadline_bucket(row["response_deadline"]) == "overdue"
         parts = [
             f"Case {row['case_id']} (UTR {row['utr']}): reason code {row['reason_code']} "
             f"({row['reason_description']}), amount {row['chargeback_amount']}, "
             f"status {row['status']}, resolution status: "
             f"{('resolved — ' + row['resolution']) if row['resolution'] else 'not resolved yet'}, "
             f"response deadline {row['response_deadline']}"
-            f"{' (already passed)' if deadline_passed else ''}."
+            f"{' (already passed)' if analysis.deadline_expired else ''}."
         ]
         if analysis.action:
             # "Recommended action" deliberately labeled and phrased as
@@ -992,6 +1012,21 @@ class DisputeAgent:
             # substituting this recommendation for an actual resolution
             # status, when the case was, separately, still not resolved.
             parts.append(f"Recommended action (advice, not a resolution): {analysis.action}. {analysis.reason}")
+        if analysis.deadline_expired:
+            # Mentioning the deadline passed in prose (above) is not the
+            # same as actually acting on it — reported live: a case whose
+            # deadline had already passed still got a routine "fight,
+            # submit evidence" recommendation with no acknowledgment that
+            # the standard submission window itself may already be closed.
+            # This line is what actually changes the guidance, not just
+            # the fact string.
+            parts.append(
+                "IMPORTANT: the response deadline has already passed — the standard "
+                "evidence-submission window may no longer be open through the normal "
+                "process. Advise the merchant to contact their acquiring bank/PSP "
+                "immediately to check whether a late representment or extension is "
+                "still possible, rather than presenting evidence submission as routine."
+            )
 
         rule = decision_rules.RULES.get(("RuPay", row["reason_code"]))
         if rule:
@@ -1068,12 +1103,26 @@ class DisputeAgent:
                 "You are a chargeback assistant. The merchant just selected "
                 "one of their own open cases to learn more about. First look "
                 "up the case's real details, then look up what its reason "
-                "code means and what evidence it typically requires. Then "
-                "write a short, friendly summary covering: what the case is "
-                "(amount, status, deadline), what the reason code means, and "
-                "what evidence is needed next. Use only facts returned by "
-                "the tools — never invent a status, amount, or evidence "
-                "requirement."
+                "code means and what evidence it typically requires. Use "
+                "only facts returned by the tools — never invent a status, "
+                "amount, or evidence requirement.\n"
+                "Then write your answer in ONE of these two shapes — pick "
+                "exactly one, never both:\n"
+                "1) Deadline NOT passed: a short, friendly summary covering "
+                "what the case is (amount, status, deadline), what the "
+                "reason code means, and what evidence is needed next.\n"
+                "2) Deadline ALREADY passed (the case details mention this, "
+                "or carry an 'IMPORTANT' note about it): lead with that fact "
+                "in one clear sentence, name the case ID/amount/reason code "
+                "in one more line, and recommend contacting the acquiring "
+                "bank/PSP immediately to check whether a late representment "
+                "or extension is possible — then STOP. Do NOT also give the "
+                "full reason-code explanation and evidence checklist shape 1 "
+                "would use, and do NOT repeat the deadline warning again at "
+                "the end — say it once. A merchant whose deadline has "
+                "already passed needs one short, clear answer telling them "
+                "what to do right now, not a full case walkthrough with the "
+                "same warning bookended at both ends of it."
             )),
             HumanMessage(content=f"The merchant selected case {case_id}. Tell me about it."),
         ]
@@ -1154,6 +1203,7 @@ class DisputeAgent:
             "case_intro_action": analysis.action or "",
             "case_intro_reason": analysis.reason,
             "case_intro_source": analysis.source,
+            "case_deadline_expired": analysis.deadline_expired,
         }
 
     def _validate_node(self, state: ChargebackState) -> dict:
@@ -1359,6 +1409,7 @@ class DisputeAgent:
                             "case_intro_action": intro["case_intro_action"],
                             "case_intro_reason": intro["case_intro_reason"],
                             "case_intro_source": intro["case_intro_source"],
+                            "case_deadline_expired": intro["case_deadline_expired"],
                         }
                     # intro build failed (e.g. tool loop never resolved a
                     # row) — fall through to planner_node's step 4b, same
@@ -1467,6 +1518,7 @@ class DisputeAgent:
                         "case_intro_action": intro["case_intro_action"],
                         "case_intro_reason": intro["case_intro_reason"],
                         "case_intro_source": intro["case_intro_source"],
+                        "case_deadline_expired": intro["case_deadline_expired"],
                     }
                 masked_query = f"Help me with case {resolved}"
             elif classifier.is_out_of_range_case_reference(raw_context_preview, shown):
@@ -1891,6 +1943,7 @@ class DisputeAgent:
         ledger_decision = ""
         ledger_decision_reason = ""
         ledger_no_decision_reason = ""
+        case_deadline_expired = False
         resolved_case_id = ""
         resolved_utr = ""
 
@@ -1950,7 +2003,11 @@ class DisputeAgent:
             try:
                 from text_to_sql import query_chargebacks
                 result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
-                answer = result.get("answer", "")
+                # A conversational bail-out ("this tab can't answer that")
+                # is not merchant history — appending it here would feed a
+                # tab-navigation message into this dispute's own RAG
+                # context as if it were a real fact about the case.
+                answer = "" if result.get("conversational") else result.get("answer", "")
                 if answer:
                     retrieved_contents.append(f"Merchant history: {answer}")
             except Exception:
@@ -2003,7 +2060,7 @@ class DisputeAgent:
                     # "resolution" are the same thing, and never mentioned
                     # that the response deadline had already passed (visible
                     # elsewhere in this same file — the open-case list already
-                    # computes _deadline_bucket() for exactly this — but this
+                    # computes deadline_bucket() for exactly this — but this
                     # fact string, the one _answer_clarification_node and
                     # _build_case_intro actually draw from, never included
                     # deadline information at all, so there was nothing for
@@ -2013,13 +2070,13 @@ class DisputeAgent:
                     # actually closed; deadline status is a third, unrelated
                     # fact — collapsing any two of these was the actual bug,
                     # not just how the LLM phrased its answer.
-                    deadline_passed = _deadline_bucket(row["response_deadline"]) == "overdue"
+                    case_deadline_expired = analysis.deadline_expired
                     status_line = (
                         f"Case status: {row['status']}. "
                         f"Resolution status: "
                         f"{('resolved — ' + row['resolution']) if row['resolution'] else 'not resolved yet'}. "
                         f"Response deadline: {row['response_deadline']}"
-                        f"{' (already passed)' if deadline_passed else ''}."
+                        f"{' (already passed)' if case_deadline_expired else ''}."
                     )
                     # insert(0, ...), not append(): downstream nodes only
                     # look at the first 1-2 retrieved_docs entries
@@ -2122,6 +2179,7 @@ class DisputeAgent:
             "ledger_decision":           ledger_decision,
             "ledger_decision_reason":    ledger_decision_reason,
             "ledger_no_decision_reason": ledger_no_decision_reason,
+            "case_deadline_expired":     case_deadline_expired,
             "resolved_case_id":          resolved_case_id,
             "resolved_utr":              resolved_utr,
         }
@@ -2345,6 +2403,23 @@ class DisputeAgent:
                 "End with one short sentence asking them to share the chargeback "
                 "reason code (e.g. 'Visa 13.1', 'RuPay U002') so you can continue — "
                 "that is the actual next thing needed, not evidence."
+            )
+        elif state.get("ledger_decision") and state.get("case_deadline_expired"):
+            # Reported live: a case's deadline being in the past was
+            # mentioned as one clause in an otherwise-routine "fight,
+            # submit evidence" answer — the deadline fact never actually
+            # changed the guidance given. This branch is what makes it
+            # change the guidance, not just get mentioned.
+            closing_instruction = (
+                "Do NOT ask for evidence, and do NOT present evidence "
+                "submission as routine — this case's RESPONSE DEADLINE HAS "
+                "ALREADY PASSED. End with one short but URGENT sentence "
+                "stating the deadline has passed and recommending the "
+                "merchant contact their acquiring bank/PSP immediately to "
+                "check whether a late representment or extension is still "
+                "possible. The recommendation (fight/refund) is still valid "
+                "advice on the merits, but the standard submission window "
+                "may already be closed — say so plainly, don't bury it."
             )
         elif state.get("ledger_decision"):
             closing_instruction = (
@@ -2722,8 +2797,29 @@ class DisputeAgent:
         still eventually hits the cap on the evidence-ask side), this only
         skips applying the cap to this specific already-answered turn.
 
+        The cap ALSO does not apply to the very first
+        CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE ask (extract_evidence_node's
+        "want me to explain, or draft the response?" scoping question).
+        Reported live: a merchant had a long, healthy, wide-ranging generic
+        Q&A conversation about U002 (six exchanges, none of them an
+        evidence-gathering ask at all) before finally naming a real case
+        ID — count_clarification_rounds() counts EVERY reply segment in
+        the whole conversation regardless of topic, so clarification_round
+        was already 6 by the time the FIRST-EVER scoping question would
+        have fired, and this node crushed it with the escalation message
+        on its first occurrence, having never actually been ignored once.
+        The round count is a blunt proxy for "conversation isn't making
+        progress" that breaks down for a long conversation that only just
+        NOW reached its first real ask — same underlying problem as the
+        merchant_is_asking_question case above, different trigger. Trade-
+        off, same as that case: a merchant who stays vague specifically in
+        response to THIS scoping question, repeatedly, could in principle
+        loop — accepted as the smaller risk versus the reported failure
+        (a totally healthy conversation dead-ending on its very first ask).
+
         Reads:  missing_info_question, clarification_round,
-                merchant_is_asking_question, ledger_decision
+                merchant_is_asking_question, ledger_decision,
+                clarification_reason
         Writes: final_answer, needs_more_info
 
         Args:
@@ -2736,6 +2832,7 @@ class DisputeAgent:
         if (
             state.get("clarification_round", 0) >= MAX_CLARIFICATION_ROUNDS
             and not state.get("merchant_is_asking_question")
+            and state.get("clarification_reason") != CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE
         ):
             return {"final_answer": self._CLARIFICATION_LIMIT_MESSAGE, "needs_more_info": False}
 
@@ -2896,7 +2993,7 @@ class DisputeAgent:
                 # display doesn't reorder anything, so ordinal references
                 # ("the first one") on the next turn still resolve against
                 # the exact same list in the exact same order.
-                buckets = [_deadline_bucket(c["response_deadline"]) for c in cases]
+                buckets = [deadline_bucket(c["response_deadline"]) for c in cases]
                 overdue_n      = buckets.count("overdue")
                 due_week_n     = buckets.count("due_this_week")
                 later_n        = buckets.count("later")
@@ -3706,7 +3803,8 @@ class DisputeAgent:
         the merchant to verify with their payment processor.
 
         Reads:  decision, user_query, reason_code, card_network, evidence_present,
-                evidence_missing, decision_reason, retrieved_docs, iteration
+                evidence_missing, decision_reason, retrieved_docs, iteration,
+                case_deadline_expired
         Writes: draft_response, iteration
 
         Args:
@@ -3902,6 +4000,24 @@ class DisputeAgent:
         ])
 
         draft = response.content
+
+        # Deadline-expired warning — deterministic, not left to the LLM's
+        # own prompt-following, and prepended (not appended, unlike the
+        # disclaimer below) so it can't get lost after a long letter.
+        # Reported live: a case's response deadline being in the past was
+        # mentioned as prose in a conversational answer but never actually
+        # changed the recommendation shown to the merchant — a "fight,
+        # here's your letter" response gave no indication the standard
+        # submission window might already be closed.
+        if state.get("case_deadline_expired"):
+            draft = (
+                "⚠️  IMPORTANT: The response deadline for this case has already "
+                "passed. The standard evidence-submission window may no longer be "
+                "open through the normal process. Before submitting anything "
+                "below, contact your acquiring bank/PSP immediately to confirm "
+                "whether a late representment or extension can still be accepted "
+                "— timelines and options vary by bank.\n\n---\n\n"
+            ) + draft
 
         # Disclaimer guardrail — appended to all fight letters
         if decision == "fight":
@@ -4319,6 +4435,7 @@ class DisputeAgent:
             "ledger_decision":       "",
             "ledger_decision_reason": "",
             "ledger_no_decision_reason": "",
+            "case_deadline_expired": False,
             "resolved_case_id":      "",
             "resolved_utr":          "",
             "evidence_present":      [],
