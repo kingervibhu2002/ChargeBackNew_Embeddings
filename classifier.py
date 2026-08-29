@@ -840,6 +840,45 @@ def looks_like_aggregate_question(query: str) -> bool:
     return bool(_AGGREGATE_QUESTION_RE.search(query))
 
 
+# Deterministic, same reasoning as _AGGREGATE_QUESTION_RE above — "why is
+# my chargeback pending" is unambiguous enough that there's no upside to
+# leaving it to the LLM tool-call's judgment. Confirmed live: the
+# identical query, sent unchanged across repeated calls, non-
+# deterministically produced three different outcomes — the real
+# list_merchant_cases tool (which only ever shows status='Open' rows,
+# never 'Pending' — a different, real status value in this schema, so
+# even that "correct" outcome never actually surfaced the merchant's real
+# Pending cases), or a fabricated, ungrounded generic explanation from a
+# plain knowledge-base search with no connection to the merchant's real
+# case data at all. Calling text_to_sql.query_chargebacks() directly (the
+# aggregate/query_chargeback_data path) was confirmed to correctly
+# generate `WHERE status = 'Pending'` and return the real matching cases
+# every time — the underlying capability already works; only the routing
+# to it was unreliable. Requires a personal reference ("my"/"our"), not a
+# bare status word alone — "what does pending mean" (a general knowledge
+# question, not about the caller's own data) must NOT match this.
+_STATUS_WORD_RE = re.compile(r"\b(pending|expired)\b", re.IGNORECASE)
+_PERSONAL_REFERENCE_RE = re.compile(r"\b(my|our)\b", re.IGNORECASE)
+
+
+def looks_like_status_question(query: str) -> bool:
+    """
+    True if `query` is asking about the status of the CALLER'S OWN
+    chargeback(s) using a real status value this schema has ("pending,"
+    "expired") — should bypass the LLM tool-calling decision entirely
+    and go straight to the aggregate SQL tool, same as
+    looks_like_aggregate_question() above. See _STATUS_WORD_RE's own
+    comment for why this is deterministic rather than left to the LLM.
+
+    Args:
+        query: The merchant's query (PII-masked).
+
+    Returns:
+        True if this should skip straight to the aggregate data lookup.
+    """
+    return bool(_STATUS_WORD_RE.search(query) and _PERSONAL_REFERENCE_RE.search(query))
+
+
 # Deterministic, not left to the LLM tool-call — matches this project's
 # general pattern (see looks_like_aggregate_question above) of pulling a
 # reliably keyword-detectable filter out of the LLM's judgment entirely

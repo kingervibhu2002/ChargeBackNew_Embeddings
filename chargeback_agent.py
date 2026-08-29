@@ -738,6 +738,20 @@ class DisputeAgent:
             answer = result.get("answer") or result.get("error") or "No matching data found."
             return {"type": "aggregate", "answer": answer}
 
+        # Same deterministic short-circuit, same reasoning, for a status-
+        # word question ("why is my chargeback pending") — see
+        # classifier.looks_like_status_question()'s own docstring for why
+        # this needed its own check: list_merchant_cases only ever shows
+        # status='Open' rows (never 'Pending', a real, different status
+        # in this schema), so even when the LLM tool-call correctly chose
+        # the listing tool, it could never surface what was actually
+        # asked about either way.
+        if classifier.looks_like_status_question(query):
+            from text_to_sql import query_chargebacks
+            result = query_chargebacks(question=query, role="merchant", merchant_id=merchant_id)
+            answer = result.get("answer") or result.get("error") or "No matching data found."
+            return {"type": "aggregate", "answer": answer}
+
         messages = [
             SystemMessage(content=(
                 "You are a chargeback assistant for a merchant. Decide "
