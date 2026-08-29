@@ -348,6 +348,20 @@ class DisputeAgent:
     Reused for every /dispute request.
     """
 
+    # Shared between _validate_node's first-turn escalation handling and
+    # its follow-up-reply check (see that check's own comment for why a
+    # second copy of this text is needed at all) — kept as one constant
+    # so the two can never drift apart.
+    _ESCALATION_MESSAGE = (
+        "This is an AI assistant — I cannot connect you to a person directly.\n\n"
+        "For human support, contact your:\n"
+        "  • Acquiring bank or payment processor\n"
+        "  • Visa merchant support: 1-800-VISA-911\n"
+        "  • Mastercard merchant support: 1-800-999-0363\n\n"
+        "I can still help you understand chargeback policies or draft a "
+        "rebuttal letter. Just describe your dispute and I'll get started."
+    )
+
     def __init__(self, store, embed_fn: Callable[[str], list], rerank_fn=None, checkpointer=None):
         """
         Args:
@@ -868,6 +882,38 @@ class DisputeAgent:
         # failure this fixes.
         original_masked_query = masked_query
 
+        # A genuine "talk to a human agent" request in a FOLLOW-UP reply
+        # must win outright, regardless of what a stale case-anchored
+        # masked_query would otherwise resolve to. Confirmed live: on a
+        # case-anchored conversation ("Help me with case NPCI...",
+        # needs_more_info=True), classify_query_type() is only ever
+        # called on masked_query (Guard 4, further below) — and a named
+        # case ALWAYS classifies as "dispute" via _CASE_REF_RE's own
+        # precedence, regardless of what the merchant's actual reply
+        # said. additional_context does get a second chance via the
+        # "invalid -> retry combined" rescue later in this function, but
+        # that only fires when masked_query classifies as "invalid" —
+        # never "dispute", which a case reference always does. Result:
+        # "I have a chargeback and I want to talk to a human agent"
+        # typed as a follow-up on an already-resolved U002 case silently
+        # fell through the entire evidence -> decide -> generate pipeline
+        # and produced a complete rebuttal letter, never once being
+        # recognized as an escalation request. Checked here, before any
+        # of the case-reference/list-continuity logic below gets a
+        # chance to run, using only the LATEST reply segment (matching
+        # every other latest-segment check in this function) — an escalation
+        # phrase anywhere earlier in a multi-turn blob shouldn't override
+        # what the merchant is actually saying right now.
+        _raw_context_for_escalation = state.get("additional_context", "")
+        if _raw_context_for_escalation:
+            _segments = [s.strip() for s in _raw_context_for_escalation.split('\n\n') if s.strip()]
+            _latest = _segments[-1] if _segments else _raw_context_for_escalation
+            if classifier.classify_query_type(_latest) == "escalation":
+                return {
+                    "is_valid_query": False,
+                    "final_answer":   self._ESCALATION_MESSAGE,
+                }
+
         # Case-list continuity: chat.html always resends the ORIGINAL query
         # as pendingQuery on every follow-up turn (needs_more_info=True
         # keeps the same query in play until the conversation resolves) —
@@ -1269,15 +1315,7 @@ class DisputeAgent:
 
         # Build the rejection / escalation message
         if query_type == "escalation":
-            final_answer = (
-                "This is an AI assistant — I cannot connect you to a person directly.\n\n"
-                "For human support, contact your:\n"
-                "  • Acquiring bank or payment processor\n"
-                "  • Visa merchant support: 1-800-VISA-911\n"
-                "  • Mastercard merchant support: 1-800-999-0363\n\n"
-                "I can still help you understand chargeback policies or draft a "
-                "rebuttal letter. Just describe your dispute and I'll get started."
-            )
+            final_answer = self._ESCALATION_MESSAGE
         elif query_type == "invalid":
             final_answer = (
                 "Please describe a chargeback dispute — for example: "
