@@ -2100,12 +2100,30 @@ class DisputeAgent:
                         f"due {c['response_deadline']}{bucket_tag[bucket]}"
                     )
                 if len(cases) > 1:
-                    lines.append(
-                        f"\nThe {cases[0]['case_id']} case has the earliest deadline "
-                        f"({cases[0]['response_deadline']}) — want to start with that "
-                        "one? Tell me which case (e.g. \"the first one\", \"#2\", or "
-                        "the case ID)."
-                    )
+                    # cases[0] is the chronologically-earliest deadline
+                    # overall, not necessarily an ACTIONABLE one — reported
+                    # live: with 5 of 7 cases already past deadline, this
+                    # used to suggest "start with" the most-overdue case
+                    # (the earliest deadline of all, but a passed one),
+                    # which makes no sense as a "here's where to begin"
+                    # recommendation. Suggest the earliest deadline that
+                    # HASN'T passed instead — that's the one actually
+                    # actionable today.
+                    upcoming = [c for c, b in zip(cases, buckets) if b != "overdue"]
+                    if upcoming:
+                        lines.append(
+                            f"\nThe {upcoming[0]['case_id']} case has the earliest "
+                            f"deadline that hasn't passed yet "
+                            f"({upcoming[0]['response_deadline']}) — want to start "
+                            "with that one? Tell me which case (e.g. \"the first "
+                            "one\", \"#2\", or the case ID)."
+                        )
+                    else:
+                        lines.append(
+                            f"\nAll {len(cases)} of these are already past their "
+                            "response deadline — tell me which one you'd like to "
+                            "look at (e.g. \"the first one\", \"#2\", or the case ID)."
+                        )
                 else:
                     lines.append("\nWant me to walk you through this one?")
                 return {
