@@ -261,10 +261,31 @@ class DisputeRequest(BaseModel):
                                   against the caller's own merchant scope (see the
                                   dispute() handler below) — a mismatched thread_id
                                   is rejected, never silently accepted.
+        anchored_case_id   (str): The case_id from a prior response's own case_id
+                                  field, if any. Empty on the first call and on any
+                                  turn that never resolved to a specific case.
+                                  Separate from — and much lighter-weight than —
+                                  thread_id/the checkpointer above: this is a plain
+                                  client-supplied HINT, not trusted state. The
+                                  server still re-resolves it via the same
+                                  merchant-scoped DB lookup a case reference found
+                                  in `query` text would use (see
+                                  chargeback_agent.py's _planner_node), and an
+                                  explicit new case reference the merchant actually
+                                  types always takes priority over this hint.
+                                  Exists because chat.html reconstructs a case's
+                                  identity by re-parsing accumulated conversation
+                                  text on every turn — reliable most of the time,
+                                  but confirmed live to occasionally lose track of
+                                  a case named several turns back in a long,
+                                  otherwise-unrelated conversation. This closes
+                                  that gap without touching the (still separately
+                                  inert) checkpointer at all.
     """
     query: str
     additional_context: str = ""
     thread_id: str = ""
+    anchored_case_id: str = ""
 
 
 class DisputeResponse(BaseModel):
@@ -771,7 +792,7 @@ def dispute(
 
     try:
         result = _agent.run(req.query, req.additional_context, merchant_id=merchant_id,
-                             thread_id=thread_id)
+                             thread_id=thread_id, anchored_case_id=req.anchored_case_id)
 
         # Record LLM calls made (~7 per full dispute run, 1 for rejected queries)
         calls_made = 1 if not result.get("is_valid_query") else 7

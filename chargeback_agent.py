@@ -143,6 +143,23 @@ class ChargebackState(TypedDict):
     Attributes:
         user_query            (str):        Merchant's original dispute (PII-masked after validate).
         additional_context    (str):        Follow-up info provided on a second call.
+        anchored_case_id      (str):        Client-supplied hint — the case_id a PRIOR turn's
+                                             response resolved to, if any (see api_server.py's
+                                             DisputeRequest docstring). A plain hint, not trusted
+                                             state: only used by planner_node's case lookup, and
+                                             only as a fallback when this turn's own case-reference
+                                             regex over user_query finds nothing — an explicit new
+                                             case reference the merchant actually types always wins.
+                                             Exists because reconstructing case identity by
+                                             re-parsing accumulated text every turn is reliable most
+                                             of the time but confirmed live to occasionally lose
+                                             track of a case named several turns back in an
+                                             otherwise-unrelated conversation. Deliberately NOT the
+                                             same thing as real checkpointer-based state (see
+                                             LANGCHAIN_LANGGRAPH_GUIDE.md §2.7 for why that's a much
+                                             bigger, separately-tracked piece of work) — this is one
+                                             plain string, re-validated server-side on every call,
+                                             not a resumed session.
         is_valid_query        (bool):       False → validate_node rejected input; graph ends.
         query_type            (str):        "dispute" | "question" | "invalid" — set by validate_node.
         reason_code           (str):        e.g. "13.1" — set by planner_node / extract_code_node.
@@ -302,6 +319,7 @@ class ChargebackState(TypedDict):
     """
     user_query:            str
     additional_context:    str
+    anchored_case_id:      str
     merchant_id:           str
     is_valid_query:        bool
     query_type:            str   # "dispute" | "question" | "invalid"
@@ -2060,7 +2078,17 @@ class DisputeAgent:
         # merchant can't probe another merchant's case by guessing its ID —
         # same defense-in-depth pattern used everywhere else in this project.
         case_ref = re.search(r"\b(UTR\w+|NPCI\w+)\b", query, re.IGNORECASE)
-        if case_ref and merchant_id:
+        # Fallback to the client-supplied anchor ONLY when this turn's own
+        # text has no case reference of its own — an explicit reference the
+        # merchant actually typed always wins, so a genuine topic change to
+        # a different case is never overridden by a stale anchor. See
+        # ChargebackState's anchored_case_id docstring for why this exists:
+        # reconstructing case identity by re-parsing accumulated text every
+        # turn is reliable most of the time, but confirmed live to
+        # occasionally lose track of a case named several turns back in an
+        # otherwise-unrelated conversation.
+        case_ref_token = case_ref.group(1) if case_ref else state.get("anchored_case_id", "")
+        if case_ref_token and merchant_id:
             try:
                 from chargeback_analysis import analyze_chargeback
                 from merchant_db import get_connection
@@ -2068,7 +2096,7 @@ class DisputeAgent:
                 conn = get_connection()
                 row = conn.execute(
                     "SELECT * FROM chargebacks WHERE merchant_id = ? AND (utr = ? OR case_id = ?)",
-                    (merchant_id, case_ref.group(1), case_ref.group(1)),
+                    (merchant_id, case_ref_token, case_ref_token),
                 ).fetchone()
                 conn.close()
 
@@ -2182,7 +2210,7 @@ class DisputeAgent:
                     # this as a brand-new, code-less dispute report — see
                     # extract_code_node for why that silent fallthrough was
                     # a real bug, not just a UX nicety.
-                    case_ref_not_found = case_ref.group(1)
+                    case_ref_not_found = case_ref_token
             except Exception:
                 pass
 
@@ -4450,6 +4478,7 @@ class DisputeAgent:
         additional_context: str = "",
         merchant_id: str = "",
         thread_id: str = "",
+        anchored_case_id: str = "",
     ) -> dict:
         """
         Run the dispute agent for a merchant's chargeback description.
@@ -4461,6 +4490,11 @@ class DisputeAgent:
             thread_id          (str): UUID that identifies this conversation session.
                                       Passed to the checkpointer so the agent can resume
                                       across server restarts. A new UUID is created if empty.
+            anchored_case_id   (str): Client-supplied hint — the case_id a prior turn's
+                                      response resolved to, if any. See ChargebackState's
+                                      own docstring for how planner_node uses this (a
+                                      fallback only, never overriding an explicit new case
+                                      reference actually present in `query`).
 
         Returns:
             dict including thread_id so the client can resume the conversation.
@@ -4472,6 +4506,7 @@ class DisputeAgent:
         initial_state: ChargebackState = {
             "user_query":            query,
             "additional_context":    additional_context,
+            "anchored_case_id":      anchored_case_id,
             "merchant_id":           merchant_id,
             "is_valid_query":        False,
             "query_type":            "",

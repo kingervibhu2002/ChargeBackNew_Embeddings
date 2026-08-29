@@ -326,6 +326,20 @@
                                       // follow-up can still resolve against it. Cleared only
                                       // by looksLikeNewTopic() or an explicit reset
                                       // (switching merchant/tab).
+  let anchoredCaseId       = '';     // Dispute tab only — the case_id the server's OWN last
+                                      // response resolved to, if any. Sent back on the next
+                                      // /dispute call as a hint (see api_server.py's
+                                      // DisputeRequest.anchored_case_id docstring): the
+                                      // server re-parses accumulatedContext from scratch every
+                                      // turn to figure out which case is anchored, which is
+                                      // reliable most of the time but confirmed live to
+                                      // occasionally lose track of a case named several turns
+                                      // back in an otherwise-unrelated conversation. This is a
+                                      // plain hint, not trusted state — an explicit new case
+                                      // reference the merchant actually types always wins
+                                      // server-side. Cleared at the same three points
+                                      // pendingQuery is: merchant switch, tab switch, and a
+                                      // genuine new topic (looksLikeNewTopic()).
   let accumulatedContext   = '';     // all follow-up answers joined; grows each turn, capped
                                       // to the most recent MAX_CONTEXT_SEGMENTS (see
                                       // handleDispute) so a long-running conversation that
@@ -374,6 +388,7 @@
     awaitingContext    = false;
     pendingQuery       = '';
     accumulatedContext = '';
+    anchoredCaseId     = '';
     lastQAQuery        = '';
     lastQuerySql       = '';
     showWelcome();
@@ -384,6 +399,7 @@
     awaitingContext    = false;
     pendingQuery       = '';
     accumulatedContext = '';
+    anchoredCaseId     = '';
     lastQAQuery        = '';
     lastQuerySql       = '';
 
@@ -644,6 +660,7 @@
       awaitingContext     = false;
       pendingQuery        = '';
       accumulatedContext  = '';
+      anchoredCaseId      = '';
       queryEl.placeholder = 'Describe your dispute…';
     }
 
@@ -655,11 +672,11 @@
         ? accumulatedContext.split('\n\n').concat([input])
         : [input];
       accumulatedContext = segments.slice(-MAX_CONTEXT_SEGMENTS).join('\n\n');
-      body = { query: pendingQuery, additional_context: accumulatedContext };
+      body = { query: pendingQuery, additional_context: accumulatedContext, anchored_case_id: anchoredCaseId };
     } else {
       // Turn 1 — fresh dispute (or right after an explicit reset above)
       accumulatedContext = '';
-      body = { query: input, additional_context: '' };
+      body = { query: input, additional_context: '', anchored_case_id: anchoredCaseId };
     }
 
     const res = await fetch('/dispute', {
@@ -691,6 +708,15 @@
     const data = await res.json();
 
     if (!pendingQuery) pendingQuery = body.query;   // only set on the very first turn
+
+    // Only update when the server actually resolved a case this turn — a
+    // generic Q&A turn in the middle of an otherwise case-anchored
+    // conversation (e.g. "does U002 mean the customer won?") legitimately
+    // returns case_id: "" (it never touched planner_node's case lookup at
+    // all), and that must NOT erase a case anchored earlier. See
+    // api_server.py's DisputeRequest.anchored_case_id docstring for why
+    // this round-trip exists.
+    if (data.case_id) anchoredCaseId = data.case_id;
 
     if (data.needs_more_info) {
       // needs_more_info alone only means "keep pendingQuery/additional_context
