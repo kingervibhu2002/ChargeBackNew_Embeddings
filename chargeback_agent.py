@@ -1536,7 +1536,17 @@ class DisputeAgent:
                     f"open {list_intent['reason_code']} case(s)"
                     if list_intent["reason_code"] else "open chargeback case(s)"
                 )
-                if clarification_round >= MAX_CLARIFICATION_ROUNDS:
+                # Streak of CONSECUTIVE out-of-range references, not the
+                # conversation's total segment count — see
+                # count_consecutive_matches()'s own docstring for the class
+                # of bug this avoids (a long, healthy, unrelated
+                # conversation shouldn't make the FIRST out-of-range
+                # reference look like the fourth).
+                out_of_range_streak = classifier.count_consecutive_matches(
+                    raw_context_preview,
+                    lambda seg: classifier.is_out_of_range_case_reference(seg, shown),
+                )
+                if out_of_range_streak >= MAX_CLARIFICATION_ROUNDS:
                     # Repeated out-of-range references, MAX_CLARIFICATION_
                     # ROUNDS worth of back-and-forth already spent — showing
                     # the list a fourth+ time isn't going to land any
@@ -1585,7 +1595,15 @@ class DisputeAgent:
                 # project's own state genuinely doesn't have that answer
                 # to give), ask — the same "don't silently guess" principle
                 # _uncertain() exists for elsewhere in this file.
-                if clarification_round >= MAX_CLARIFICATION_ROUNDS:
+                #
+                # Streak of CONSECUTIVE relative-case-reference replies,
+                # not the conversation's total segment count — same class
+                # of bug as the out-of-range branch just above (see
+                # count_consecutive_matches()'s docstring).
+                relative_ref_streak = classifier.count_consecutive_matches(
+                    raw_context_preview, classifier.looks_like_relative_case_reference,
+                )
+                if relative_ref_streak >= MAX_CLARIFICATION_ROUNDS:
                     return {
                         "is_valid_query": True,
                         "user_query":     masked_query,
@@ -1715,7 +1733,26 @@ class DisputeAgent:
                     # "must be evidence," the same anti-pattern _uncertain()
                     # exists to close off everywhere in this file.
                     anchored_case = classifier.extract_case_reference(masked_query) or "this case"
-                    if clarification_round >= MAX_CLARIFICATION_ROUNDS:
+                    # Cheap syntactic proxy for "did this SAME ambiguity
+                    # also show up in recent turns" — re-running the real
+                    # LLM tool-call (_resolve_data_lookup_intent) against
+                    # every historical segment just to check isn't worth
+                    # the cost/latency; this mirrors the same gate that got
+                    # us into this branch (looks_like_data_lookup and not
+                    # anchored-case-specific) closely enough. Reported
+                    # live: clarification_round (the conversation's TOTAL
+                    # segment count) was already 3 from five unrelated,
+                    # perfectly healthy U002 Q&A turns before "Can I win a
+                    # U002 case?" — the FIRST-EVER instance of this
+                    # ambiguity — triggered this branch and got the
+                    # escalation message instead of the clarifying
+                    # question, having never actually recurred once.
+                    ambiguity_streak = classifier.count_consecutive_matches(
+                        raw_context_preview,
+                        lambda seg: classifier.looks_like_data_lookup(seg)
+                        and not classifier.refers_to_current_case(seg),
+                    )
+                    if ambiguity_streak >= MAX_CLARIFICATION_ROUNDS:
                         return {
                             "is_valid_query": True,
                             "user_query":     masked_query,
@@ -2472,9 +2509,21 @@ class DisputeAgent:
                 "status/resolution/deadline/recommendation — a reason code's "
                 "general meaning is not the same question as what happened "
                 "to one specific case, and answering the wrong one is a real "
-                "error even if the case facts are accurate. Only mention the "
-                "anchored case at all if doing so is the only way to answer "
-                "what was actually asked.\n"
+                "error even if the case facts are accurate.\n"
+                "This applies to SPECIFIC EVIDENCE FACTS too, not just the "
+                "status fields named above — e.g. 'the merchant's ledger "
+                "shows only one debit' or 'network settlement confirms a "
+                "single credit' are THIS case's specific findings, not what "
+                "the reason code means in general. Reported live: asked "
+                "'does U002 mean the customer won?' — a purely conceptual "
+                "question — the answer smuggled in this exact case's "
+                "specific evidentiary conclusion as if it were general "
+                "U002 behavior. Explain the reason code using only what's "
+                "generally true of it; do not cite, paraphrase, or lean on "
+                "any case-specific fact from the retrieved context as "
+                "supporting detail. Only mention the anchored case at all "
+                "if doing so is the only way to answer what was actually "
+                "asked.\n"
             )
 
         response = self._invoke([

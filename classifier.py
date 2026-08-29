@@ -1271,3 +1271,47 @@ def count_clarification_rounds(additional_context: str) -> int:
     """
     segments = [s.strip() for s in additional_context.split('\n\n') if s.strip()]
     return len(segments)
+
+
+def count_consecutive_matches(additional_context: str, predicate) -> int:
+    """
+    How many of the MOST RECENT reply segments consecutively satisfy
+    `predicate`, walking backward from the latest and stopping at the
+    first segment that doesn't — the narrower counterpart to
+    count_clarification_rounds() for the several places in this file that
+    check "has THIS SPECIFIC kind of ambiguity recurred," not "how long
+    has the conversation been in total."
+
+    Reported live: a merchant had a long, healthy, wide-ranging U002 Q&A
+    conversation (five turns — none of them an ambiguous case reference)
+    before asking "Can I win a U002 case?" as their 3rd... no, their
+    FIRST-EVER instance of this specific ambiguity (does "case" here mean
+    THIS anchored case, or something else?). _validate_node's own inline
+    round-cap check used count_clarification_rounds() — the conversation's
+    TOTAL segment count, already 3+ from unrelated exchanges — and
+    escalated on the very first occurrence, having never actually
+    repeated. This function fixes that class of bug at its root: a
+    predicate-specific streak count is 1 the first time a pattern occurs,
+    not however long the conversation happens to already be.
+
+    Args:
+        additional_context: Full accumulated conversation text, same
+                             '\\n\\n'-joined convention as everywhere else
+                             in this module.
+        predicate:           Callable(segment: str) -> bool, evaluated
+                             against one segment at a time (same
+                             latest-segment convention every other
+                             function here uses when given the full text).
+
+    Returns:
+        Length of the streak ending at (and including) the latest
+        segment. 0 if there are no segments, or the latest one doesn't
+        match at all.
+    """
+    segments = [s.strip() for s in additional_context.split('\n\n') if s.strip()]
+    count = 0
+    for seg in reversed(segments):
+        if not predicate(seg):
+            break
+        count += 1
+    return count

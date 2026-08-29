@@ -12,6 +12,7 @@ from classifier import (
     detect_settlement_issue,
     looks_like_new_request,
     looks_like_explicit_resolution_request,
+    count_consecutive_matches,
 )
 
 
@@ -307,6 +308,47 @@ def test_explicit_resolution_bare_ok_is_false():
     )
 
 
+# ---------------------------------------------------------------------------
+# count_consecutive_matches
+# ---------------------------------------------------------------------------
+
+def test_consecutive_matches_only_current_segment():
+    # Five unrelated segments, then one matching segment -- must be 1, not
+    # "total conversation length" (the exact bug this function fixes).
+    ctx = "\n\n".join([
+        "unrelated segment one",
+        "unrelated segment two",
+        "unrelated segment three",
+        "unrelated segment four",
+        "MATCH",
+    ])
+    return _check(
+        "5 segments, only the last matches -> streak of 1",
+        count_consecutive_matches(ctx, lambda s: s == "MATCH") == 1,
+    )
+
+def test_consecutive_matches_counts_trailing_run():
+    ctx = "\n\n".join(["no", "no", "MATCH", "MATCH", "MATCH"])
+    return _check(
+        "3 trailing matches after 2 non-matches -> streak of 3",
+        count_consecutive_matches(ctx, lambda s: s == "MATCH") == 3,
+    )
+
+def test_consecutive_matches_stops_at_first_break():
+    ctx = "\n\n".join(["MATCH", "no", "MATCH"])
+    return _check(
+        "a non-match in the middle breaks the streak -> streak of 1",
+        count_consecutive_matches(ctx, lambda s: s == "MATCH") == 1,
+    )
+
+def test_consecutive_matches_zero_when_latest_doesnt_match():
+    ctx = "\n\n".join(["MATCH", "MATCH", "no"])
+    return _check(
+        "latest segment doesn't match -> streak of 0",
+        count_consecutive_matches(ctx, lambda s: s == "MATCH") == 0,
+    )
+
+
 def main() -> None:
     tests = [
         test_classify_dispute_explicit_code,
@@ -357,6 +399,10 @@ def main() -> None:
         test_explicit_resolution_draft_letter,
         test_explicit_resolution_vague_help_is_false,
         test_explicit_resolution_bare_ok_is_false,
+        test_consecutive_matches_only_current_segment,
+        test_consecutive_matches_counts_trailing_run,
+        test_consecutive_matches_stops_at_first_break,
+        test_consecutive_matches_zero_when_latest_doesnt_match,
     ]
 
     print(f"\nRunning {len(tests)} classifier tests...\n")
