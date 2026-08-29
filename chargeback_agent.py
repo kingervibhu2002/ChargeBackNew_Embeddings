@@ -73,11 +73,17 @@ import retrieval_evaluator
 # ---------------------------------------------------------------------------
 
 @tool
-def list_merchant_cases(reason_code: str = "") -> str:
+def list_merchant_cases(reason_code: str = "", active_deadline_only: bool = False) -> str:
     """List the merchant's own open chargeback cases so they can be shown
     or picked from, optionally filtered to one reason code (e.g. U002).
-    Pass empty string for no filter. Use this when the merchant wants to
-    SEE or SELECT a case."""
+    Pass empty string for no reason-code filter. Use this when the
+    merchant wants to SEE or SELECT a case.
+    Set active_deadline_only=True when the merchant's question asks to
+    exclude cases whose response deadline has already passed/expired/
+    elapsed/gone by, or to show only ones still within their deadline —
+    however that's phrased (misspellings and synonyms included, e.g.
+    "dealine not surpassed", "still has time left"). Leave False for a
+    plain listing request with no such qualifier."""
     return ""
 
 
@@ -591,7 +597,21 @@ class DisputeAgent:
 
         if tool_call["name"] == "list_merchant_cases":
             reason_code = (tool_call["args"].get("reason_code") or "").strip().upper()
-            active_deadline_only = classifier.looks_like_active_deadline_filter(query)
+            # OR'd with the model's own tool-call argument, not replaced by
+            # it: this regex is a narrow keyword match (confirmed live it
+            # misses typos/synonyms — "dealine ... surpassed" matched
+            # neither "deadline" nor "passed" as whole words), while the
+            # LLM argument handles arbitrary phrasing the way reason_code
+            # already does above. Kept as a deterministic floor rather than
+            # relying on the LLM alone, the same reasoning as
+            # looks_like_data_lookup() below it in this file: a false
+            # negative from the LLM on a genuinely non-deterministic call
+            # shouldn't silently drop the filter when the keywords are
+            # actually right there in the text.
+            active_deadline_only = (
+                classifier.looks_like_active_deadline_filter(query)
+                or bool(tool_call["args"].get("active_deadline_only"))
+            )
             cases = self._filtered_open_cases(merchant_id, reason_code, active_deadline_only)
             messages.append(ToolMessage(
                 content=f"Found {len(cases)} matching case(s).",
