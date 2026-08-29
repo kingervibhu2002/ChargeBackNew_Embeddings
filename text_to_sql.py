@@ -79,13 +79,17 @@ Columns:
   resolution             TEXT     — Fight | Accept | NULL (if still open)
   resolution_date        TEXT     — date resolved, or NULL
   notes                  TEXT     — free-form notes
-  suggested_action       TEXT     — Fight | Accept | NULL — ADVISORY ONLY, set by
-                                    suggestion_poller.py for merchants who have NOT
-                                    opted into auto-decision. Never changes status/
-                                    resolution itself — the merchant still decides.
-                                    Can be STALE: this poller runs periodically, not
-                                    live, so a case's status may have changed more
-                                    recently than its suggestion was computed. ALWAYS
+  suggested_action       TEXT     — Fight | Accept | NULL — ADVISORY ONLY, refreshed by
+                                    suggestion_poller.py (for merchants who have NOT
+                                    opted into auto-decision) AND by the live dispute
+                                    agent (chargeback_agent.py, via
+                                    case_recommendations.py) whenever a live
+                                    conversation reaches a real recommendation — either
+                                    writer only ever touches this column, never status/
+                                    resolution itself; the merchant still decides.
+                                    Can be STALE regardless of writer: the poller runs
+                                    periodically, and even a live-chat write reflects
+                                    only that one conversation's moment in time. ALWAYS
                                     filter status = 'Open' AND resolution IS NULL
                                     alongside suggested_action IS NOT NULL — a
                                     resolved case must never be shown as still

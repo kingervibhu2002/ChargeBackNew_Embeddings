@@ -114,6 +114,8 @@ There are really two separate "backends" here:
 
 Both layers ultimately reach into the same `chargebacks.db` SQLite database and reuse the same `decision_rules.py` fight/refund logic, so a merchant gets the same answer whether they ask the Dispute Assistant directly or let the automation decide for them.
 
+The live layer also **writes back** into that shared state, not just reads from it: `case_recommendations.py` persists every real fight/refund recommendation the live chat agent reaches — both the main pipeline's evidence-informed decision and `_build_case_intro()`'s evidence-blind preview (the same CBS/ledger-only view the background pollers use) — into an append-only `case_recommendations` table plus a refreshed `suggested_action`/`suggestion_reason` cache, so a recommendation given in chat shows up the same way a poller-derived one would, and is queryable via `GET /case-recommendations/{case_id}` or `GET /case-recommendations`. It never touches `status`/`resolution`/`resolution_date` — those stay reserved for the merchant's own confirmed action or `auto_decision_poller.py`, the same advisory-only boundary `suggestion_poller.py` already draws. See `CHARGEBACK_AGENT_GUIDE.md`'s cross-cutting-concerns section for the full design.
+
 ## How a request actually flows through the system
 
 ### 1. Asking a knowledge-base question (Q&A tab)

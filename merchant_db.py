@@ -100,10 +100,18 @@ def create_schema(conn: sqlite3.Connection) -> None:
             notes                   TEXT DEFAULT '',
 
             suggested_action        TEXT DEFAULT NULL,      -- Fight / Accept / NULL — advisory
-                                                              -- only, set by suggestion_poller.py for
-                                                              -- merchants who have NOT opted into
-                                                              -- auto-decision; never changes status/
-                                                              -- resolution itself
+                                                              -- only, refreshed by suggestion_poller.py
+                                                              -- (for merchants who have NOT opted into
+                                                              -- auto-decision) AND by the live dispute
+                                                              -- agent (chargeback_agent.py's DisputeAgent,
+                                                              -- via case_recommendations.py) whenever a
+                                                              -- live conversation reaches a real
+                                                              -- recommendation for a case — regardless of
+                                                              -- auto_decision preference, since that
+                                                              -- toggle governs background automation, not
+                                                              -- conversational help. Either writer only
+                                                              -- ever touches these two columns, never
+                                                              -- status/resolution/resolution_date.
             suggestion_reason       TEXT DEFAULT NULL
         )
     """)

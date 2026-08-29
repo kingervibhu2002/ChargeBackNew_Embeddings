@@ -183,6 +183,26 @@ class ChargebackState(TypedDict):
                                              logic.
         decision              (str):        "fight" or "refund" — set by decide_node.
         decision_reason       (str):        Explanation of the decision.
+        decision_source       (str):        "" | "ledger" | "rules" | "llm" — HOW decide_node
+                                             reached `decision`, set alongside it. Read by
+                                             run() to tag a persisted recommendation
+                                             (case_recommendations.py) with its provenance
+                                             without re-deriving it later.
+        case_intro_action     (str):        "fight" | "refund" | "" — set by validate_node's
+                                             two case-intro early-return branches from
+                                             _build_case_intro()'s analyze_chargeback() result.
+                                             NOT the same signal as `decision` above — this is
+                                             evidence-BLIND (CBS/ledger only), the same view
+                                             the background pollers (auto_decision_poller.py,
+                                             suggestion_poller.py) already act on/advise from,
+                                             shown as a preview before any evidence-gathering
+                                             happens. Read by run() to persist a
+                                             case-intro-preview recommendation even though
+                                             this path never reaches decide_node.
+        case_intro_reason     (str):        Explanation paired with case_intro_action, copied
+                                             verbatim from analyze_chargeback()'s reason text.
+        case_intro_source     (str):        "cbs" | "ledger" | "rules" — chargeback_analysis.
+                                             Analysis.source, paired with case_intro_action.
         draft_response        (str):        First version of letter/advice — set by generate_node.
         iteration             (int):        How many times generate_node has run.
         confidence_score      (int):        1-10 rating of answer quality — set by reflect_node.
@@ -278,6 +298,10 @@ class ChargebackState(TypedDict):
     merchant_is_asking_question: bool
     decision:              str
     decision_reason:       str
+    decision_source:       str
+    case_intro_action:     str
+    case_intro_reason:     str
+    case_intro_source:     str
     draft_response:        str
     iteration:             int
     confidence_score:      int
@@ -1006,10 +1030,12 @@ class DisputeAgent:
         never return scaffolding-only content.
 
         Returns:
-            {"final_answer": str, "reason_code": str, "card_network": str}
-            or None if case_id doesn't resolve to a real row for this
-            merchant — the caller falls through to today's existing
-            "Help me with case <id>" rewrite in that case, never a dead end.
+            {"final_answer": str, "reason_code": str, "card_network": str,
+            "case_id": str, "case_intro_action": str, "case_intro_reason": str,
+            "case_intro_source": str} or None if case_id doesn't resolve to
+            a real row for this merchant — the caller falls through to
+            today's existing "Help me with case <id>" rewrite in that case,
+            never a dead end.
         """
         messages = [
             SystemMessage(content=(
@@ -1080,10 +1106,28 @@ class DisputeAgent:
         if case_row is None:
             return None
 
+        # A second, deliberately-accepted redundant analyze_chargeback()
+        # call — _lookup_case_details() above already ran one internally to
+        # build its tool-message text, but that method's return contract
+        # is a plain 2-tuple (content, row) reused elsewhere as a live
+        # tool-call executor; threading a third value through it isn't
+        # worth it for a call this cheap (pure SQL via cbs.py, no LLM/
+        # network I/O). Surfaced here so run() can persist this preview
+        # recommendation (case_recommendations.py) even though this whole
+        # path never reaches decide_node — see ChargebackState's
+        # case_intro_action docstring for why this is evidence-BLIND,
+        # not the same signal as decision_node's own decision.
+        from chargeback_analysis import analyze_chargeback
+        analysis = analyze_chargeback(case_row, db_path="chargebacks.db")
+
         return {
             "final_answer": (final_ai.content if final_ai else "").strip(),
             "reason_code":  reason_code,
             "card_network": network,
+            "case_id":           case_row["case_id"],
+            "case_intro_action": analysis.action or "",
+            "case_intro_reason": analysis.reason,
+            "case_intro_source": analysis.source,
         }
 
     def _validate_node(self, state: ChargebackState) -> dict:
@@ -1258,6 +1302,15 @@ class DisputeAgent:
                             # telemetry can see what's being waited on next.
                             "clarification_reason": CLARIFICATION_REASON_MISSING_EVIDENCE,
                             "clarification_round":  clarification_round,
+                            # This path returns straight to END, never
+                            # reaching planner_node (the node that would
+                            # normally set resolved_case_id) — set it here
+                            # too, or run() has no case_id to persist
+                            # case_intro_action against.
+                            "resolved_case_id":  intro["case_id"],
+                            "case_intro_action": intro["case_intro_action"],
+                            "case_intro_reason": intro["case_intro_reason"],
+                            "case_intro_source": intro["case_intro_source"],
                         }
                     # intro build failed (e.g. tool loop never resolved a
                     # row) — fall through to planner_node's step 4b, same
@@ -1357,6 +1410,13 @@ class DisputeAgent:
                         # case WAS just resolved, this is forward progress.
                         "clarification_reason": CLARIFICATION_REASON_MISSING_EVIDENCE,
                         "clarification_round":  clarification_round,
+                        # Same reasoning as the direct-mention branch above:
+                        # this path never reaches planner_node, so
+                        # resolved_case_id must be set here too.
+                        "resolved_case_id":  intro["case_id"],
+                        "case_intro_action": intro["case_intro_action"],
+                        "case_intro_reason": intro["case_intro_reason"],
+                        "case_intro_source": intro["case_intro_source"],
                     }
                 masked_query = f"Help me with case {resolved}"
             elif classifier.is_out_of_range_case_reference(raw_context_preview, shown):
@@ -3248,6 +3308,7 @@ class DisputeAgent:
             return {
                 "decision":        ledger_decision,
                 "decision_reason": state.get("ledger_decision_reason", ""),
+                "decision_source": "ledger",
             }
 
         # Settlement scenario — merchant answered the "was customer charged?" question.
@@ -3325,7 +3386,7 @@ class DisputeAgent:
         )
         if rule_result is not None:
             decision, decision_reason = rule_result
-            return {"decision": decision, "decision_reason": decision_reason}
+            return {"decision": decision, "decision_reason": decision_reason, "decision_source": "rules"}
 
         docs_text = "\n\n".join(state.get("retrieved_docs", [])[:1])
 
@@ -3382,6 +3443,7 @@ class DisputeAgent:
         return {
             "decision":        decision,
             "decision_reason": decision_reason,
+            "decision_source": "llm",
         }
 
     def _generate_node(self, state: ChargebackState) -> dict:
@@ -3908,6 +3970,61 @@ class DisputeAgent:
 
         return graph.compile(checkpointer=self._checkpointer)
 
+    # ── Recommendation persistence ──────────────────────────────────────────
+
+    def _persist_recommendation(
+        self,
+        case_id: str,
+        merchant_id: str,
+        action: str,
+        reason: str,
+        source: str,
+        confidence_score: int,
+        origin: str,
+        thread_id: str = "",
+    ) -> None:
+        """
+        Single funnel run() routes both persistence call sites through
+        (the main pipeline's evidence-informed decision, and
+        _build_case_intro()'s evidence-blind preview) — see
+        case_recommendations.py's module docstring for the full design
+        and the HARD CONSTRAINT this never touches chargebacks.status/
+        resolution/resolution_date, only the advisory suggested_action/
+        suggestion_reason columns plus the new case_recommendations
+        history table.
+
+        Best-effort: a persistence failure must never break the merchant-
+        facing answer already computed and returned — same swallow-and-
+        continue convention this file already uses for non-critical
+        enrichment elsewhere (e.g. _planner_node's own case-reference
+        lookup).
+
+        Args:
+            case_id, merchant_id: identify which row to update/log against.
+            action:   "fight" | "refund" — anything else is a no-op (never
+                      a genuine decision to persist; covers empty-string
+                      "uncertain"/settlement-branch/ask_user turns).
+            reason, source, confidence_score, origin, thread_id: passed
+                      straight through to case_recommendations.record_
+                      recommendation() — see that function's own docstring.
+        """
+        if action not in ("fight", "refund") or not case_id or not merchant_id:
+            return
+        try:
+            from case_recommendations import record_recommendation
+            record_recommendation(
+                case_id=case_id,
+                merchant_id=merchant_id,
+                action=action,
+                reason=reason,
+                source=source or "rules",
+                origin=origin,
+                confidence_score=confidence_score,
+                thread_id=thread_id,
+            )
+        except Exception:
+            pass
+
     # ── Public interface ──────────────────────────────────────────────────
 
     def run(
@@ -3962,6 +4079,10 @@ class DisputeAgent:
             "merchant_is_asking_question": False,
             "decision":              "",
             "decision_reason":       "",
+            "decision_source":       "",
+            "case_intro_action":     "",
+            "case_intro_reason":     "",
+            "case_intro_source":     "",
             "draft_response":        "",
             "iteration":             0,
             "confidence_score":      0,
@@ -3974,6 +4095,32 @@ class DisputeAgent:
         # Thread config enables checkpointer to persist/resume this session.
         config = {"configurable": {"thread_id": thread_id}} if self._checkpointer else {}
         result = self._graph.invoke(initial_state, config=config)
+
+        # Persist whichever recommendation this turn actually reached, for
+        # whichever case it was actually about — see case_recommendations.py
+        # and _persist_recommendation()'s own docstrings. The two branches
+        # are mutually exclusive by construction: the case-intro preview
+        # path (case_intro_action) never reaches decide_node, so `decision`
+        # stays at its "" initial_state default whenever case_intro_action
+        # is set, and vice versa.
+        resolved_case_id = result.get("resolved_case_id", "")
+        if resolved_case_id and merchant_id:
+            if result.get("decision") in ("fight", "refund"):
+                self._persist_recommendation(
+                    case_id=resolved_case_id, merchant_id=merchant_id,
+                    action=result["decision"], reason=result.get("decision_reason", ""),
+                    source=result.get("decision_source", ""),
+                    confidence_score=result.get("confidence_score", 0),
+                    origin="live_chat", thread_id=thread_id,
+                )
+            elif result.get("case_intro_action") in ("fight", "refund"):
+                self._persist_recommendation(
+                    case_id=resolved_case_id, merchant_id=merchant_id,
+                    action=result["case_intro_action"], reason=result.get("case_intro_reason", ""),
+                    source=result.get("case_intro_source", ""),
+                    confidence_score=result.get("confidence_score", 0),
+                    origin="live_chat_preview", thread_id=thread_id,
+                )
 
         card   = result.get("card_network", "")
         code   = result.get("reason_code",  "")
@@ -4004,6 +4151,7 @@ class DisputeAgent:
             "thread_id":           thread_id,
             "clarification_round":  result.get("clarification_round",  0),
             "clarification_reason": result.get("clarification_reason", ""),
+            "case_id":               resolved_case_id,
         }
 
 

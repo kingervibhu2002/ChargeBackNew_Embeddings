@@ -41,6 +41,11 @@ from pydantic import BaseModel
 import classifier
 import llm_provider
 from auth import DEMO_IDENTITIES, Identity, require_identity, resolve_identity
+from case_recommendations import (
+    get_recommendation_history,
+    init_schema as init_case_recommendations_schema,
+    list_recent_recommendations,
+)
 from chargeback_agent import build_dispute_agent
 from guardrails import AuditLogger, CostCircuitBreaker, RateLimiter
 from merchant_db import init_db, list_open_chargebacks, MERCHANTS
@@ -117,6 +122,9 @@ async def lifespan(app: FastAPI):
     # Initialise SQLite chargeback DB (creates + seeds if missing)
     init_db()
     print(f"Merchant DB ready ({len(MERCHANTS)} merchants).")
+
+    init_case_recommendations_schema()
+    print("Case recommendation history ready (case_recommendations table).")
 
     _checkpointer_cm = SqliteSaver.from_conn_string("checkpoints.db")
     _checkpointer    = _checkpointer_cm.__enter__()
@@ -290,6 +298,11 @@ class DisputeResponse(BaseModel):
         clarification_reason (str):    Why the pending question (if any) was asked — empty
                                        when final_answer isn't a question. Purely observational,
                                        not used for routing.
+        case_id           (str):       The real case this turn resolved to, if any — empty for
+                                       a generic question/list turn with no single case in
+                                       focus. Lets a client link straight to
+                                       GET /case-recommendations/{case_id} without re-parsing
+                                       the query text.
     """
     final_answer:        str
     decision:            str
@@ -305,6 +318,7 @@ class DisputeResponse(BaseModel):
     thread_id:           str
     clarification_round:  int
     clarification_reason: str
+    case_id:               str
 
 
 # ---------------------------------------------------------------------------
@@ -791,6 +805,7 @@ def dispute(
             thread_id           = result.get("thread_id", thread_id),
             clarification_round  = result.get("clarification_round",  0),
             clarification_reason = result.get("clarification_reason", ""),
+            case_id               = result.get("case_id", ""),
         )
 
     except Exception as exc:
@@ -842,6 +857,97 @@ def my_open_chargebacks(identity: Identity = Depends(require_identity)) -> OpenC
     return OpenChargebacksResponse(
         total_open=total_open,
         cases=[OpenChargebackSummary(**r) for r in rows],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Live-chat recommendation history (case_recommendations.py)
+# ---------------------------------------------------------------------------
+
+class CaseRecommendationEntry(BaseModel):
+    action:           str
+    reason:           str
+    source:           str
+    origin:           str
+    confidence_score: Optional[int]
+    thread_id:        Optional[str]
+    created_at:       str
+
+
+class CaseRecommendationHistoryResponse(BaseModel):
+    case_id: str
+    history: List[CaseRecommendationEntry]
+
+
+@app.get("/case-recommendations/{case_id}", summary="Recommendation history for one case",
+         response_model=CaseRecommendationHistoryResponse)
+def case_recommendation_history(
+    case_id:  str,
+    identity: Identity = Depends(require_identity),
+) -> CaseRecommendationHistoryResponse:
+    """
+    Every live-chat-derived fight/refund recommendation ever recorded for
+    one case, most recent first — the queryable counterpart to
+    guardrails.AuditLogger's audit.log (append-only JSONL, not
+    joinable/queryable). A merchant caller only ever sees their OWN case's
+    history; a case_id belonging to another merchant naturally returns an
+    empty list rather than an error — never confirms or denies it exists,
+    same defense-in-depth pattern as merchant_db.list_open_chargebacks and
+    the case_ref_not_found handling in chargeback_agent.py. Admin roles can
+    look up any case_id unscoped.
+    """
+    scope_merchant_id = None if identity.is_admin else identity.merchant_id
+    rows = get_recommendation_history(case_id, merchant_id=scope_merchant_id)
+    return CaseRecommendationHistoryResponse(
+        case_id=case_id,
+        history=[
+            CaseRecommendationEntry(
+                action=r["action"], reason=r["reason"], source=r["source"],
+                origin=r["origin"], confidence_score=r["confidence_score"],
+                thread_id=r["thread_id"], created_at=r["created_at"],
+            )
+            for r in rows
+        ],
+    )
+
+
+class RecentRecommendationEntry(CaseRecommendationEntry):
+    case_id:     str
+    merchant_id: str
+
+
+class RecentRecommendationsResponse(BaseModel):
+    total:           int
+    recommendations: List[RecentRecommendationEntry]
+
+
+@app.get("/case-recommendations", summary="Recent recommendations (admin: all/one merchant; merchant: own only)",
+         response_model=RecentRecommendationsResponse)
+def recent_case_recommendations(
+    merchant_id: str = "",   # admin-only narrowing; ignored for merchant callers
+    days:        int = 30,
+    identity:    Identity = Depends(require_identity),
+) -> RecentRecommendationsResponse:
+    """
+    Cross-case "recommendations in the last N days" view. Merchant callers
+    are always forced to their own merchant_id (the query param is ignored
+    for them, same defense-in-depth as text_to_sql.py's forced WHERE
+    merchant_id filter) — admin roles may narrow to one merchant via the
+    param or leave it blank to see every merchant's recommendations.
+    """
+    scope = (merchant_id or None) if identity.is_admin else identity.merchant_id
+    rows = list_recent_recommendations(merchant_id=scope, days=days)
+    return RecentRecommendationsResponse(
+        total=len(rows),
+        recommendations=[
+            RecentRecommendationEntry(
+                case_id=r["case_id"], merchant_id=r["merchant_id"],
+                action=r["action"], reason=r["reason"], source=r["source"],
+                origin=r["origin"], confidence_score=r["confidence_score"],
+                thread_id=r["thread_id"], created_at=r["created_at"],
+            )
+            for r in rows
+        ],
     )
 
 
