@@ -40,6 +40,20 @@ payment switch, CBS, GL/ledger, reconciliation platform, and more. This is a
 synthetic, production-inspired schema scoped to exactly what a chargeback
 investigation needs.
 
+Then added `network_debit_attempts`, for a gap in the reasoning above it,
+not the schema: `reconcile_utr()` proves the bank's ledger agrees with what
+the network settled TO THE MERCHANT — it says nothing about how many times
+the CUSTOMER's account was actually debited upstream, at the NPCI switch.
+A U002 (duplicate transaction) case with a clean, reconciled single credit
+was being treated as proof the customer's duplicate-charge claim was false
+— but a genuine duplicate debit could occur at an intermediary/PSP layer
+and be reversed (or, worse, simply never make it into this merchant's
+ledger at all) without that clean-ledger picture ever changing. This table
+is the customer-side half of the same investigation: what the network's
+own transaction log shows was actually attempted against the customer,
+independent of what reached the merchant. See get_debit_attempt_status()
+and chargeback_analysis.py's U002 branch for how the two halves combine.
+
 This is deliberately separate from decision_rules.py's `refund_already_issued`
 evidence tag, which the merchant supplies by assertion during a live chat
 (unverified). This table is the authoritative source that assertion should
@@ -87,6 +101,26 @@ def create_schema(conn: sqlite3.Connection) -> None:
             cycle_id        TEXT NOT NULL,
             reference_id    TEXT NOT NULL UNIQUE,
             remarks         TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS network_debit_attempts (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            utr            TEXT NOT NULL,           -- matches chargebacks.utr
+            attempt_seq    INTEGER NOT NULL,        -- 1st, 2nd, ... debit attempt against
+                                                      -- the CUSTOMER's account for this
+                                                      -- transaction, as seen at the NPCI/PSP
+                                                      -- switch — independent of whether it
+                                                      -- ever produced a merchant-side credit.
+            outcome        TEXT NOT NULL,           -- 'success' | 'reversed' — 'reversed'
+                                                      -- means NPCI/the issuer reversed THIS
+                                                      -- attempt before settlement (customer
+                                                      -- not net-charged for it), the same
+                                                      -- distinction ledger_entries.reversal_
+                                                      -- of_id draws on the merchant's side.
+            npci_txn_ref   TEXT NOT NULL UNIQUE,
+            initiated_at   TEXT NOT NULL,            -- ISO date
+            remarks        TEXT DEFAULT ''
         )
     """)
     conn.commit()
@@ -241,9 +275,148 @@ def seed_data(
     )
 
 
+def seed_network_data(
+    conn: sqlite3.Connection,
+    no_data_fraction: float = 0.15,
+    duplicate_reversed_fraction: float = 0.07,
+    duplicate_unreversed_fraction: float = 0.03,
+) -> None:
+    """
+    Seed network_debit_attempts — kept as its own pass over `chargebacks`,
+    independent of seed_data()'s ledger/settlement scenarios above (a
+    different random roll, not conditioned on is_duplicate/is_refunded/
+    etc.), so this table can be added to an ALREADY-seeded database (see
+    init_db()) without re-touching ledger_entries/settlement_entries at all.
+
+    Most transactions get a single, unremarkable debit attempt — matching
+    the single merchant credit seed_data() already gave them. A minority
+    haven't been reconciled with the network yet at all (no rows — see
+    get_debit_attempt_status()'s "no_data" status). Of the rest, a smaller
+    minority show a genuine second attempt: most of THOSE were reversed by
+    the network before settlement (a real duplicate attempt the customer
+    was never net-charged for), and a smaller remainder succeeded and were
+    never reversed — a genuine network-level duplicate debit that this
+    merchant's own ledger has no way to see, the exact gap this table
+    exists to close.
+
+    Args:
+        no_data_fraction:             Fraction with NO network record at
+                                     all yet (not yet reconciled).
+        duplicate_reversed_fraction:  Fraction with a second attempt that
+                                     was reversed before settlement.
+        duplicate_unreversed_fraction: Fraction with a second attempt that
+                                     succeeded and was never reversed — a
+                                     real duplicate debit invisible to the
+                                     merchant's own ledger.
+    """
+    rows = conn.execute("SELECT utr, transaction_date FROM chargebacks").fetchall()
+    inserted = 0
+    for row in rows:
+        roll = random.random()
+        if roll < no_data_fraction:
+            continue  # not yet reconciled with the network — no rows at all
+
+        attempt_date = _parse_date(row["transaction_date"])
+        try:
+            conn.execute(
+                "INSERT INTO network_debit_attempts "
+                "(utr, attempt_seq, outcome, npci_txn_ref, initiated_at, remarks) "
+                "VALUES (?, 1, 'success', ?, ?, ?)",
+                (row["utr"], f"NPCI-{row['utr']}-1", attempt_date.isoformat(),
+                 "First debit attempt against the customer"),
+            )
+            inserted += 1
+        except sqlite3.IntegrityError:
+            pass
+
+        second_outcome = None
+        if roll < no_data_fraction + duplicate_reversed_fraction:
+            second_outcome = "reversed"
+        elif roll < no_data_fraction + duplicate_reversed_fraction + duplicate_unreversed_fraction:
+            second_outcome = "success"
+        if second_outcome:
+            second_date = attempt_date + timedelta(minutes=random.randint(1, 30))
+            remarks = (
+                "Retry attempt — reversed by the network before settlement"
+                if second_outcome == "reversed" else
+                "Second successful debit — not reflected in the merchant's ledger credit"
+            )
+            try:
+                conn.execute(
+                    "INSERT INTO network_debit_attempts "
+                    "(utr, attempt_seq, outcome, npci_txn_ref, initiated_at, remarks) "
+                    "VALUES (?, 2, ?, ?, ?, ?)",
+                    (row["utr"], second_outcome, f"NPCI-{row['utr']}-2",
+                     second_date.isoformat(), remarks),
+                )
+            except sqlite3.IntegrityError:
+                pass
+
+    conn.commit()
+    print(
+        f"Seeded network debit-attempt records for {inserted} transactions "
+        f"(~{no_data_fraction:.0%} not yet reconciled with the network, "
+        f"~{duplicate_reversed_fraction:.0%} a second attempt reversed before "
+        f"settlement, ~{duplicate_unreversed_fraction:.0%} a second attempt that "
+        f"succeeded but isn't reflected in the merchant's ledger)."
+    )
+
+
 def _parse_date(iso_str: str):
     from datetime import date
     return date.fromisoformat(iso_str)
+
+
+def get_debit_attempt_status(utr: str, db_path: str = DB_PATH) -> dict:
+    """
+    What the payment network's OWN transaction log shows about how many
+    times the CUSTOMER's account was actually debited for this UTR —
+    independent of, and answering a different question than, count_credits()
+    (which only says how many times the MERCHANT was credited).
+
+    This is the customer-side half of a U002 investigation: a clean,
+    reconciled merchant ledger (reconcile_utr()) only proves what reached
+    the merchant. It says nothing about whether a duplicate debit occurred
+    upstream — at an intermediary/PSP layer — that was later reversed, or
+    (worse) one that succeeded but whose credit never reached this
+    merchant's ledger at all. See cbs.py's module docstring for the live
+    U002 case that made this gap concrete.
+
+    Returns:
+        {"attempt_count": int, "unreversed_count": int,
+         "status": "no_data" | "single_attempt" | "duplicate_reversed" |
+                    "duplicate_unreversed"}
+        "no_data" means this UTR hasn't been reconciled with the network
+        yet — nothing here to confirm OR refute a duplicate-debit claim,
+        not the same as a confirmed single attempt.
+    """
+    conn = get_connection(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT outcome FROM network_debit_attempts WHERE utr = ?",
+            (utr,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not rows:
+        return {"attempt_count": 0, "unreversed_count": 0, "status": "no_data"}
+
+    attempt_count = len(rows)
+    unreversed_count = sum(1 for r in rows if r["outcome"] != "reversed")
+
+    if attempt_count == 1:
+        status = "single_attempt"
+    elif unreversed_count <= 1:
+        status = "duplicate_reversed"
+    else:
+        status = "duplicate_unreversed"
+
+    return {
+        "attempt_count": attempt_count,
+        "unreversed_count": unreversed_count,
+        "status": status,
+    }
 
 
 def init_db(db_path: str = DB_PATH) -> None:
@@ -255,6 +428,16 @@ def init_db(db_path: str = DB_PATH) -> None:
         seed_data(conn)
     else:
         print(f"ledger_entries already has {count} rows — skipping seed.")
+
+    # A separate presence check, not folded into the one above — this table
+    # was added after ledger_entries/settlement_entries were already in
+    # production use, and needs to backfill onto an existing database
+    # without re-touching (or re-randomizing) either of those.
+    net_count = conn.execute("SELECT COUNT(*) FROM network_debit_attempts").fetchone()[0]
+    if net_count == 0:
+        seed_network_data(conn)
+    else:
+        print(f"network_debit_attempts already has {net_count} rows — skipping seed.")
     conn.close()
 
 
@@ -418,7 +601,9 @@ if __name__ == "__main__":
     # the old one.
     conn.execute("DROP TABLE IF EXISTS ledger_entries")
     conn.execute("DROP TABLE IF EXISTS settlement_entries")
+    conn.execute("DROP TABLE IF EXISTS network_debit_attempts")
     conn.commit()
     create_schema(conn)
     seed_data(conn)
+    seed_network_data(conn)
     conn.close()

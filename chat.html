@@ -693,10 +693,24 @@
     if (!pendingQuery) pendingQuery = body.query;   // only set on the very first turn
 
     if (data.needs_more_info) {
-      // Agent needs more details — stay in follow-up mode, accumulate answers
+      // needs_more_info alone only means "keep pendingQuery/additional_context
+      // alive for a natural follow-up" (e.g. a case-intro preview inviting
+      // "give me a resolution") — it does NOT mean final_answer is itself a
+      // pending question. clarification_reason is what actually says that
+      // (see api_server.py's DisputeResponse docstring: empty "when
+      // final_answer isn't a question"). Without this check, a complete,
+      // confident case summary or clarification answer got wrapped in the
+      // "I need a bit more information before I can help" banner despite
+      // asking the merchant nothing at all.
       awaitingContext = true;
-      queryEl.placeholder = 'Type your answer and press Enter…';
-      addFollowUpBubble(data.final_answer);
+      queryEl.placeholder = data.clarification_reason
+        ? 'Type your answer and press Enter…'
+        : 'Ask a follow-up or describe a new dispute…';
+      if (data.clarification_reason) {
+        addFollowUpBubble(data.final_answer);
+      } else {
+        addDisputeBubble(data);
+      }
     } else {
       // A complete answer, not a full reset: pendingQuery/accumulatedContext
       // stay alive so a follow-up ("what about the second one?", "and this

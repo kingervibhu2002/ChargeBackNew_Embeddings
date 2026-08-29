@@ -6,7 +6,13 @@ Run:
 """
 
 import sys
-from classifier import classify_query_type, extract_network_and_code, detect_settlement_issue
+from classifier import (
+    classify_query_type,
+    extract_network_and_code,
+    detect_settlement_issue,
+    looks_like_new_request,
+    looks_like_explicit_resolution_request,
+)
 
 
 def _check(label: str, condition: bool, detail: str = "") -> bool:
@@ -225,6 +231,82 @@ def test_settlement_unrelated_false():
     )
 
 
+# ---------------------------------------------------------------------------
+# looks_like_new_request
+# ---------------------------------------------------------------------------
+
+def test_new_request_vague_help_with_it_is_not_new():
+    return _check(
+        "'help me with it' -> False (vague, points back at the anchored case)",
+        looks_like_new_request("help me with it") is False,
+    )
+
+def test_new_request_vague_help_withis_typo_is_not_new():
+    return _check(
+        "'help me withis' -> False ('with this' typo, still anaphoric)",
+        looks_like_new_request("help me withis") is False,
+    )
+
+def test_new_request_vague_help_with_this_is_not_new():
+    return _check(
+        "'help me with this' -> False (bare 'this', no concrete subject)",
+        looks_like_new_request("help me with this") is False,
+    )
+
+def test_new_request_bare_help_me_is_not_new():
+    return _check(
+        "'help me' alone -> False",
+        looks_like_new_request("help me") is False,
+    )
+
+def test_new_request_concrete_subject_is_new():
+    return _check(
+        "'help me with all open questions' -> True (a genuinely different, broader ask)",
+        looks_like_new_request("help me with all open questions") is True,
+    )
+
+def test_new_request_show_me_unaffected():
+    return _check(
+        "'show me my other cases' -> True (unaffected — not the 'help me' family)",
+        looks_like_new_request("show me my other cases") is True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# looks_like_explicit_resolution_request
+# ---------------------------------------------------------------------------
+
+def test_explicit_resolution_need_a_resolution():
+    return _check(
+        "'i need a resolution for this' -> True",
+        looks_like_explicit_resolution_request("i need a resolution for this") is True,
+    )
+
+def test_explicit_resolution_go_ahead():
+    return _check(
+        "'go ahead and draft it' -> True",
+        looks_like_explicit_resolution_request("go ahead and draft it") is True,
+    )
+
+def test_explicit_resolution_draft_letter():
+    return _check(
+        "'please draft the rebuttal letter' -> True",
+        looks_like_explicit_resolution_request("please draft the rebuttal letter") is True,
+    )
+
+def test_explicit_resolution_vague_help_is_false():
+    return _check(
+        "'help me with it' -> False (vague, not an explicit ask)",
+        looks_like_explicit_resolution_request("help me with it") is False,
+    )
+
+def test_explicit_resolution_bare_ok_is_false():
+    return _check(
+        "'ok' -> False",
+        looks_like_explicit_resolution_request("ok") is False,
+    )
+
+
 def main() -> None:
     tests = [
         test_classify_dispute_explicit_code,
@@ -264,6 +346,17 @@ def main() -> None:
         test_settlement_low_balance_false,
         test_settlement_funds_never_arrived,
         test_settlement_unrelated_false,
+        test_new_request_vague_help_with_it_is_not_new,
+        test_new_request_vague_help_withis_typo_is_not_new,
+        test_new_request_vague_help_with_this_is_not_new,
+        test_new_request_bare_help_me_is_not_new,
+        test_new_request_concrete_subject_is_new,
+        test_new_request_show_me_unaffected,
+        test_explicit_resolution_need_a_resolution,
+        test_explicit_resolution_go_ahead,
+        test_explicit_resolution_draft_letter,
+        test_explicit_resolution_vague_help_is_false,
+        test_explicit_resolution_bare_ok_is_false,
     ]
 
     print(f"\nRunning {len(tests)} classifier tests...\n")

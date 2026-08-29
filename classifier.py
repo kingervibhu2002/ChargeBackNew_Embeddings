@@ -81,6 +81,22 @@ _NEW_REQUEST_STARTER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "help me with it"/"help me with this"/"help me with is" (the last one a
+# common no-space typo for "help me with this") carry no concrete new
+# subject at all — they're the merchant pointing back at whatever's already
+# anchored, not asking about something else. Scoped to the "help me..."
+# family specifically (not show/tell/list/give/explain) since that's the
+# reported failure shape: a bare pronoun/typo remainder after "help me"
+# still satisfied _NEW_REQUEST_STARTER_RE, so a case-anchored "help me with
+# it" discarded the case reference from masked_query exactly like "help me
+# with all open questions" (a genuinely different, broader ask) correctly
+# does — the two are opposite in meaning but were being treated identically.
+_VAGUE_ANAPHORIC_HELP_RE = re.compile(
+    r"^\s*(help me|please help|can you help|i need help)"
+    r"\s*(with|to)?\s*(it|this|that|is)?\s*[.!?]*\s*$",
+    re.IGNORECASE,
+)
+
 
 def looks_like_new_request(text: str) -> bool:
     """
@@ -100,8 +116,56 @@ def looks_like_new_request(text: str) -> bool:
     contain phrases like "show" or "tell" mid-sentence without being a
     new request; what actually distinguishes a fresh ask is opening
     with one.
+
+    EXCEPT a vague, subject-free "help me with it/this/that" (see
+    _VAGUE_ANAPHORIC_HELP_RE) — confirmed live this was misread as a new,
+    unrelated request on an already-case-anchored conversation, discarding
+    the case reference from masked_query entirely. classify_query_type()
+    on the resulting bare "help me with it" then returned "invalid", and
+    because masked_query itself (not just additional_context) was now this
+    same vague text, the LLM substantive-context backstop judged the
+    context non-substantive too — defeating _validate_node's own "invalid
+    + context" rescue and producing the generic "please describe a
+    chargeback dispute" rejection for what was actually a continuation of
+    the case just discussed.
     """
-    return bool(_NEW_REQUEST_STARTER_RE.match(text.strip()))
+    stripped = text.strip()
+    if not _NEW_REQUEST_STARTER_RE.match(stripped):
+        return False
+    if _VAGUE_ANAPHORIC_HELP_RE.match(stripped):
+        return False
+    return True
+
+
+_EXPLICIT_RESOLUTION_RE = re.compile(
+    r"\b(give me (a |the )?resolution|need (a |the )?resolution|resolution please|"
+    r"draft (the |a )?(letter|rebuttal|response)|write (the |a )?(letter|rebuttal|response)|"
+    r"generate (the |a )?(letter|rebuttal|response)|send (the |a )?(letter|rebuttal)|"
+    r"go ahead|proceed( with)?|let'?s fight|please fight|fight it|"
+    r"yes,? fight|draft it|write it up|prepare (the |a )?(letter|rebuttal|response))\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_explicit_resolution_request(text: str) -> bool:
+    """
+    True if `text` unambiguously asks the system to proceed straight to a
+    decision/rebuttal letter now ("give me a resolution", "go ahead and
+    draft it", "fight it") — as opposed to a vague continuation ("help me
+    with it", "ok", "sure") that doesn't actually say what kind of help is
+    wanted.
+
+    Reported live: once a case's ledger_decision is already known,
+    _extract_evidence_node used to treat ANY non-question follow-up as
+    permission to skip straight to decide_node/generate_node — a vague
+    "help me with it" (the merchant confirming they want to continue, not
+    specifying HOW) produced the exact same complete, formal rebuttal
+    letter as an explicit "give me a resolution" would. This check is what
+    lets that shortcut require an actual, specific ask rather than just
+    "not obviously a question" — see _extract_evidence_node's own comment
+    for how it's used to gate the shortcut instead of removing it outright.
+    """
+    return bool(_EXPLICIT_RESOLUTION_RE.search(text))
 
 
 # ---------------------------------------------------------------------------

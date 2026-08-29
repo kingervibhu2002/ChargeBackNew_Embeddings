@@ -20,6 +20,7 @@ from cbs import (
     count_credits,
     create_schema,
     find_refund_for_utr,
+    get_debit_attempt_status,
     get_ledger_entries,
     has_pending_suspense,
     reconcile_utr,
@@ -81,6 +82,17 @@ def _get_ledger_entry_id(db_path, reference_id):
     row = conn.execute("SELECT id FROM ledger_entries WHERE reference_id = ?", (reference_id,)).fetchone()
     conn.close()
     return row["id"]
+
+
+def _insert_network_attempt(db_path, utr, attempt_seq, outcome, ref=None, initiated_at="2026-01-01"):
+    conn = get_connection(db_path)
+    conn.execute(
+        "INSERT INTO network_debit_attempts (utr, attempt_seq, outcome, npci_txn_ref, initiated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (utr, attempt_seq, outcome, ref or f"NPCI-{utr}-{attempt_seq}", initiated_at),
+    )
+    conn.commit()
+    conn.close()
 
 
 def test_count_credits_zero_when_no_entries() -> bool:
@@ -261,6 +273,53 @@ def test_reconcile_utr_no_data() -> bool:
         os.remove(db)
 
 
+def test_get_debit_attempt_status_no_data() -> bool:
+    db = _make_test_db()
+    try:
+        result = get_debit_attempt_status("UTR_NET_NODATA", db_path=db)
+        return _check("get_debit_attempt_status() == 'no_data' with no rows at all",
+                       result["status"] == "no_data", detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_get_debit_attempt_status_single_attempt() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_network_attempt(db, "UTR_NET_ONE", 1, "success")
+        result = get_debit_attempt_status("UTR_NET_ONE", db_path=db)
+        return _check("get_debit_attempt_status() == 'single_attempt' with one row",
+                       result["status"] == "single_attempt", detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_get_debit_attempt_status_duplicate_reversed() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_network_attempt(db, "UTR_NET_REV", 1, "success")
+        _insert_network_attempt(db, "UTR_NET_REV", 2, "reversed")
+        result = get_debit_attempt_status("UTR_NET_REV", db_path=db)
+        return _check(
+            "get_debit_attempt_status() == 'duplicate_reversed' when the 2nd attempt was reversed",
+            result["status"] == "duplicate_reversed", detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_get_debit_attempt_status_duplicate_unreversed() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_network_attempt(db, "UTR_NET_DUP", 1, "success")
+        _insert_network_attempt(db, "UTR_NET_DUP", 2, "success")
+        result = get_debit_attempt_status("UTR_NET_DUP", db_path=db)
+        return _check(
+            "get_debit_attempt_status() == 'duplicate_unreversed' when neither attempt was reversed",
+            result["status"] == "duplicate_unreversed", detail=str(result))
+    finally:
+        os.remove(db)
+
+
 def test_get_ledger_entries_ordered() -> bool:
     db = _make_test_db()
     try:
@@ -303,17 +362,89 @@ def test_u002_two_credits_recommends_refund_via_ledger() -> bool:
         os.remove(db)
 
 
-def test_u002_one_credit_recommends_fight_via_ledger() -> bool:
+def test_u002_one_credit_recommends_fight_when_network_confirms_single_attempt() -> bool:
+    # A reconciled ledger alone is no longer enough to recommend "fight" —
+    # see chargeback_analysis.py's 2c: it only proves what reached the
+    # MERCHANT, not how many times the customer was debited upstream. The
+    # network-side debit-attempt record must ALSO confirm a single attempt.
     db = _make_test_db()
     try:
         _insert_chargeback(db, "UTR_ONE", "U002")
         _insert_ledger_entry(db, "UTR_ONE", "credit", 500, status="posted")
         _insert_settlement_entry(db, "UTR_ONE", 500)  # reconciled — matches the ledger
+        _insert_network_attempt(db, "UTR_ONE", 1, "success")
         row = _get_chargeback_row(db, "UTR_ONE")
         result = analyze_chargeback(row, db_path=db)
-        return _check("U002 + exactly 1 posted credit, nothing pending, reconciled -> action='fight', source='ledger'",
-                       result.action == "fight" and result.source == "ledger",
-                       detail=str(result))
+        return _check(
+            "U002 + reconciled ledger + network confirms 1 debit attempt -> action='fight', source='network'",
+            result.action == "fight" and result.source == "network",
+            detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_u002_one_credit_no_network_data_returns_insufficient_evidence() -> bool:
+    # The exact live gap this was built to close: a clean, reconciled
+    # ledger used to be treated as proof the customer wasn't double-charged
+    # upstream. With no network-side record at all, that can't be
+    # confirmed OR refuted yet — must NOT default to "fight".
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_NONET", "U002")
+        _insert_ledger_entry(db, "UTR_NONET", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_NONET", 500)
+        # No network_debit_attempts rows at all for this UTR.
+        row = _get_chargeback_row(db, "UTR_NONET")
+        result = analyze_chargeback(row, db_path=db)
+        return _check(
+            "U002 + reconciled ledger but no network reconciliation on file -> action=None, source='network'",
+            result.action is None and result.source == "network",
+            detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_u002_network_confirms_reversed_duplicate_still_fight() -> bool:
+    # A genuine second debit attempt occurred, but the network itself
+    # reversed it before settlement — the customer was never net-charged
+    # twice, so "fight" still holds, now with stronger, dual-sourced
+    # evidence rather than an assumption.
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_NETREV", "U002")
+        _insert_ledger_entry(db, "UTR_NETREV", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_NETREV", 500)
+        _insert_network_attempt(db, "UTR_NETREV", 1, "success")
+        _insert_network_attempt(db, "UTR_NETREV", 2, "reversed")
+        row = _get_chargeback_row(db, "UTR_NETREV")
+        result = analyze_chargeback(row, db_path=db)
+        return _check(
+            "U002 + network shows a reversed 2nd attempt -> action='fight', source='network'",
+            result.action == "fight" and result.source == "network",
+            detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_u002_network_confirms_unreversed_duplicate_recommends_refund() -> bool:
+    # The scenario a ledger-only check can never see: the network shows
+    # TWO successful, never-reversed debit attempts against the customer,
+    # even though only one credit ever reached this merchant's ledger. The
+    # customer's claim is real at the network level — recommend refund
+    # despite the merchant's own books looking clean.
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_NETDUP", "U002")
+        _insert_ledger_entry(db, "UTR_NETDUP", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_NETDUP", 500)
+        _insert_network_attempt(db, "UTR_NETDUP", 1, "success")
+        _insert_network_attempt(db, "UTR_NETDUP", 2, "success")
+        row = _get_chargeback_row(db, "UTR_NETDUP")
+        result = analyze_chargeback(row, db_path=db)
+        return _check(
+            "U002 + network shows 2 unreversed attempts despite 1 ledger credit -> action='refund', source='network'",
+            result.action == "refund" and result.source == "network",
+            detail=str(result))
     finally:
         os.remove(db)
 
@@ -408,6 +539,10 @@ def main() -> None:
         test_has_pending_suspense_false,
         test_find_refund_for_utr_found,
         test_find_refund_for_utr_none,
+        test_get_debit_attempt_status_no_data,
+        test_get_debit_attempt_status_single_attempt,
+        test_get_debit_attempt_status_duplicate_reversed,
+        test_get_debit_attempt_status_duplicate_unreversed,
         test_get_ledger_entries_ordered,
         test_count_credits_nets_out_reversed_credit_with_no_repost,
         test_count_credits_reversal_then_repost_nets_to_one,
@@ -416,7 +551,10 @@ def main() -> None:
         test_reconcile_utr_mismatch,
         test_reconcile_utr_no_data,
         test_u002_two_credits_recommends_refund_via_ledger,
-        test_u002_one_credit_recommends_fight_via_ledger,
+        test_u002_one_credit_recommends_fight_when_network_confirms_single_attempt,
+        test_u002_one_credit_no_network_data_returns_insufficient_evidence,
+        test_u002_network_confirms_reversed_duplicate_still_fight,
+        test_u002_network_confirms_unreversed_duplicate_recommends_refund,
         test_u002_one_credit_unreconciled_returns_no_recommendation,
         test_u002_pending_entry_returns_no_recommendation,
         test_u002_zero_credits_falls_through_to_rule_table,

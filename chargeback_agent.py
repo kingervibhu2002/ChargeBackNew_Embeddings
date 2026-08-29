@@ -155,6 +155,21 @@ class ChargebackState(TypedDict):
                                              isn't "good" — set by planner_node.
         is_settlement_issue   (bool):       True → set by detect_settlement_node.
         merchant_is_asking_question (bool): True → set by detect_clarification_node.
+        explicit_resolution_requested (bool): True → set by validate_node, from the RAW
+                                             latest reply segment (before junk-reply/LLM
+                                             substantive-context filtering can blank it —
+                                             see that filtering's own comment for why a
+                                             vague-but-real reply like "help me with it"
+                                             legitimately gets filtered to "" for evidence
+                                             purposes, which would otherwise make it
+                                             indistinguishable from a genuine explicit ask
+                                             if extract_evidence_node re-derived this from
+                                             the already-filtered additional_context
+                                             instead). Read by extract_evidence_node's
+                                             ledger_decision shortcut to decide whether a
+                                             case-anchored follow-up asked specifically for
+                                             the decision/letter, or was vague enough to
+                                             warrant a short scoping question first.
         evidence_present      (List[str]):  Evidence merchant mentioned — set by extract_evidence_node.
                                              Drawn from EvidenceTag vocabulary so
                                              decision_rules.py can match reliably.
@@ -296,6 +311,7 @@ class ChargebackState(TypedDict):
     clarification_reason:       str
     is_settlement_issue:        bool
     merchant_is_asking_question: bool
+    explicit_resolution_requested: bool
     decision:              str
     decision_reason:       str
     decision_source:       str
@@ -443,6 +459,7 @@ CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE = "ambiguous_case_reference"
 CLARIFICATION_REASON_SETTLEMENT_AMBIGUITY     = "settlement_ambiguity"
 CLARIFICATION_REASON_MISSING_REASON_CODE      = "missing_reason_code"
 CLARIFICATION_REASON_MISSING_EVIDENCE         = "missing_evidence"
+CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE       = "unclear_help_scope"
 
 
 # ---------------------------------------------------------------------------
@@ -959,13 +976,22 @@ class DisputeAgent:
             return f"No case found with ID {case_id} for this merchant.", None
 
         analysis = analyze_chargeback(row, db_path="chargebacks.db")
+        deadline_passed = _deadline_bucket(row["response_deadline"]) == "overdue"
         parts = [
             f"Case {row['case_id']} (UTR {row['utr']}): reason code {row['reason_code']} "
             f"({row['reason_description']}), amount {row['chargeback_amount']}, "
-            f"status {row['status']}, response deadline {row['response_deadline']}."
+            f"status {row['status']}, resolution status: "
+            f"{('resolved — ' + row['resolution']) if row['resolution'] else 'not resolved yet'}, "
+            f"response deadline {row['response_deadline']}"
+            f"{' (already passed)' if deadline_passed else ''}."
         ]
         if analysis.action:
-            parts.append(f"Recommended action: {analysis.action}. {analysis.reason}")
+            # "Recommended action" deliberately labeled and phrased as
+            # ADVICE, not a resolution — reported live: a merchant asking
+            # "what is resolution of <case>?" got an answer that read as
+            # substituting this recommendation for an actual resolution
+            # status, when the case was, separately, still not resolved.
+            parts.append(f"Recommended action (advice, not a resolution): {analysis.action}. {analysis.reason}")
 
         rule = decision_rules.RULES.get(("RuPay", row["reason_code"]))
         if rule:
@@ -1251,6 +1277,17 @@ class DisputeAgent:
         # via the final return at the bottom of this function.
         clarification_round = classifier.count_clarification_rounds(raw_context_preview)
 
+        # Computed from the RAW latest reply, before Guard 5/5b below can
+        # filter it to "" — "help me with it" is correctly judged non-
+        # substantive AS EVIDENCE (it's not describing what happened), but
+        # that's a different question from "did the merchant explicitly
+        # ask for the decision/letter," which extract_evidence_node's
+        # ledger_decision shortcut needs answered from what was ACTUALLY
+        # typed, not from whatever survives evidence-quality filtering.
+        _raw_segments = [s.strip() for s in raw_context_preview.split("\n\n") if s.strip()]
+        _latest_raw_reply = _raw_segments[-1] if _raw_segments else raw_context_preview
+        explicit_resolution_requested = classifier.looks_like_explicit_resolution_request(_latest_raw_reply)
+
         # A case named DIRECTLY in a first-turn query ("Help me with case
         # NPCI20260530M002010", "explain more on UTR...") used to fall
         # straight through to the full dispute pipeline
@@ -1298,9 +1335,20 @@ class DisputeAgent:
                             # Not gated by MAX_CLARIFICATION_ROUNDS — a case
                             # WAS just resolved, this is forward progress
                             # (moving on to the evidence ask), not a stuck
-                            # loop. clarification_reason is still set so
-                            # telemetry can see what's being waited on next.
-                            "clarification_reason": CLARIFICATION_REASON_MISSING_EVIDENCE,
+                            # loop. needs_more_info=True here is purely a
+                            # client-continuity signal (keep pendingQuery/
+                            # additional_context alive for a natural
+                            # follow-up like "give me a resolution") — the
+                            # intro text itself doesn't ask the merchant
+                            # anything, so clarification_reason stays ""
+                            # rather than MISSING_EVIDENCE. Per DisputeResponse's
+                            # own docstring, clarification_reason is empty
+                            # "when final_answer isn't a question" — chat.html
+                            # uses this (not needs_more_info) to decide whether
+                            # to show the "I need a bit more information"
+                            # banner, since a case intro is a complete summary,
+                            # not a pending question.
+                            "clarification_reason": "",
                             "clarification_round":  clarification_round,
                             # This path returns straight to END, never
                             # reaching planner_node (the node that would
@@ -1408,7 +1456,9 @@ class DisputeAgent:
                         # Not gated by MAX_CLARIFICATION_ROUNDS — same
                         # reasoning as the direct-mention branch above: a
                         # case WAS just resolved, this is forward progress.
-                        "clarification_reason": CLARIFICATION_REASON_MISSING_EVIDENCE,
+                        # clarification_reason "" (not MISSING_EVIDENCE) for
+                        # the same reason as that branch — see its comment.
+                        "clarification_reason": "",
                         "clarification_round":  clarification_round,
                         # Same reasoning as the direct-mention branch above:
                         # this path never reaches planner_node, so
@@ -1817,6 +1867,7 @@ class DisputeAgent:
             # cap already enforced inline above for the early-return asks
             # that bypass ask_user_node entirely.
             "clarification_round": clarification_round,
+            "explicit_resolution_requested": explicit_resolution_requested,
         }
 
     def _planner_node(self, state: ChargebackState) -> dict:
@@ -1944,9 +1995,31 @@ class DisputeAgent:
                     resolved_utr     = row["utr"]
 
                     analysis = analyze_chargeback(row, db_path="chargebacks.db")
+                    # Three deliberately SEPARATE, individually-labeled facts,
+                    # not one blended sentence — confirmed live this matters:
+                    # a merchant asked "what is resolution of <case>?" and got
+                    # back "recommends fighting... we already have what's
+                    # needed," which reads as if "recommendation" and
+                    # "resolution" are the same thing, and never mentioned
+                    # that the response deadline had already passed (visible
+                    # elsewhere in this same file — the open-case list already
+                    # computes _deadline_bucket() for exactly this — but this
+                    # fact string, the one _answer_clarification_node and
+                    # _build_case_intro actually draw from, never included
+                    # deadline information at all, so there was nothing for
+                    # either node to mention even if it wanted to). A
+                    # recommendation ("fight"/"refund") is this system's
+                    # advice; resolution status is whether the case is
+                    # actually closed; deadline status is a third, unrelated
+                    # fact — collapsing any two of these was the actual bug,
+                    # not just how the LLM phrased its answer.
+                    deadline_passed = _deadline_bucket(row["response_deadline"]) == "overdue"
                     status_line = (
-                        f"Current status: {row['status']}, "
-                        f"resolution: {row['resolution'] or 'not yet resolved'}."
+                        f"Case status: {row['status']}. "
+                        f"Resolution status: "
+                        f"{('resolved — ' + row['resolution']) if row['resolution'] else 'not resolved yet'}. "
+                        f"Response deadline: {row['response_deadline']}"
+                        f"{' (already passed)' if deadline_passed else ''}."
                     )
                     # insert(0, ...), not append(): downstream nodes only
                     # look at the first 1-2 retrieved_docs entries
@@ -1979,16 +2052,18 @@ class DisputeAgent:
                         # even with this analysis already inserted at [0]).
                         ledger_decision = analysis.action
                         ledger_decision_reason = analysis.reason
-                    elif analysis.source in ("cbs", "ledger"):
-                        # A real bank-side blocker (pending ledger entry, or
-                        # a settlement reconciliation mismatch), not simply
-                        # "no rule for this code." Equally authoritative as
-                        # the analysis.action branch above — no amount of
-                        # merchant-supplied evidence resolves a pending
-                        # ledger entry or a settlement mismatch, so this
-                        # must bypass extract_evidence_node's generic
-                        # evidence ask the same way, not just the retrieved
-                        # ledger text.
+                    elif analysis.source in ("cbs", "ledger", "network"):
+                        # A real bank-side blocker (pending ledger entry, a
+                        # settlement reconciliation mismatch, or — "network"
+                        # — no NPCI/PSP transaction-status reconciliation on
+                        # file yet), not simply "no rule for this code."
+                        # Equally authoritative as the analysis.action
+                        # branch above — no amount of merchant-supplied
+                        # evidence resolves a pending ledger entry, a
+                        # settlement mismatch, or a missing network
+                        # reconciliation, so this must bypass
+                        # extract_evidence_node's generic evidence ask the
+                        # same way, not just the retrieved ledger text.
                         retrieved_contents.insert(0,
                             f"Case {row['case_id']} ({row['utr']}), reason code "
                             f"{row['reason_code']} ({row['reason_description']}): "
@@ -2243,10 +2318,15 @@ class DisputeAgent:
             )
         elif state.get("ledger_decision"):
             closing_instruction = (
-                "Do NOT ask for evidence — this case's outcome is already "
-                "determined from the bank's own ledger records, not merchant-"
-                "supplied evidence. End with one short sentence letting them "
-                "know you already have what's needed for this case."
+                "Do NOT ask for evidence — this case's RECOMMENDATION is "
+                "already determined from the bank's own ledger and network "
+                "records, not merchant-supplied evidence. End with one short "
+                "sentence naming EVERY check the case-specific record actually "
+                "mentions, not just one of them — e.g. if the record cites "
+                "BOTH a ledger credit count AND an NPCI/PSP debit-attempt "
+                "check, cite both by name, not only the first one. Never a "
+                "bare, unexplained 'we already have what's needed,' which "
+                "asserts confidence without showing why it's earned."
             )
         else:
             closing_instruction = (
@@ -2263,10 +2343,21 @@ class DisputeAgent:
                 "case-specific record (a line starting with \"Case <id>\" — the "
                 "system's own on-file status/recommendation for this exact "
                 "dispute) that answers or partially answers their question. If "
-                "so, lead with those specific facts by name (status, recommended "
-                "action, what evidence is or isn't on file) — the merchant is "
-                "often asking you to check something the system already knows, "
-                "not asking how to look it up themselves.\n"
+                "so, lead with those specific facts by name (case status, "
+                "resolution status, response deadline, recommended action, "
+                "what evidence is or isn't on file) — the merchant is often "
+                "asking you to check something the system already knows, not "
+                "asking how to look it up themselves.\n"
+                "CRITICAL — these are four SEPARATE facts, never merge them: "
+                "'case status' (Open/Closed) is not 'resolution status' (has "
+                "this case actually been resolved yet, yes or no) is not "
+                "'recommended action' (fight or refund — this system's ADVICE, "
+                "not a decision that has been made or acted on) is not "
+                "'response deadline' (and whether it has already passed — "
+                "state this explicitly whenever the record marks it passed, "
+                "never omit it). If asked specifically about 'resolution,' "
+                "answer that exact question (resolved or not, and why) rather "
+                "than substituting the recommended action for it.\n"
                 "Only fall back to generic procedural guidance (which dashboard, "
                 "report, or party holds that data) for whatever the case record "
                 "does NOT cover. Never imply you checked something the record "
@@ -2300,7 +2391,7 @@ class DisputeAgent:
         Reads:  user_query, additional_context, reason_code, card_network,
                 retrieved_docs, ledger_decision
         Writes: evidence_present, evidence_missing, needs_more_info,
-                missing_info_question
+                missing_info_question, clarification_reason
         """
         # planner_node already got a confident, bank-evidence-backed decision
         # for this exact case (CBS refund record, or U002 ledger/settlement
@@ -2309,6 +2400,50 @@ class DisputeAgent:
         # already settled. decide_node uses ledger_decision directly, so no
         # evidence_present/missing is needed downstream either.
         if state.get("ledger_decision"):
+            # This shortcut used to fire unconditionally the moment
+            # ledger_decision was set — meaning ANY non-question follow-up
+            # to the case intro (_build_case_intro() always shows one
+            # first; see _validate_node) skipped straight to decide_node/
+            # generate_node, producing a complete, formal rebuttal letter.
+            # Reported live: a vague "help me with it" (confirming they
+            # want to continue, not specifying what kind of help) got the
+            # exact same full letter an explicit "give me a resolution"
+            # would have. The intro already told the merchant what
+            # evidence matters and what the recommended action is —
+            # jumping straight to a formal legal document on a vague nudge
+            # is presumptuous, not helpful. Gated now on an actual,
+            # specific ask (classifier.looks_like_explicit_resolution_
+            # request()): a case-anchored reply that isn't one gets a
+            # short scoping question instead, same "ask, don't guess"
+            # principle as _uncertain() elsewhere in this file — capped by
+            # MAX_CLARIFICATION_ROUNDS like every other ask in this graph
+            # (see _ask_user_node), so a merchant who stays vague still
+            # reaches the escalation message rather than looping forever.
+            # explicit_resolution_requested is computed by validate_node
+            # from the RAW latest reply (see that node and ChargebackState's
+            # own docstring) — NOT re-derived from state["additional_context"]
+            # here, which by this point may already have been filtered to ""
+            # by validate_node's junk-reply/LLM substantive-context checks.
+            # "help me with it" is correctly judged non-substantive AS
+            # EVIDENCE (it describes nothing that happened), which used to
+            # make it indistinguishable here from "no reply at all" — both
+            # left this shortcut with nothing to gate on, so it fired
+            # unconditionally either way. A genuine first turn never reaches
+            # this node with ledger_decision already set at all —
+            # _build_case_intro()'s early return in validate_node always
+            # intercepts that case — so this only ever fires on a real,
+            # already-anchored follow-up, never a fresh conversation.
+            if not state.get("explicit_resolution_requested"):
+                return {
+                    "evidence_present":      [],
+                    "evidence_missing":      [],
+                    "needs_more_info":       True,
+                    "missing_info_question": (
+                        "Want me to explain the evidence in more detail, "
+                        "or should I go ahead and draft the response now?"
+                    ),
+                    "clarification_reason":  CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE,
+                }
             return {
                 "evidence_present":      [],
                 "evidence_missing":      [],
@@ -2518,7 +2653,27 @@ class DisputeAgent:
         block bypass this node entirely (no query_type set, so they route
         straight to END), so they enforce the same cap inline themselves.
 
-        Reads:  missing_info_question, clarification_round
+        The round cap does NOT apply when merchant_is_asking_question is
+        True. Reported live: a merchant asked "what if an intermediate
+        party charged the customer?" as their 3rd reply segment — a
+        legitimate evidentiary challenge answer_clarification_node had
+        JUST answered with real, grounded facts (the case's ledger AND, as
+        of the network-reconciliation fix, its network debit-attempt
+        status) — and this node discarded that computed answer, replacing
+        it with the generic "I still don't have enough information, contact
+        your bank" escalation message purely because it was the 3rd
+        segment, with no regard for content. The cap exists to bound a
+        conversation that ISN'T making forward progress (the agent keeps
+        asking, the merchant keeps not really answering); a merchant asking
+        follow-up questions that each get a real, grounded answer is the
+        opposite of that — the agent isn't stalled, so nothing here needs
+        escalating. count_clarification_rounds() still counts these
+        segments (so a genuine mix of evidence-stalling AND meta-questions
+        still eventually hits the cap on the evidence-ask side), this only
+        skips applying the cap to this specific already-answered turn.
+
+        Reads:  missing_info_question, clarification_round,
+                merchant_is_asking_question, ledger_decision
         Writes: final_answer, needs_more_info
 
         Args:
@@ -2528,7 +2683,10 @@ class DisputeAgent:
             dict: final_answer set to the follow-up question, or the
             escalation message if MAX_CLARIFICATION_ROUNDS is already spent.
         """
-        if state.get("clarification_round", 0) >= MAX_CLARIFICATION_ROUNDS:
+        if (
+            state.get("clarification_round", 0) >= MAX_CLARIFICATION_ROUNDS
+            and not state.get("merchant_is_asking_question")
+        ):
             return {"final_answer": self._CLARIFICATION_LIMIT_MESSAGE, "needs_more_info": False}
 
         # `or`, not `.get(key, default)`: the fallback must also cover an
@@ -2541,6 +2699,26 @@ class DisputeAgent:
         # falling back, leaving the merchant with only the static "I need a
         # bit more information" banner and no actual question underneath it.
         question = state.get("missing_info_question") or "Could you provide more details about the dispute?"
+
+        # A clarifying question answered while ledger_decision is already
+        # set is a self-contradiction if forced through the same
+        # needs_more_info=True funnel as a genuine ask: answer_clarification_
+        # node's own closing_instruction (see that node, the ledger_decision
+        # branch) tells the merchant the case's outcome is ALREADY
+        # determined from the bank's own ledger and there's nothing left to
+        # gather — yet the reply would still be wrapped in chat.html's "I
+        # need a bit more information before I can help" banner. Confirmed
+        # live: the merchant asked "why are you recommending a rebuttal
+        # letter?" and got back an answer ending in "we already have what's
+        # needed for this case" underneath that exact banner.
+        # merchant_is_asking_question is only ever True on THIS node when
+        # routed from answer_clarification_node (see
+        # _route_after_detect_clarification) — extract_evidence_node already
+        # returns needs_more_info=False itself whenever ledger_decision is
+        # set, so this can't misfire on a genuine evidence-gathering ask.
+        if state.get("merchant_is_asking_question") and state.get("ledger_decision"):
+            return {"final_answer": question, "needs_more_info": False}
+
         return {"final_answer": question, "needs_more_info": True}
 
     def _answer_question_node(self, state: ChargebackState) -> dict:
@@ -2723,6 +2901,13 @@ class DisputeAgent:
                     "is_grounded":         True,
                     "groundedness_issues": "",
                     "needs_more_info":     True,
+                    # This text genuinely ends by asking the merchant to
+                    # pick a case ("tell me which one", "Want me to walk you
+                    # through this one?") — unlike the validate_node case-
+                    # intro paths above, this IS a pending question, so
+                    # clarification_reason must be non-empty for chat.html's
+                    # banner logic to still show it as one.
+                    "clarification_reason": CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
                 }
 
             if intent and intent["type"] == "aggregate":
@@ -4077,6 +4262,7 @@ class DisputeAgent:
             "clarification_reason":       "",
             "is_settlement_issue":        False,
             "merchant_is_asking_question": False,
+            "explicit_resolution_requested": False,
             "decision":              "",
             "decision_reason":       "",
             "decision_source":       "",

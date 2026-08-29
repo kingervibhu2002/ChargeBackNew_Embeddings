@@ -48,12 +48,15 @@ def create_schema(conn) -> None:
             action            TEXT NOT NULL,          -- 'fight' | 'refund' — never NULL,
                                                         -- only inserted for a real decision
             reason            TEXT NOT NULL DEFAULT '',
-            source            TEXT NOT NULL,           -- 'cbs' | 'ledger' | 'rules' | 'llm' —
-                                                        -- HOW the action was derived. Extends
-                                                        -- chargeback_analysis.Analysis.source's
-                                                        -- vocabulary with 'llm' for the main
-                                                        -- pipeline's structured-output decision
-                                                        -- when no rule-table entry matched.
+            source            TEXT NOT NULL,           -- 'cbs' | 'ledger' | 'network' | 'rules'
+                                                        -- | 'llm' — HOW the action was derived.
+                                                        -- Extends chargeback_analysis.Analysis.
+                                                        -- source's vocabulary with 'llm' for the
+                                                        -- main pipeline's structured-output
+                                                        -- decision when no rule-table entry
+                                                        -- matched. 'network' means an NPCI/PSP
+                                                        -- transaction-attempt check, not just
+                                                        -- the merchant's own ledger, drove it.
             origin            TEXT NOT NULL,           -- 'live_chat' | 'live_chat_preview' —
                                                         -- WHICH code path produced this row.
             confidence_score  INTEGER,                 -- 1-10, whatever was actually shown to

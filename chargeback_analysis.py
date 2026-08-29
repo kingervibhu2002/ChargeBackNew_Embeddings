@@ -9,7 +9,13 @@ pollers can never silently diverge on what a given case's recommendation is.
 from typing import NamedTuple, Optional
 
 import decision_rules
-from cbs import count_credits, find_refund_for_utr, has_pending_suspense, reconcile_utr
+from cbs import (
+    count_credits,
+    find_refund_for_utr,
+    get_debit_attempt_status,
+    has_pending_suspense,
+    reconcile_utr,
+)
 
 # All chargebacks in this schema are NPCI/UPI disputes — see
 # auto_decision_poller.py's matching comment for why this is a constant
@@ -20,7 +26,10 @@ _NETWORK = "RuPay"
 class Analysis(NamedTuple):
     action: Optional[str]   # "fight" | "refund" | None (no confident recommendation)
     reason: str
-    source: str              # "cbs" | "rules" | "" (empty when action is None)
+    source: str              # "cbs" | "ledger" | "network" | "rules" | ""
+                              # ("" only when action is None from decision_rules —
+                              # every ledger/network-derived branch, including the
+                              # action=None ones, sets a real source string)
 
 
 def analyze_chargeback(row, db_path: str) -> Analysis:
@@ -58,6 +67,23 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
         not the absence of evidence "refund" already means elsewhere in
         this function. A reconciliation mismatch here downgrades a would-
         be "fight" to "cannot confidently decide" instead.
+    2c. Even a reconciled single credit only proves what reached the
+        MERCHANT — it says nothing about how many times the CUSTOMER's
+        account was actually debited upstream, at the NPCI switch. Reported
+        live: a merchant asked "what if an intermediate party charged the
+        customer?" after being told the duplicate claim was "not supported
+        by the bank's own records," and that record was, in fact, silent on
+        exactly that question — a real, unproven inferential leap from
+        "merchant ledger clean" to "customer wasn't double-charged." Checked
+        here via cbs.get_debit_attempt_status(), a genuinely independent
+        (simulated) network-side transaction log: no record at all yet
+        downgrades "fight" to "cannot confidently decide" (same shape as
+        2b's reconciliation-mismatch case, for the same reason — absence of
+        a check is not the same as a passed one); a second attempt that
+        succeeded and was never reversed — invisible to the merchant's own
+        ledger — flips the recommendation to "refund" entirely, since the
+        network itself confirms the customer's claim even though it never
+        reached this merchant's books.
     3. Otherwise, decision_rules.decide() with no evidence present, same
        as before: known reason codes resolve to "refund", unmapped codes
        return no recommendation (action=None) rather than guessing.
@@ -113,15 +139,63 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                     ),
                     source="ledger",
                 )
+            # A reconciled ledger only proves what reached the MERCHANT — it
+            # can't by itself rule out a duplicate debit upstream that was
+            # reversed (or, worse, one that succeeded but never reached
+            # this merchant's ledger at all). get_debit_attempt_status()
+            # checks the network's own, independent transaction log for
+            # exactly that — see this function's 2c docstring entry.
+            debit = get_debit_attempt_status(row["utr"], db_path=db_path)
+            if debit["status"] == "no_data":
+                return Analysis(
+                    action=None,
+                    reason=(
+                        "Ledger shows one posted credit, reconciled against the network-"
+                        "reported settlement — but that only confirms what reached the "
+                        "merchant, not how many times the customer's account was actually "
+                        "debited upstream. No NPCI/PSP transaction-status reconciliation is "
+                        "on file for this UTR yet, so a duplicate debit at an intermediary "
+                        "layer can't be ruled out. Recommend checking with the acquiring "
+                        "PSP/NPCI before responding."
+                    ),
+                    source="network",
+                )
+            if debit["status"] == "duplicate_unreversed":
+                return Analysis(
+                    action="refund",
+                    reason=(
+                        f"Merchant ledger shows only one posted credit, but NPCI/PSP "
+                        f"transaction records show {debit['attempt_count']} separate debit "
+                        f"attempts against the customer with no reversal recorded — the "
+                        f"customer's duplicate-charge claim is confirmed at the network "
+                        f"level even though it was never reflected in the merchant's own "
+                        f"ledger. Recommend refunding the customer and separately "
+                        f"reconciling the missing settlement with the acquiring bank."
+                    ),
+                    source="network",
+                )
+            if debit["status"] == "duplicate_reversed":
+                return Analysis(
+                    action="fight",
+                    reason=(
+                        "Ledger shows exactly one posted credit, reconciled against the "
+                        "network-reported settlement, and NPCI/PSP transaction records "
+                        "confirm a second debit attempt was made but reversed by the "
+                        "network before settlement — the customer was not net-charged "
+                        "twice, even though a duplicate attempt did occur upstream."
+                    ),
+                    source="network",
+                )
             return Analysis(
                 action="fight",
                 reason=(
                     "Ledger shows exactly one posted credit for this transaction, reconciled "
-                    "against the network-reported settlement, and no unresolved pending "
-                    "entries — the duplicate-charge claim is not supported by the bank's own "
-                    "records."
+                    "against the network-reported settlement, and NPCI/PSP transaction "
+                    "records confirm only one debit attempt was made against the customer "
+                    "with no reversal — the duplicate-charge claim is not supported by "
+                    "either the merchant's ledger or the network's own transaction record."
                 ),
-                source="ledger",
+                source="network",
             )
         # credits == 0: no credit ever posted for this UTR at all — an odd
         # situation the ledger itself can't resolve either way (not "one
