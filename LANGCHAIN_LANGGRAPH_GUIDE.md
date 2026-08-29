@@ -436,6 +436,7 @@ LangChain and LangGraph offer a lot more than what's used here. This section is 
 - **Fallback models** — `_invoke()`'s primary→fallback pattern (§1.4) — a genuine reliability mechanism, not just described.
 - **A hand-rolled agentic loop** — `_build_case_intro()`'s capped multi-round tool-calling loop (§1.6) is a real invoke → act → observe → repeat pattern with a stopping condition, just written directly rather than via `create_react_agent`.
 - **Guardrails** — prompt-injection detection, PII masking, rate limiting, a cost circuit breaker, role-based SQL scoping (`guardrails.py`, `auth.py`, `text_to_sql.py`) — all real, all enforced in code, not just prompted for.
+- **Structured output** — `_decide_node`'s fight/refund/uncertain recommendation is a real Pydantic model (`DecisionOutput`) passed through `.with_structured_output()` via a new `_invoke_structured()` method, not a free-form JSON string hand-parsed by `guardrails._parse_json_safe()` afterward. Everywhere else in this file that still uses `_parse_json_safe()` (the majority of LLM calls) hasn't been converted — this was a targeted first case, not a blanket rewrite, so most of the file's structured-JSON-via-prompt-instruction pattern is still the approximated version described below, not this one.
 
 **Present as infrastructure, but not actually exercised:**
 

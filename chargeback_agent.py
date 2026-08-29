@@ -37,6 +37,7 @@ from typing import Callable, List, Literal, Optional, TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
+from pydantic import BaseModel, Field
 
 import llm_provider
 from guardrails import check_length, detect_prompt_injection, mask_pii, _parse_json_safe
@@ -315,6 +316,36 @@ _NETWORK_PAYLOAD_SPELLINGS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Structured-output schemas
+# ---------------------------------------------------------------------------
+# Real Pydantic schemas passed to _invoke_structured() (LangChain's
+# .with_structured_output()) instead of hand-parsing free-form JSON text
+# via guardrails._parse_json_safe(). The two approaches were producing the
+# same DECISION SHAPE already (a "decision" field constrained to one of a
+# few known values, checked with .get(..., default) after the fact) — the
+# schema just makes that constraint real and enforced by the provider's
+# own structured-output machinery, instead of a convention every call site
+# has to individually get right. Started with _decide_node's fight/refund/
+# uncertain output specifically (the fight-vs-refund recommendation) as
+# the first, highest-value case to convert — not a wholesale rewrite of
+# every _invoke() call site in this file at once.
+class DecisionOutput(BaseModel):
+    """decide_node's fight/refund/uncertain recommendation."""
+    decision: Literal["fight", "refund", "uncertain"] = Field(
+        description=(
+            "fight — evidence is strong; representment likely to succeed. "
+            "refund — evidence is weak or not worth contesting. "
+            "uncertain — the available evidence genuinely isn't enough to "
+            "confidently recommend either; use this rather than guessing "
+            "when the case is a real toss-up."
+        )
+    )
+    decision_reason: str = Field(
+        description="One or two sentences explaining the recommendation."
+    )
+
+
 def _deadline_bucket(response_deadline: str) -> str:
     """
     Classify a case's response_deadline against today's date into
@@ -490,6 +521,43 @@ class DisputeAgent:
         except Exception as primary_err:
             try:
                 return self._fallback_llm.bind_tools(tools).invoke(messages)
+            except Exception:
+                raise primary_err
+
+    def _invoke_structured(self, messages: list, schema: type) -> BaseModel:
+        """
+        Same primary→fallback contract as _invoke(), but constrains the
+        response to a typed Pydantic schema via LangChain's
+        with_structured_output() instead of hand-parsing raw JSON text
+        through guardrails._parse_json_safe(). Returns an instance of
+        `schema`, not an AIMessage — different enough from _invoke()'s
+        contract to be its own method, the same reasoning
+        _invoke_with_tools() already uses for tool binding.
+
+        A validation failure (the provider's own structured-output
+        machinery couldn't produce something matching `schema`) counts
+        as a failure for fallback purposes, same as a network error —
+        it's caught by the same except Exception as a malformed
+        _parse_json_safe() response used to be, just enforced by the
+        provider/schema instead of ad hoc string parsing on this end.
+
+        Args:
+            messages: LangChain message list.
+            schema:   A Pydantic BaseModel subclass describing the
+                      expected response shape.
+
+        Returns:
+            An instance of `schema`.
+
+        Raises:
+            Exception: If both primary and fallback fail (including a
+                       response that fails schema validation).
+        """
+        try:
+            return self._llm.with_structured_output(schema).invoke(messages)
+        except Exception as primary_err:
+            try:
+                return self._fallback_llm.with_structured_output(schema).invoke(messages)
             except Exception:
                 raise primary_err
 
@@ -2974,17 +3042,10 @@ class DisputeAgent:
 
         docs_text = "\n\n".join(state.get("retrieved_docs", [])[:1])
 
-        response = self._invoke([
+        messages = [
             SystemMessage(content=(
                 "You are a chargeback strategy consultant.\n"
-                "Decide whether the merchant should fight or accept this chargeback.\n"
-                "  fight      — evidence is strong; representment likely to succeed.\n"
-                "  refund     — evidence is weak or not worth contesting.\n"
-                "  uncertain  — the available evidence genuinely isn't enough to\n"
-                "               confidently recommend either. Use this rather than\n"
-                "               guessing when the case is a real toss-up.\n\n"
-                "Respond ONLY with JSON:\n"
-                '{"decision": "fight", "decision_reason": "Strong delivery proof"}'
+                "Decide whether the merchant should fight or accept this chargeback."
             )),
             HumanMessage(content=(
                 f"Reason code: {state.get('card_network', '')} {state.get('reason_code', '')}\n"
@@ -2993,23 +3054,28 @@ class DisputeAgent:
                 f"Original dispute: {state['user_query']}\n\n"
                 f"Relevant policy:\n{docs_text}"
             )),
-        ])
+        ]
 
-        # Fallback on parse failure is "uncertain", NOT "fight" — this
-        # project's own decision_rules.py philosophy is "no evidence ->
-        # presumptively refund," the safe direction. Defaulting an
-        # unparseable response to "fight" (the old fallback here) was the
-        # wrong direction for a silent guess, and the LLM had no way to
-        # express genuine uncertainty at all before this — only a forced
-        # binary choice. See _uncertain()'s own docstring for the other
-        # two places this exact anti-pattern lived in this file.
-        data = _parse_json_safe(response.content, {
-            "decision":        "uncertain",
-            "decision_reason": "",
-        })
-        decision = data.get("decision", "uncertain")
+        # DecisionOutput's own schema is the enforcement mechanism now —
+        # decision is a real Literal["fight", "refund", "uncertain"], not
+        # a string this code has to defensively .get(..., default) after
+        # hand-parsing JSON text. A schema-validation failure (provider
+        # couldn't produce something matching the type) is caught the
+        # same way a network error is — see _invoke_structured()'s own
+        # docstring — and lands on "uncertain" as the fallback, NOT
+        # "fight": this project's own decision_rules.py philosophy is "no
+        # evidence -> presumptively refund," the safe direction. The old
+        # hand-parsed version defaulted an unparseable response to
+        # "fight" — the wrong direction for a silent guess, and had no
+        # schema option for the LLM to express genuine uncertainty with
+        # at all, only a forced binary choice.
+        try:
+            result = self._invoke_structured(messages, DecisionOutput)
+            decision, decision_reason = result.decision, result.decision_reason
+        except Exception:
+            decision, decision_reason = "uncertain", ""
 
-        if decision not in ("fight", "refund"):
+        if decision == "uncertain":
             # needs_more_info=False deliberately — this is the FINAL word
             # for this turn, not a request the merchant is expected to
             # reply to. extract_evidence_node already caps evidence-
@@ -3018,17 +3084,17 @@ class DisputeAgent:
             return self._uncertain(
                 "The available evidence doesn't clearly support recommending "
                 "either fight or refund with confidence."
-                + (f" {data.get('decision_reason')}" if data.get("decision_reason") else "")
+                + (f" {decision_reason}" if decision_reason else "")
                 + " You may want to gather stronger documentation before "
                 "proceeding, or consult your acquiring bank directly.",
                 needs_more_info=False,
                 decision="",
-                decision_reason=data.get("decision_reason", "Insufficient evidence to decide confidently"),
+                decision_reason=decision_reason or "Insufficient evidence to decide confidently",
             )
 
         return {
             "decision":        decision,
-            "decision_reason": data.get("decision_reason", ""),
+            "decision_reason": decision_reason,
         }
 
     def _generate_node(self, state: ChargebackState) -> dict:
