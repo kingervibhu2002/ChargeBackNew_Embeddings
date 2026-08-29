@@ -315,6 +315,27 @@ _NETWORK_PAYLOAD_SPELLINGS = {
 }
 
 
+def _deadline_bucket(response_deadline: str) -> str:
+    """
+    Classify a case's response_deadline against today's date into
+    "overdue" | "due_this_week" | "later" — used to give a merchant's
+    open-case listing an urgency summary instead of a flat, undifferentiated
+    list. status='Open' does NOT imply the deadline hasn't passed in this
+    schema (see active_deadline_only elsewhere in this file) — a case can
+    sit visually identical whether its deadline was weeks ago or is a
+    month out, which a merchant scanning the list has no way to tell apart
+    without this.
+    """
+    from datetime import date, timedelta
+    deadline = date.fromisoformat(response_deadline)
+    today = date.today()
+    if deadline < today:
+        return "overdue"
+    if deadline <= today + timedelta(days=7):
+        return "due_this_week"
+    return "later"
+
+
 # ---------------------------------------------------------------------------
 # DisputeAgent
 # ---------------------------------------------------------------------------
@@ -2045,12 +2066,38 @@ class DisputeAgent:
                         "groundedness_issues": "",
                         "needs_more_info":     False,
                     }
-                lines = [f"I found {len(cases)} {case_label} for your account:\n"]
-                for i, c in enumerate(cases, 1):
+                # Urgency summary + per-case tag, requested live: a flat
+                # list gave no sense of which cases actually need
+                # attention now — e.g. a case with a response_deadline
+                # weeks in the past (status='Open' doesn't imply the
+                # deadline hasn't passed in this schema — see
+                # active_deadline_only above) sat visually identical to
+                # one due next month. _filtered_open_cases() already
+                # returns cases sorted by response_deadline ASC, which is
+                # already overdue-first/soonest-first — bucketing for
+                # display doesn't reorder anything, so ordinal references
+                # ("the first one") on the next turn still resolve against
+                # the exact same list in the exact same order.
+                buckets = [_deadline_bucket(c["response_deadline"]) for c in cases]
+                overdue_n      = buckets.count("overdue")
+                due_week_n     = buckets.count("due_this_week")
+                later_n        = buckets.count("later")
+                bucket_tag = {
+                    "overdue":       " — DEADLINE PASSED",
+                    "due_this_week": " — due within a week",
+                    "later":         "",
+                }
+                lines = [
+                    f"I found {len(cases)} {case_label} for your account:\n",
+                    f"Summary: {overdue_n} deadline already passed, "
+                    f"{due_week_n} due within the next week, "
+                    f"{later_n} with more than a week remaining.\n",
+                ]
+                for i, (c, bucket) in enumerate(zip(cases, buckets), 1):
                     lines.append(
                         f"{i}. {c['case_id']} — RuPay {c['reason_code']} "
                         f"({c['reason_description']}), ₹{c['chargeback_amount']:,.2f}, "
-                        f"due {c['response_deadline']}"
+                        f"due {c['response_deadline']}{bucket_tag[bucket]}"
                     )
                 if len(cases) > 1:
                     lines.append(
