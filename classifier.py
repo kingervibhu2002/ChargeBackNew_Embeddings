@@ -108,6 +108,109 @@ def asks_about_case_instance_fact(text: str) -> bool:
     return bool(_CASE_INSTANCE_FACT_RE.search(text))
 
 
+# Section-A-style "case discovery" questions ("what is the case ID?", "is
+# the case still open?") each have exactly one crisp, deterministic answer
+# drawn straight from the DB row — no LLM judgment call needed, and letting
+# an LLM answer them was confirmed live to produce the wrong shape twice
+# over: a narrow single-fact question ("What is the case ID?") got the
+# ENTIRE case status/resolution/recommendation dumped back regardless of
+# what was actually asked, because _answer_clarification_node's prompt
+# unconditionally instructed the model to "lead with" every fact by name.
+# Checked in this priority order (most specific literal phrase first) so a
+# question naming more than one keyword resolves to the single field it's
+# actually asking about, not whichever pattern happens to be scanned first.
+_CASE_FACT_PATTERNS = (
+    ("case_id",           re.compile(r"\bcase\s*id\b", re.IGNORECASE)),
+    ("amount",            re.compile(r"\b(chargeback\s+)?amount\b|\bhow\s+much\b", re.IGNORECASE)),
+    ("reason_code",       re.compile(r"\breason\s*code\b|\b(which|what)\s+code\b", re.IGNORECASE)),
+    ("network",           re.compile(r"\bnetwork\b", re.IGNORECASE)),
+    ("can_respond",       re.compile(
+        r"\bcan\s+i\s+(still\s+)?(respond|reply|submit|fight|dispute)\b|\btoo\s+late\b",
+        re.IGNORECASE,
+    )),
+    ("deadline_date",     re.compile(
+        r"\bdeadline\b|\bdue\s*date\b|\bdue\s*by\b|\brespond\s+by\b|\bwhen\b.*\brespond\b",
+        re.IGNORECASE,
+    )),
+    ("resolution_status", re.compile(r"\bresolut(ion|ved)\b", re.IGNORECASE)),
+    ("case_status",       re.compile(
+        r"\bis\s+(it|the\s+case)\s+(still\s+)?(open|closed)\b|\bcase\s+status\b|"
+        r"\bcurrent\s+status\b|\bstill\s+open\b",
+        re.IGNORECASE,
+    )),
+    # Section-B-style evidence questions — "what do I have/need," "does my
+    # ledger prove X" — all resolve to the SAME underlying fact this project
+    # already computes per case (chargeback_analysis.ledger_decision_reason /
+    # ledger_no_decision_reason): what the bank's own records do and don't
+    # establish. Checked as distinct intents so the answer can be framed to
+    # match what was actually asked (a yes/no "does this prove..." reads
+    # differently from an open "what do I have"), even though both draw on
+    # the same underlying reason text.
+    ("ledger_proof",      re.compile(
+        r"\b(does|doesn.?t|what\s+does)\s+.*\bledger\b.*\bprove\b|"
+        r"\bprove\s+i.?m\s+innocent\b|\bproves?\s+(i\s+)?wasn.?t\b",
+        re.IGNORECASE,
+    )),
+    ("missing_evidence",  re.compile(
+        r"\bevidence\s+is\s+missing\b|\bwhat\s+evidence\s+(do\s+i\s+)?(still\s+)?need\b|"
+        r"\bwhat.?s\s+missing\b|\bwhat\s+should\s+i\s+collect\b",
+        re.IGNORECASE,
+    )),
+    ("current_evidence",  re.compile(
+        r"\bwhat\s+evidence\s+do\s+i\s+(currently\s+)?have\b|\bcurrent\s+evidence\b|"
+        r"\benough\s+evidence\s+to\s+fight\b|\bdo\s+i\s+have\s+enough\s+evidence\b",
+        re.IGNORECASE,
+    )),
+    # Section-E-style assessment/recommendation questions — map directly
+    # onto _derive_assessment()'s own 5-way output (CONTEST/ACCEPT/
+    # INVESTIGATE/INSUFFICIENT_EVIDENCE/NO_ACTION_AVAILABLE), computed from
+    # the same case_context fields the fact intents above already read —
+    # not a new decision, just a different question about the same state.
+    ("who_is_right",      re.compile(
+        r"\bwho\s+is\s+right\b|\bwho.?s\s+right\b|\bcustomer\s+or\s+merchant\b|"
+        r"\bmerchant\s+or\s+customer\b",
+        re.IGNORECASE,
+    )),
+    ("final_answer",      re.compile(r"\bfinal\s+answer\b", re.IGNORECASE)),
+    ("assessment",        re.compile(
+        r"\bshould\s+i\s+fight\b|\bwhat\s+is\s+your\s+recommendation\b|"
+        r"\bwhat.?s\s+your\s+recommendation\b|\bwhat\s+should\s+i\s+do\b",
+        re.IGNORECASE,
+    )),
+)
+
+
+def classify_case_fact_intent(text: str) -> str:
+    """
+    Which single, on-file case fact `text` is asking about, or "case_summary"
+    for a broad case-view request ("show me this case," "tell me about this
+    case") with no narrower target, or "" if neither.
+
+    Only meaningful once a real case is already anchored (case_context.
+    case_id set) — callers must gate on that themselves, same as
+    asks_about_case_instance_fact() above; this function has no way to know
+    whether a case is anchored on its own.
+
+    Deliberately NOT used to decide whether something IS a question at all
+    (that's is_clarifying_question(), which already requires a "?" or a
+    question-starter word for every one of these narrow buckets in
+    practice) — this only decides WHICH fact to answer, once a caller has
+    already established the turn is a question. The one exception is the
+    "case_summary" bucket, checked via refers_to_current_case() below,
+    which a caller may also use as a routing signal for a genuine but
+    question-mark-free case-view imperative like "Show me this case." (see
+    _detect_clarification_node's own use of this).
+    """
+    if not text:
+        return ""
+    for label, pattern in _CASE_FACT_PATTERNS:
+        if pattern.search(text):
+            return label
+    if refers_to_current_case(text):
+        return "case_summary"
+    return ""
+
+
 _NEW_REQUEST_STARTER_RE = re.compile(
     r"^\s*(help me( with| to)?|please help|can you help|i need help|"
     r"show me|tell me|list |give me|explain( to me)?)\b",

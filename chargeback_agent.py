@@ -2814,13 +2814,241 @@ class DisputeAgent:
         Writes: conversation.merchant_is_asking_question
         """
         context = state.get("additional_context", "")
-        if not context and state.get("case_context", {}).get("case_id"):
-            is_question = classifier.is_clarifying_question(state.get("user_query", ""))
+        case_id = state.get("case_context", {}).get("case_id", "")
+        if not context and case_id:
+            latest = state.get("user_query", "")
         else:
-            is_question = classifier.is_clarifying_question(context)
+            latest = context
+        is_question = classifier.is_clarifying_question(latest)
+        # is_clarifying_question() requires a "?" or a question-starter word
+        # ("what"/"how"/"can i"/...) — an imperative case-view request on an
+        # already-anchored case ("Show me this case.", "Tell me about this
+        # case.") has neither, so it fell through here as "not a question"
+        # and landed in _extract_evidence_node's ledger_decision shortcut,
+        # producing a generic "want more detail or should I draft it?" scope
+        # question instead of actually showing the case (confirmed live).
+        # looks_like_new_request() + refers_to_current_case() together
+        # single out exactly that shape — an imperative opener ("show me"/
+        # "tell me"/"list"/"give me") ALSO naming the anchored case via a
+        # demonstrative — without loosening the check enough to swallow a
+        # genuine evidence reply that happens to mention "this case"/"the
+        # case" but isn't phrased as a request at all.
+        if not is_question and case_id:
+            segment = _latest_segment(latest) if latest else ""
+            if classifier.looks_like_new_request(segment) and classifier.refers_to_current_case(segment):
+                is_question = True
         return {
             "conversation": {"merchant_is_asking_question": is_question},
         }
+
+    # NPCI/RuPay is this project's only network with real merchant-facing
+    # case data (see chargeback_analysis.py's own _NETWORK constant) — the
+    # "NPCI/" prefix belongs only to it; any other network is displayed as
+    # its own name with no prefix.
+    _NETWORK_DISPLAY = {"RuPay": "NPCI/RuPay"}
+    _NETWORK_ARTICLE = {"RuPay": "an", "Amex": "an"}
+
+    def _answer_case_fact(self, merchant_id: str, case_id: str, intent: str) -> str:
+        """
+        Crisp, deterministic answer to one Section-A/B/E-style case
+        question (case discovery, evidence status, or assessment/
+        recommendation) — classifier.classify_case_fact_intent()'s
+        counterpart. Reuses _lookup_case_details() for the DB row (same
+        query _build_case_intro() already runs) rather than re-deriving
+        these facts from a status_line string an LLM would otherwise have
+        to parse. Returns "" when the case doesn't resolve (caller falls
+        through to the normal LLM-based answer in that case).
+
+        Evidence/assessment intents (current_evidence, missing_evidence,
+        ledger_proof, assessment, who_is_right, final_answer) all reuse
+        chargeback_analysis.analyze_chargeback()'s own reason text and
+        _derive_assessment()'s own 5-way label — the SAME bank-side
+        reasoning and assessment this project already computes elsewhere
+        (case-intro preview, decide_node's ledger shortcut, run()'s own
+        response fields) — rather than asking an LLM to re-derive or
+        re-word conclusions this project already has deterministically.
+        """
+        from datetime import datetime
+
+        from chargeback_analysis import analyze_chargeback
+
+        _, row = self._lookup_case_details(merchant_id, case_id)
+        if row is None:
+            return ""
+        analysis = analyze_chargeback(row, db_path="chargebacks.db")
+
+        # This schema has no network column at all — every row is NPCI/RuPay
+        # (see chargeback_analysis.py's own _NETWORK constant and its
+        # docstring for why that's a fixed fact, not a per-row lookup).
+        network = self._NETWORK_DISPLAY["RuPay"]
+        article = self._NETWORK_ARTICLE["RuPay"]
+        try:
+            deadline_dt = datetime.strptime(row["response_deadline"], "%Y-%m-%d")
+            deadline_human = f"{deadline_dt.strftime('%B')} {deadline_dt.day}, {deadline_dt.year}"
+        except (ValueError, TypeError):
+            deadline_human = row["response_deadline"]
+        passed = _deadline_status(row["response_deadline"]) == "PASSED"
+
+        if intent == "case_id":
+            return f"The case ID is {row['case_id']}."
+        if intent == "amount":
+            return f"The disputed amount is ₹{row['chargeback_amount']:,.2f}."
+        if intent == "reason_code":
+            return (
+                f"The reason code is {row['reason_code']}, associated with a "
+                f"{row['reason_description'].lower()} dispute."
+            )
+        if intent == "network":
+            return f"This is {article} {network} chargeback."
+        if intent == "case_status":
+            open_now = row["status"] in ("Open", "Pending")
+            return f"{'Yes' if open_now else 'No'}. The case is currently marked {row['status']}."
+        if intent == "deadline_date":
+            return f"The response deadline {'was' if passed else 'is'} {deadline_human}."
+        if intent == "can_respond":
+            if passed:
+                return (
+                    "The standard response deadline has already passed. The next "
+                    "step is to contact your acquiring bank or PSP to determine "
+                    "whether a late representment, extension, or other recovery "
+                    "option is available."
+                )
+            return f"Yes — the response deadline is {deadline_human}, which hasn't passed yet."
+        if intent == "resolution_status":
+            if row["resolution"]:
+                return f"Yes, this case has been resolved — {row['resolution']}."
+            return "The case does not currently have a confirmed final resolution."
+        if intent in ("current_evidence", "missing_evidence", "ledger_proof"):
+            # analysis.reason is populated whenever CBS/ledger/network
+            # data resolved SOMETHING for this case (a confident action,
+            # or a genuine blocker) — chargeback_analysis.py's own
+            # docstring (2, 2b, 2c) is exactly the "what does the evidence
+            # establish" narrative this project already computes, so reuse
+            # it verbatim rather than re-deriving or re-wording it here.
+            if analysis.reason:
+                if intent == "missing_evidence" and analysis.action is not None:
+                    return (
+                        "Nothing further needed from you — this is already settled "
+                        f"by the bank's own records: {analysis.reason}"
+                    )
+                if intent == "ledger_proof":
+                    if analysis.action == "refund":
+                        prefix = "No — if anything, the opposite: "
+                    elif analysis.action == "fight":
+                        prefix = "Based on what's on file, no: "
+                    else:
+                        prefix = "No — not by itself: "
+                    return f"{prefix}{analysis.reason}"
+                prefix = "Still needed: " if intent == "missing_evidence" else ""
+                return f"{prefix}{analysis.reason}"
+            # No CBS/ledger involvement for this reason code at all — fall
+            # back to decision_rules' required evidence, the same
+            # deterministic lookup _extract_evidence_node already uses.
+            rule = decision_rules.RULES.get(("RuPay", row["reason_code"]))
+            needed = sorted(set(rule.required_any) | set(rule.required_all)) if rule else []
+            if needed:
+                labels = ", ".join(humanize_evidence(needed))
+                return (
+                    "No case-specific evidence is on file yet. "
+                    f"Typically needed for {row['reason_code']}: {labels}."
+                )
+            return "No case-specific evidence is on file yet."
+        if intent in ("assessment", "who_is_right", "final_answer"):
+            synthetic_case_ctx = {"reason_code": row["reason_code"]}
+            synthetic_decision_ctx = {}
+            if analysis.action is None and analysis.source in ("ledger", "network"):
+                synthetic_case_ctx["ledger_no_decision_reason"] = analysis.reason
+            elif analysis.action:
+                synthetic_decision_ctx = {"decision": analysis.action, "decision_reason": analysis.reason}
+            assessment_label, recommendation = _derive_assessment(synthetic_case_ctx, synthetic_decision_ctx)
+
+            if intent == "who_is_right":
+                reason_clause = (
+                    analysis.reason.rstrip(".") if analysis.reason
+                    else "this case has not been fully reconciled yet"
+                )
+                return (
+                    "I can't reliably determine that from the current evidence — "
+                    f"{reason_clause}. This needs transaction reconciliation before "
+                    "responsibility can be assigned, not a guess."
+                )
+            if intent == "assessment":
+                if assessment_label == "CONTEST":
+                    text = f"Yes — the recommended action is to fight this dispute. {recommendation}"
+                elif assessment_label == "ACCEPT":
+                    text = f"No — the recommended action is to refund/accept this dispute. {recommendation}"
+                elif assessment_label == "INVESTIGATE":
+                    text = f"Not yet. {recommendation}"
+                elif assessment_label == "INSUFFICIENT_EVIDENCE":
+                    text = "Not enough evidence on file yet to make a confident recommendation."
+                else:
+                    text = "I don't have enough on file yet to make a recommendation."
+                if analysis.deadline_expired and assessment_label != "NO_ACTION_AVAILABLE":
+                    text += (
+                        " Note: the response deadline has already passed — contact "
+                        "your acquiring bank/PSP immediately regardless of the "
+                        "recommendation above."
+                    )
+                return text
+            # final_answer
+            resolution_word = "resolved" if row["resolution"] else "unresolved"
+            lines = [f"Current resolution: {resolution_word}."]
+            status_bits = []
+            if row["status"] in ("Open", "Pending"):
+                status_bits.append("the case is open")
+            if analysis.deadline_expired:
+                status_bits.append("the response deadline has passed")
+            if assessment_label in ("INVESTIGATE", "INSUFFICIENT_EVIDENCE"):
+                status_bits.append(
+                    "the available evidence does not yet establish whether the "
+                    f"{row['reason_code']} allegation is substantiated"
+                )
+            if status_bits:
+                joined = ", ".join(status_bits)
+                lines += ["", joined[0].upper() + joined[1:] + "."]
+            # A CONTEST/ACCEPT assessment already has a clear right action;
+            # only INVESTIGATE/INSUFFICIENT_EVIDENCE need `recommendation`
+            # itself (a still-missing next step) spelled out here — for a
+            # settled case, restating the same reasoning a third time as
+            # "immediate action" would be redundant with the summary above.
+            if assessment_label == "CONTEST":
+                action_text = "Proceed with disputing this chargeback, citing the evidence above."
+            elif assessment_label == "ACCEPT":
+                action_text = "Process the refund/credit as recommended above."
+            else:
+                action_text = recommendation or "No immediate action is recommended beyond what's already on file."
+            if analysis.deadline_expired:
+                action_text += (
+                    " The response deadline has already passed — contact your "
+                    "acquiring bank/PSP immediately to check whether late action "
+                    "is still possible."
+                )
+            lines += [
+                "",
+                f"Immediate action: {action_text}",
+                "",
+                'I would not currently label the case as "customer won" or "merchant won."',
+            ]
+            return "\n".join(lines)
+        if intent == "case_summary":
+            deadline_clause = (
+                f", but the response deadline of {deadline_human} has passed"
+                if passed else
+                f", and the response deadline of {deadline_human} has not yet passed"
+            )
+            resolution_clause = (
+                f"The case has been resolved — {row['resolution']}."
+                if row["resolution"] else
+                "The case does not currently have a confirmed final resolution."
+            )
+            return (
+                f"Case {row['case_id']} is {article} {network} {row['reason_code']} "
+                f"– {row['reason_description'].title()} chargeback for "
+                f"₹{row['chargeback_amount']:,.2f}.\n\n"
+                f"The case is currently {row['status'].lower()}{deadline_clause}. "
+                f"{resolution_clause}"
+            )
+        return ""
 
     def _answer_clarification_node(self, state: ChargebackState) -> dict:
         """
@@ -2873,6 +3101,30 @@ class DisputeAgent:
         # recognizes (see that node's docstring): the merchant's actual
         # question IS the original query, not a follow-up reply to one.
         latest   = segments[-1] if segments else (context or state.get("user_query", ""))
+
+        # Section-A/B/E-style case question ("what is the case ID?", "is the
+        # case still open?", "show me this case", "what evidence do I have",
+        # "should I fight it?") — answered deterministically straight from
+        # the DB row + chargeback_analysis's own reasoning, bypassing the
+        # LLM entirely, rather than via the "lead with case facts" prompt
+        # below. That prompt was confirmed live to over-answer: a narrow
+        # single-fact question ("What is the case ID?") got the entire case
+        # status/resolution/recommendation dumped back regardless of what
+        # was actually asked, because it unconditionally instructs the model
+        # to name every field. Bounded to short questions (<=16 words) — a
+        # longer, compound question ("what if the amount was wrong, do I
+        # need new evidence?") merely containing one of these keywords is
+        # NOT this narrow shape and must still reach the LLM path below, not
+        # get a one-line non-answer to a question it never fully addressed.
+        case_id = case_ctx.get("case_id", "")
+        if case_id and len(latest.split()) <= 16:
+            fact_intent = classifier.classify_case_fact_intent(latest)
+            if fact_intent:
+                deterministic = self._answer_case_fact(
+                    state.get("merchant_id", ""), case_id, fact_intent,
+                )
+                if deterministic:
+                    return {"conversation": {"missing_info_question": deterministic}}
 
         # The closing reminder must point at whatever is ACTUALLY still
         # missing, not a hardcoded "come back with evidence" regardless of
@@ -2964,26 +3216,42 @@ class DisputeAgent:
             )
 
         if is_case_specific_question:
+            # Deliberately scoped, not "always name every fact" — the
+            # closed-vocabulary version of this question (case ID, amount,
+            # status, deadline, ...) is answered deterministically above,
+            # bypassing this LLM path entirely; anything that reaches here
+            # is either a longer/compound question or one this project has
+            # no fixed pattern for, so the model still needs to decide what
+            # was actually asked. An earlier version of this instruction
+            # said "lead with those specific facts by name (amount, status,
+            # resolution, deadline, recommendation...)" unconditionally —
+            # confirmed live this over-answered even a narrow single-fact
+            # ask ("What is the case ID?") with the entire case dumped back,
+            # every time, regardless of what was asked.
             lead_instruction = (
                 "First check whether the 'Relevant context' below includes a "
                 "case-specific record (a line starting with \"Case <id>\" — the "
                 "system's own on-file status/recommendation for this exact "
-                "dispute) that answers or partially answers their question. If "
-                "so, lead with those specific facts by name (chargeback amount, "
+                "dispute). If so, answer using ONLY the specific fact(s) the "
+                "merchant actually asked about (case ID, amount, reason code, "
                 "case status, resolution status, response deadline, recommended "
-                "action, what evidence is or isn't on file) — the merchant is often "
-                "asking you to check something the system already knows, not "
-                "asking how to look it up themselves.\n"
+                "action, evidence on file) — 1-2 sentences, nothing else. Do NOT "
+                "restate every other fact 'for context' when only one was asked "
+                "about. Only give the fuller multi-fact summary (amount, status, "
+                "deadline, resolution — still never the recommended action unless "
+                "asked) when the question is a broad, no-specific-target request "
+                "like 'show me this case' or 'tell me about this case.'\n"
                 "CRITICAL — these are four SEPARATE facts, never merge them: "
                 "'case status' (Open/Closed) is not 'resolution status' (has "
                 "this case actually been resolved yet, yes or no) is not "
                 "'recommended action' (fight or refund — this system's ADVICE, "
                 "not a decision that has been made or acted on) is not "
                 "'response deadline' (and whether it has already passed — "
-                "state this explicitly whenever the record marks it passed, "
-                "never omit it). If asked specifically about 'resolution,' "
-                "answer that exact question (resolved or not, and why) rather "
-                "than substituting the recommended action for it.\n"
+                "state this explicitly whenever the record marks it passed and "
+                "the question calls for it, never omit it). If asked "
+                "specifically about 'resolution,' answer that exact question "
+                "(resolved or not, and why) rather than substituting the "
+                "recommended action for it.\n"
             )
         else:
             lead_instruction = (
