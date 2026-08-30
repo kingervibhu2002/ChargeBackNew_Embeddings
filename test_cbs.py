@@ -491,16 +491,28 @@ def test_u002_pending_entry_returns_no_recommendation() -> bool:
         os.remove(db)
 
 
-def test_u002_zero_credits_falls_through_to_rule_table() -> bool:
+def test_u002_zero_credits_no_network_data_returns_insufficient_evidence() -> bool:
+    # Stale since the "5-way assessment" change folded credits==0 into the
+    # SAME network-reconciliation path credits==1 already used (see
+    # chargeback_analysis.py's own 2c docstring) — a genuinely fresh
+    # chargeback with no ledger entry yet is no longer trusted to
+    # decision_rules.decide()'s evidence-free default (which resolved
+    # EVERY such U002 case to "refund" with no network check at all); it
+    # now gets the same "cannot confidently decide, check the network"
+    # treatment credits==1 gets. Previously asserted the OLD behavior
+    # (source='rules') and had been silently failing since that change
+    # landed — this asserts the current, intended behavior instead.
     db = _make_test_db()
     try:
         _insert_chargeback(db, "UTR_ZERO", "U002")
-        # No ledger entries at all for this UTR.
+        # No ledger entries at all for this UTR, and no network_debit_
+        # attempts row either.
         row = _get_chargeback_row(db, "UTR_ZERO")
         result = analyze_chargeback(row, db_path=db)
-        return _check("U002 + 0 ledger entries -> falls through to decision_rules (source='rules')",
-                       result.source == "rules",
-                       detail=str(result))
+        return _check(
+            "U002 + 0 ledger entries + no network data -> action=None, source='network'",
+            result.action is None and result.source == "network",
+            detail=str(result))
     finally:
         os.remove(db)
 
@@ -627,7 +639,7 @@ def main() -> None:
         test_u002_network_confirms_unreversed_duplicate_recommends_refund,
         test_u002_one_credit_unreconciled_returns_no_recommendation,
         test_u002_pending_entry_returns_no_recommendation,
-        test_u002_zero_credits_falls_through_to_rule_table,
+        test_u002_zero_credits_no_network_data_returns_insufficient_evidence,
         test_cbs_refund_check_still_takes_priority_over_ledger_check,
         test_non_u002_code_unaffected_by_ledger_check,
         test_deadline_expired_true_when_response_deadline_is_past,

@@ -57,7 +57,7 @@ The duplication propagated all the way through the payment chain. The merchant's
 
 ### If the Merchant Received Only One Credit
 
-The duplicate debit is a bank/PSP-level issue. The customer's bank is obligated to investigate and process an auto-reversal for the duplicate debit. The merchant does not need to issue a refund because only one payment was received.
+As general policy, a duplicate debit that never produced a duplicate merchant credit is the customer's bank/PSP's obligation to investigate and auto-reverse, not something the merchant owes a refund for. This describes the typical policy position and a typical merchant defense — it is NOT, on its own, proof that a specific customer's account was debited only once. "Merchant received one credit" establishes what reached the merchant; it does not by itself establish the customer's debit history, which still needs to be reconciled against the customer's bank/PSP/NPCI records before a specific case can be considered settled.
 
 **Merchant's action:**
 - Provide transaction records confirming one credit was received (bank statement excerpt, payment gateway settlement report)
@@ -121,7 +121,7 @@ When auto-reversal fails, the customer files a formal complaint with their bank,
 ## Frequently Asked Questions
 
 **Q: The customer's bank says they were debited twice, but we only show one credit. Who is responsible for the refund?**
-A: The customer's bank is responsible for reversing the duplicate debit. You do not owe a refund because you only received one payment. Provide your settlement records to your acquiring bank to document that only one credit arrived. Your acquirer will submit this to NPCI, confirming that the duplicate debit did not result in a duplicate merchant credit.
+A: As a general policy matter, the customer's bank is responsible for reversing a duplicate debit that never produced a duplicate merchant credit — you would not owe a refund in that scenario. Provide your settlement records to your acquiring bank to document that only one credit arrived; your acquirer submits this to NPCI as merchant-side evidence. This settlement record on its own does not confirm how many times the customer's account was actually debited — that still depends on the customer-side/NPCI reconciliation your acquirer and the customer's bank carry out, not on your settlement report alone.
 
 **Q: Can we keep both credits if the customer is not complaining?**
 A: No. Retaining a duplicate credit is a violation of NPCI merchant rules. If your reconciliation identifies a duplicate credit, you must initiate a refund for the excess amount. Proactively contact the customer and issue the refund. This protects you from a future U002 dispute with accrued interest or penalties.
