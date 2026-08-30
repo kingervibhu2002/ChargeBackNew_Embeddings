@@ -3284,9 +3284,14 @@ class DisputeAgent:
                 # own deliberate refusal to hijack the anchor for a genuine
                 # question) and then asked a bare follow-up ("what is its
                 # amount?") that silently resolved to the still-anchored
-                # case instead of the one just discussed. Ask which case is
-                # meant rather than guess — same philosophy as this file's
-                # other "I'm not sure if that's about case X or..." checks.
+                # case instead of the one just discussed.
+                #
+                # Exactly one other open case with that code -> unambiguous:
+                # just answer from it directly, no need to ask (the merchant
+                # can only mean that one case). Two or more -> genuinely
+                # ambiguous, ask which one rather than guess — same
+                # philosophy as this file's other "I'm not sure if that's
+                # about case X or..." checks.
                 previous_segment = segments[-2] if len(segments) >= 2 else ""
                 ambiguous_code = classifier.detect_case_fact_ambiguity(
                     latest, previous_segment, reason_code,
@@ -3299,12 +3304,13 @@ class DisputeAgent:
                     ]
                     if len(other_cases) == 1:
                         other_id = other_cases[0]["case_id"]
-                        return {"conversation": {"missing_info_question": (
-                            f"Just to confirm which case you mean — the one we've been "
-                            f"discussing (case {case_id}, {reason_code}), or your "
-                            f"{ambiguous_code} case ({other_id})? Let me know and I'll "
-                            f"answer for that one."
-                        )}}
+                        resolved = self._answer_case_fact(
+                            state.get("merchant_id", ""), other_id, fact_intent,
+                        )
+                        if resolved:
+                            return {"conversation": {"missing_info_question": (
+                                f"For your {ambiguous_code} case ({other_id}): {resolved}"
+                            )}}
                     if len(other_cases) > 1:
                         return {"conversation": {"missing_info_question": (
                             f"Just to confirm which case you mean — the one we've been "
@@ -3321,6 +3327,40 @@ class DisputeAgent:
                 )
                 if deterministic:
                     return {"conversation": {"missing_info_question": deterministic}}
+
+        # Reply to THIS node's own multi-match disambiguation question one
+        # turn ago ("Just to confirm which case you mean... or one of your
+        # other U002 cases? Let me know the case ID") — the reply itself
+        # ("the second one," "the U003 one," a bare case ID) carries no
+        # case-fact keyword of its own, so the `if fact_intent:` block above
+        # never fires for it. Re-derives the pending fact question AND its
+        # candidate cases fresh from the last three segments rather than
+        # storing anything — same "re-derive, don't rely on persisted state"
+        # approach the list-then-select continuity path already uses,
+        # necessary because this project's checkpointer doesn't reliably
+        # carry new state fields across turns (run() rebuilds initial_state
+        # fresh every call — confirmed live earlier this session).
+        if case_id and len(segments) >= 3:
+            prior_latest   = segments[-2]
+            prior_previous = segments[-3]
+            prior_fact_intent = classifier.classify_case_fact_intent(prior_latest)
+            prior_ambiguous_code = classifier.detect_case_fact_ambiguity(
+                prior_latest, prior_previous, reason_code,
+            ) if prior_fact_intent else None
+            if prior_ambiguous_code:
+                from merchant_db import list_open_chargebacks
+                candidates = [{"case_id": case_id, "reason_code": reason_code}] + [
+                    c for c in list_open_chargebacks(state.get("merchant_id", ""), limit=100)
+                    if c["reason_code"] == prior_ambiguous_code and c["case_id"] != case_id
+                ]
+                resolved_id = classifier.detect_case_selection(latest, candidates)
+                if resolved_id:
+                    resolved = self._answer_case_fact(
+                        state.get("merchant_id", ""), resolved_id, prior_fact_intent,
+                    )
+                    if resolved:
+                        prefix = "" if resolved_id == case_id else f"For case {resolved_id}: "
+                        return {"conversation": {"missing_info_question": f"{prefix}{resolved}"}}
 
         # The closing reminder must point at whatever is ACTUALLY still
         # missing, not a hardcoded "come back with evidence" regardless of
