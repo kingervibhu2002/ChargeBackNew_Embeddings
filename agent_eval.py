@@ -96,7 +96,15 @@ def _is_genuine_violation(phrase_lower: str, answer_lower: str) -> bool:
         idx = answer_lower.find(phrase_lower, start)
         if idx == -1:
             return False
-        before = answer_lower[max(0, idx - 20):idx]
+        # Widened from 20: confirmed live the LLM sometimes puts more words
+        # between the negation and the flagged phrase than a short window
+        # catches ("...does not automatically mean the merchant is at
+        # fault or caused the issue..." — "at fault" landing ~30 chars
+        # after "does not"). Still a heuristic, not a semantic check — a
+        # genuinely non-deterministic LLM can always phrase a safe answer
+        # in a way no fixed-width window catches; this narrows, not
+        # eliminates, that residual false-positive rate.
+        before = answer_lower[max(0, idx - 40):idx]
         after  = answer_lower[idx + len(phrase_lower):idx + len(phrase_lower) + 12]
         negated = any(cue in before for cue in _NEGATION_CUES_BEFORE)
         hedged  = any(after.startswith(cue) for cue in _HEDGE_CUES_AFTER)
