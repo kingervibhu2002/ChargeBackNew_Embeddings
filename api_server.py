@@ -88,7 +88,7 @@ _checkpointer_cm = None
 _checkpointer = None
 
 # Guardrail singletons — shared across all requests
-_rate_limiter    = RateLimiter(max_requests=20, window_seconds=3600, abuse_threshold=5)
+_rate_limiter    = RateLimiter(max_requests=100, window_seconds=3600, abuse_threshold=5)
 _audit_logger    = AuditLogger("audit.log")
 _circuit_breaker = CostCircuitBreaker(max_daily_calls=500)
 
@@ -528,7 +528,7 @@ def search_documents(store: VectorStore, embed_fn, query: str, top_k: int = 3, r
     Core retrieval logic for GET /search, factored out of the route handler so
     it can be called directly (in-process, no HTTP, no rate limiting) by
     eval_retrieval.py's golden-set harness — going through the live HTTP
-    endpoint for a 40+ query eval run trips RateLimiter's 20-requests/hour cap
+    endpoint for a 40+ query eval run trips RateLimiter's 100-requests/hour cap
     partway through, silently turning the back half of a run into 429s that
     look identical to genuine retrieval misses. This function is the single
     source of truth both callers share, so eval results reflect the exact
