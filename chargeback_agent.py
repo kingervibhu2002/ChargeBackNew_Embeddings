@@ -4119,7 +4119,9 @@ class DisputeAgent:
 
         Reads:  user_query
         Writes: final_answer, retrieved_docs, decision_ctx (confidence_score,
-                is_grounded, groundedness_issues)
+                is_grounded, groundedness_issues), case_context (only when
+                the data-lookup list branch's single-match result auto-
+                resolves — see that branch's own comment)
 
         Args:
             state (ChargebackState): Current graph state.
@@ -4285,7 +4287,7 @@ class DisputeAgent:
                         )
                 else:
                     lines.append("\nWant me to walk you through this one?")
-                return {
+                result = {
                     "final_answer":        "\n".join(lines),
                     "retrieved_docs":      [],
                     # This text genuinely ends by asking the merchant to
@@ -4304,6 +4306,30 @@ class DisputeAgent:
                         "clarification_reason": CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
                     },
                 }
+                if len(cases) == 1:
+                    # A single match is unambiguous — the merchant can only
+                    # mean this one case, same "exactly one -> just resolve
+                    # it" philosophy _answer_clarification_node's own
+                    # auto-resolve branch uses (see _resolve_case_context's
+                    # docstring). Reported live: a conversation that OPENS
+                    # with a list query ("do i have any u003 cases?") rather
+                    # than naming a case directly never set case_context.case_id
+                    # here at all — this branch only ever returned text,
+                    # leaving no anchor for _validate_node's case_ref_token
+                    # fallback chain to find on the next turn. A free-text
+                    # follow-up ("great explain it") then had no case to
+                    # resolve against and fell through to classify_query_type(),
+                    # which rejected it outright as an invalid query. Anchors
+                    # here — the displayed text is UNCHANGED (still shows the
+                    # list and asks to confirm), only case_context now moves
+                    # alongside it, mirroring the wording-vs-state split the
+                    # ambiguity auto-resolve fix already established.
+                    new_case_context = self._resolve_case_context(
+                        merchant_id, cases[0]["case_id"],
+                    )
+                    if new_case_context:
+                        result["case_context"] = new_case_context
+                return result
 
             if intent and intent["type"] == "aggregate":
                 # Already executed and synthesized inside
