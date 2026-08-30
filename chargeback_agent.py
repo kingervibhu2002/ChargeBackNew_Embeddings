@@ -3277,6 +3277,45 @@ class DisputeAgent:
         if case_id and len(latest.split()) <= 16:
             fact_intent = classifier.classify_case_fact_intent(latest)
             if fact_intent:
+                # Reported live: mid-conversation about this anchored case,
+                # the merchant asked a generic aside about a DIFFERENT
+                # reason code ("ohhh i have U003 also?" — correctly answered
+                # conceptually, not a case switch, per detect_case_selection()'s
+                # own deliberate refusal to hijack the anchor for a genuine
+                # question) and then asked a bare follow-up ("what is its
+                # amount?") that silently resolved to the still-anchored
+                # case instead of the one just discussed. Ask which case is
+                # meant rather than guess — same philosophy as this file's
+                # other "I'm not sure if that's about case X or..." checks.
+                previous_segment = segments[-2] if len(segments) >= 2 else ""
+                ambiguous_code = classifier.detect_case_fact_ambiguity(
+                    latest, previous_segment, reason_code,
+                )
+                if ambiguous_code:
+                    from merchant_db import list_open_chargebacks
+                    other_cases = [
+                        c for c in list_open_chargebacks(state.get("merchant_id", ""), limit=100)
+                        if c["reason_code"] == ambiguous_code and c["case_id"] != case_id
+                    ]
+                    if len(other_cases) == 1:
+                        other_id = other_cases[0]["case_id"]
+                        return {"conversation": {"missing_info_question": (
+                            f"Just to confirm which case you mean — the one we've been "
+                            f"discussing (case {case_id}, {reason_code}), or your "
+                            f"{ambiguous_code} case ({other_id})? Let me know and I'll "
+                            f"answer for that one."
+                        )}}
+                    if len(other_cases) > 1:
+                        return {"conversation": {"missing_info_question": (
+                            f"Just to confirm which case you mean — the one we've been "
+                            f"discussing (case {case_id}, {reason_code}), or one of your "
+                            f"other {ambiguous_code} cases? Let me know the case ID and "
+                            f"I'll answer for that one."
+                        )}}
+                    # No open case of that code on file (a purely hypothetical/
+                    # conceptual mention) — nothing concrete to offer instead,
+                    # so fall through and answer from the anchored case as before.
+
                 deterministic = self._answer_case_fact(
                     state.get("merchant_id", ""), case_id, fact_intent,
                 )

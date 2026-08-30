@@ -15,6 +15,7 @@ from classifier import (
     count_consecutive_matches,
     detect_knowledge_type_intent,
     detect_actor_intent,
+    detect_case_fact_ambiguity,
 )
 
 
@@ -440,6 +441,57 @@ def test_actor_intent_none_when_unnamed():
     )
 
 
+# ---------------------------------------------------------------------------
+# detect_case_fact_ambiguity
+# ---------------------------------------------------------------------------
+
+def test_case_fact_ambiguity_detects_other_code():
+    return _check(
+        "Prior aside about a different code -> that code returned",
+        detect_case_fact_ambiguity(
+            "what is its amount?", "ohhh i have U003 also?", "U002",
+        ) == "U003",
+    )
+
+def test_case_fact_ambiguity_none_when_same_code():
+    return _check(
+        "Prior segment names the SAME code as anchored -> None",
+        detect_case_fact_ambiguity(
+            "what is its amount?", "tell me about U002 again", "U002",
+        ) is None,
+    )
+
+def test_case_fact_ambiguity_none_when_explicit_case_ref():
+    return _check(
+        "Prior segment already names a specific case -> None (upstream anchor logic handles this)",
+        detect_case_fact_ambiguity(
+            "what is its amount?", "what about case NPCI20260704M002013?", "U002",
+        ) is None,
+    )
+
+def test_case_fact_ambiguity_none_when_this_case_demonstrative():
+    return _check(
+        "Prior segment says 'this case' -> None",
+        detect_case_fact_ambiguity(
+            "what is its amount?", "tell me more about this case", "U002",
+        ) is None,
+    )
+
+def test_case_fact_ambiguity_none_when_no_previous_segment():
+    return _check(
+        "No previous segment (first turn) -> None",
+        detect_case_fact_ambiguity("what is its amount?", "", "U002") is None,
+    )
+
+def test_case_fact_ambiguity_none_when_no_code_mentioned():
+    return _check(
+        "Prior segment names no reason code at all -> None",
+        detect_case_fact_ambiguity(
+            "what is its amount?", "thanks that helps a lot", "U002",
+        ) is None,
+    )
+
+
 def main() -> None:
     tests = [
         test_classify_dispute_explicit_code,
@@ -508,6 +560,12 @@ def main() -> None:
         test_actor_intent_network,
         test_actor_intent_merchant,
         test_actor_intent_none_when_unnamed,
+        test_case_fact_ambiguity_detects_other_code,
+        test_case_fact_ambiguity_none_when_same_code,
+        test_case_fact_ambiguity_none_when_explicit_case_ref,
+        test_case_fact_ambiguity_none_when_this_case_demonstrative,
+        test_case_fact_ambiguity_none_when_no_previous_segment,
+        test_case_fact_ambiguity_none_when_no_code_mentioned,
     ]
 
     print(f"\nRunning {len(tests)} classifier tests...\n")

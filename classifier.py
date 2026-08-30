@@ -232,6 +232,43 @@ def classify_case_fact_intent(text: str) -> str:
     return ""
 
 
+def detect_case_fact_ambiguity(
+    latest: str, previous_segment: str, anchored_reason_code: str,
+) -> Optional[str]:
+    """
+    Returns the OTHER reason code `previous_segment` named, if a bare
+    case-fact follow-up in `latest` (resolved to the anchored case only
+    because asks_about_case_instance_fact() has no other case-less
+    interpretation — see classify_case_fact_intent()'s caller) might
+    actually be about a DIFFERENT case the merchant just brought up in
+    passing. None when there's no such signal — the overwhelmingly common
+    case, where the bare follow-up genuinely does mean the long-anchored
+    case.
+
+    Reported live: mid-conversation about an anchored U002 case, the
+    merchant asked "ohhh i have U003 also?" (correctly answered as a
+    generic definitional aside, NOT a case switch — detect_case_selection()
+    already deliberately refuses to hijack the anchor for a genuine
+    question like this, see that function's own docstring) and then asked
+    "what is its amount?" — which silently resolved to the still-anchored
+    U002 case's amount, not the U003 case that was actually just discussed.
+    Deliberately conservative, same philosophy as detect_case_selection():
+    fires only when `previous_segment` named a specific different code AND
+    was NOT itself already an explicit case reference (has_case_reference/
+    refers_to_current_case) — that case is upstream anchor-switching logic's
+    job, not this function's. A caller finding this returns non-None should
+    ask which case is meant rather than guess.
+    """
+    if not previous_segment:
+        return None
+    _, code = extract_network_and_code(previous_segment)
+    if code == "Unknown" or code == anchored_reason_code:
+        return None
+    if has_case_reference(previous_segment) or refers_to_current_case(previous_segment):
+        return None
+    return code
+
+
 _NEW_REQUEST_STARTER_RE = re.compile(
     r"^\s*(help me( with| to)?|please help|can you help|i need help|"
     r"show me|tell me|list |give me|explain( to me)?)\b",
