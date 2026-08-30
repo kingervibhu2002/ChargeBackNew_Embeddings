@@ -594,6 +594,61 @@ def test_u002_evidence_fields_distinct_single_debit_confirmed() -> bool:
         os.remove(db)
 
 
+def test_ledger_proof_never_blends_in_network_corroboration() -> bool:
+    # A company review's exact follow-up finding: ledger_proof must answer
+    # what the LEDGER ALONE establishes, never "combined with the network
+    # records..." — that blended picture belongs in evidence_summary. Before
+    # this fix, the single-debit-confirmed and duplicate_unreversed/
+    # duplicate_reversed branches all cited NPCI/PSP/network corroboration
+    # INSIDE ledger_proof, making "does my ledger prove X" and "what
+    # evidence do I have" read as the same answer again — exactly the
+    # repetition the split was meant to eliminate. Checks all three
+    # network-driven branches at once.
+    scenarios = []
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_LP_SINGLE", "U002")
+        _insert_ledger_entry(db, "UTR_LP_SINGLE", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_LP_SINGLE", 500)
+        _insert_network_attempt(db, "UTR_LP_SINGLE", 1, "success")
+        scenarios.append(("single debit confirmed", analyze_chargeback(_get_chargeback_row(db, "UTR_LP_SINGLE"), db_path=db)))
+    finally:
+        os.remove(db)
+
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_LP_REV", "U002")
+        _insert_ledger_entry(db, "UTR_LP_REV", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_LP_REV", 500)
+        _insert_network_attempt(db, "UTR_LP_REV", 1, "success")
+        _insert_network_attempt(db, "UTR_LP_REV", 2, "reversed")
+        scenarios.append(("duplicate reversed", analyze_chargeback(_get_chargeback_row(db, "UTR_LP_REV"), db_path=db)))
+    finally:
+        os.remove(db)
+
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_LP_UNREV", "U002")
+        _insert_ledger_entry(db, "UTR_LP_UNREV", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_LP_UNREV", 500)
+        _insert_network_attempt(db, "UTR_LP_UNREV", 1, "success")
+        _insert_network_attempt(db, "UTR_LP_UNREV", 2, "success")
+        scenarios.append(("duplicate unreversed", analyze_chargeback(_get_chargeback_row(db, "UTR_LP_UNREV"), db_path=db)))
+    finally:
+        os.remove(db)
+
+    banned = ("npci", "psp", "network")
+    all_ok = True
+    for label, result in scenarios:
+        lp = result.ledger_proof.lower()
+        clean = not any(word in lp for word in banned)
+        ledger_scoped = lp.startswith("no —") or lp.startswith("no ")
+        all_ok = all_ok and _check(
+            f"ledger_proof ({label}) is ledger-scoped only, no NPCI/PSP/network mention",
+            clean and ledger_scoped, detail=result.ledger_proof)
+    return all_ok
+
+
 def test_u002_evidence_fields_distinct_pending() -> bool:
     db = _make_test_db()
     try:
@@ -786,6 +841,7 @@ def main() -> None:
         test_u002_evidence_fields_distinct_unverified,
         test_u002_evidence_fields_distinct_duplicate_credits,
         test_u002_evidence_fields_distinct_single_debit_confirmed,
+        test_ledger_proof_never_blends_in_network_corroboration,
         test_u002_evidence_fields_distinct_pending,
         test_u002_evidence_fields_distinct_mismatch,
         test_non_u002_evidence_fields_empty_fallback,

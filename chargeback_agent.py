@@ -3024,10 +3024,16 @@ class DisputeAgent:
                 # framing; "rules" falls through to the same required-
                 # evidence lookup the no-reason-at-all branch already uses.
                 if analysis.action is not None and analysis.source in ("ledger", "network", "cbs"):
-                    text = "No additional evidence is currently required for the recommendation."
-                    if analysis.reason:
-                        text += f" The available bank records support it: {analysis.reason}"
-                    return text
+                    # Deliberately NOT the full evidence narrative again —
+                    # confirmed live that repeating analysis.reason here
+                    # made "what evidence is missing?" and "what evidence
+                    # do I have?" (current_evidence) read as the same
+                    # answer. That detail already has its own question.
+                    action_word = "contest" if analysis.action == "fight" else "refund"
+                    return (
+                        "No additional evidence is currently required for the "
+                        f"current {action_word} recommendation."
+                    )
             elif intent == "ledger_proof":
                 text = analysis.ledger_proof or analysis.reason
                 if text:
@@ -3054,14 +3060,24 @@ class DisputeAgent:
             assessment_label, recommendation = _derive_assessment(synthetic_case_ctx, synthetic_decision_ctx)
 
             if intent == "who_is_right":
-                reason_clause = (
-                    analysis.reason.rstrip(".") if analysis.reason
-                    else "this case has not been fully reconciled yet"
-                )
+                # Deliberately doesn't cite the full evidentiary reason
+                # text here — confirmed live that "I can't determine who's
+                # right — [the full claim-not-supported reasoning]" reads
+                # as a contradiction, sounding like an implicit liability
+                # conclusion right after disclaiming one. Names only the
+                # DIRECTION the records currently lean, not the specific
+                # evidentiary claim, and explicitly routes final
+                # responsibility to the dispute process instead.
+                if assessment_label == "CONTEST":
+                    stance = "the available records currently support contesting the duplicate-charge allegation"
+                elif assessment_label == "ACCEPT":
+                    stance = "the available records currently support accepting the claim"
+                else:
+                    stance = "the available records don't yet establish either side's position"
                 return (
-                    "I can't reliably determine that from the current evidence — "
-                    f"{reason_clause}. This needs transaction reconciliation before "
-                    "responsibility can be assigned, not a guess."
+                    "I can't reliably label either side as \"right\" from the current "
+                    f"evidence — {stance}, but final responsibility requires the "
+                    "applicable dispute process, not a guess."
                 )
             if intent == "sufficiency":
                 # A direct yes/not-yet, not a bare restatement of the
@@ -3121,18 +3137,40 @@ class DisputeAgent:
             # itself (a still-missing next step) spelled out here — for a
             # settled case, restating the same reasoning a third time as
             # "immediate action" would be redundant with the summary above.
-            if assessment_label == "CONTEST":
-                action_text = "Proceed with disputing this chargeback, citing the evidence above."
-            elif assessment_label == "ACCEPT":
-                action_text = "Process the refund/credit as recommended above."
-            else:
-                action_text = recommendation or "No immediate action is recommended beyond what's already on file."
-            if analysis.deadline_expired:
-                action_text += (
-                    " The response deadline has already passed — contact your "
-                    "acquiring bank/PSP immediately to check whether late action "
-                    "is still possible."
+            # A passed deadline changes what the PRIMARY action actually is
+            # — confirmed live that leading with "proceed with disputing"
+            # and only appending the deadline warning afterward reads as
+            # self-contradictory (do the thing, but also the window for
+            # doing it may already be closed). When the deadline has
+            # passed, contacting the PSP IS the immediate action; the
+            # assessment is stated as context, not as the instruction.
+            assessment_line = ""
+            if analysis.deadline_expired and assessment_label in ("CONTEST", "ACCEPT"):
+                verb = "disputing" if assessment_label == "CONTEST" else "accepting/refunding"
+                assessment_line = (
+                    f"Assessment: {assessment_label} — the available records support "
+                    f"{verb} this claim."
                 )
+                action_text = (
+                    "The standard response deadline has already passed; contact your "
+                    "acquiring bank/PSP immediately to determine whether late "
+                    "representment or another recovery option remains available."
+                )
+            else:
+                if assessment_label == "CONTEST":
+                    action_text = "Proceed with disputing this chargeback, citing the evidence above."
+                elif assessment_label == "ACCEPT":
+                    action_text = "Process the refund/credit as recommended above."
+                else:
+                    action_text = recommendation or "No immediate action is recommended beyond what's already on file."
+                if analysis.deadline_expired:
+                    action_text += (
+                        " The response deadline has already passed — contact your "
+                        "acquiring bank/PSP immediately to check whether late action "
+                        "is still possible."
+                    )
+            if assessment_line:
+                lines += ["", assessment_line]
             lines += [
                 "",
                 f"Immediate action: {action_text}",

@@ -282,10 +282,18 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         f"against the customer with no reversal recorded."
                     ),
                     evidence_gap="",
+                    # ledger_proof is scoped to the LEDGER ALONE, never blended
+                    # with network/PSP corroboration — that combined picture
+                    # belongs in evidence_summary above. Confirmed live this
+                    # distinction matters: a "does my ledger prove X" question
+                    # must answer what the ledger record itself establishes,
+                    # not what the case as a whole shows. Here the ledger only
+                    # shows {ledger_desc} — it stays silent on the network-
+                    # confirmed duplicate captured separately in evidence_summary.
                     ledger_proof=(
-                        "No — if anything, the network's own records confirm the "
-                        "opposite: a genuine duplicate debit occurred upstream, even "
-                        "though it was never reflected in the merchant's ledger."
+                        f"No — the ledger alone only shows {ledger_desc}; it "
+                        "doesn't independently establish how many times the "
+                        "customer's account was debited upstream."
                     ),
                 )
             if debit["status"] == "duplicate_reversed":
@@ -305,10 +313,18 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         f"by the network before settlement."
                     ),
                     evidence_gap="",
+                    # Scoped to the ledger alone, same reasoning as
+                    # duplicate_unreversed above — the network's reversal
+                    # record (what actually resolves this case) lives in
+                    # evidence_summary, not here. Genuinely "No", not "Yes":
+                    # a second attempt that was later reversed never shows up
+                    # in the merchant's own ledger at all, so the ledger by
+                    # itself has no way to establish or rule out what
+                    # happened upstream — the network record is what does.
                     ledger_proof=(
-                        "Yes — the network's own records confirm the customer was not "
-                        "net-charged twice, even though a duplicate attempt did occur "
-                        "upstream."
+                        f"No — the ledger alone only shows {ledger_desc}; it "
+                        "doesn't independently establish how many times the "
+                        "customer's account was debited upstream."
                     ),
                 )
             return Analysis(
@@ -327,10 +343,20 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                     "customer with no reversal."
                 ),
                 evidence_gap="",
+                # Scoped to the ledger alone — confirmed live this was the
+                # one remaining semantic bug in the split: this field used
+                # to blend in the network's corroborating record ("combined
+                # with the NPCI/PSP transaction records..."), which made
+                # "does my ledger prove X" and "what evidence do I have"
+                # (evidence_summary) read as the same answer again. The
+                # ledger genuinely does NOT establish the customer's debit
+                # count by itself, regardless of what the network separately
+                # confirms — that combined picture belongs in
+                # evidence_summary, not here.
                 ledger_proof=(
-                    "Not by itself — but combined with the NPCI/PSP transaction "
-                    "records (which confirm only one debit attempt, no reversal), "
-                    "there's no evidence of a second charge."
+                    f"No — the ledger alone only shows {ledger_desc}; it "
+                    "doesn't independently establish how many times the "
+                    "customer's account was debited upstream."
                 ),
             )
 
