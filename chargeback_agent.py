@@ -2186,7 +2186,36 @@ class DisputeAgent:
         # never junk, full stop, so it skips both the regex filter and the
         # LLM backstop entirely rather than trusting either to also learn
         # this distinction.
-        if classifier.is_clarifying_question(raw_context):
+        #
+        # Same problem, different shape: an imperative case-view/final-
+        # answer request ("Show me this case.", "Forget all this, give me
+        # the final answer.") is ALSO neither a real evidence answer nor
+        # junk, but has no "?" or question-starter word for
+        # is_clarifying_question() to catch — so it fell into Guard 5 below,
+        # got judged non-substantive (it isn't describing evidence — that's
+        # correct as far as it goes) and blanked to "" here, before
+        # _detect_clarification_node's own later check (which specifically
+        # exists to route this case) ever got a non-empty string to look at
+        # (confirmed live: the fix there alone did nothing, because by the
+        # time that node ran, additional_context was already ""). Reuses
+        # classify_case_fact_intent() — ANY bucket match means this segment
+        # WOULD resolve to a real, specific deterministic answer once it
+        # reaches _answer_case_fact(), which makes it authoritative here too,
+        # for the same reason a clarifying question is: it is not junk.
+        # NOT case_context.case_id — this is validate_node, the FIRST node
+        # in the graph; case_context.case_id isn't resolved for THIS turn
+        # until planner_node runs later (it re-derives it fresh from
+        # user_query/additional_context every turn, not from the
+        # checkpointer). has_case_reference(masked_query) checks the exact
+        # same "is a case already anchored in this conversation" fact using
+        # a signal that IS available this early — confirmed live the
+        # case_context.case_id gate here was always false, silently
+        # disabling this whole check.
+        case_is_anchored = bool(classifier.has_case_reference(masked_query))
+        looks_like_case_fact_request = bool(
+            case_is_anchored and classifier.classify_case_fact_intent(raw_context)
+        )
+        if classifier.is_clarifying_question(raw_context) or looks_like_case_fact_request:
             context = raw_context
         else:
             # Guard 5 — junk-reply filtering. additional_context is a
@@ -2843,21 +2872,21 @@ class DisputeAgent:
             latest = context
         is_question = classifier.is_clarifying_question(latest)
         # is_clarifying_question() requires a "?" or a question-starter word
-        # ("what"/"how"/"can i"/...) — an imperative case-view request on an
-        # already-anchored case ("Show me this case.", "Tell me about this
-        # case.") has neither, so it fell through here as "not a question"
-        # and landed in _extract_evidence_node's ledger_decision shortcut,
-        # producing a generic "want more detail or should I draft it?" scope
-        # question instead of actually showing the case (confirmed live).
-        # looks_like_new_request() + refers_to_current_case() together
-        # single out exactly that shape — an imperative opener ("show me"/
-        # "tell me"/"list"/"give me") ALSO naming the anchored case via a
-        # demonstrative — without loosening the check enough to swallow a
-        # genuine evidence reply that happens to mention "this case"/"the
-        # case" but isn't phrased as a request at all.
+        # ("what"/"how"/"can i"/...) — an imperative case-view/deterministic-
+        # fact request on an already-anchored case ("Show me this case.",
+        # "Forget all this, give me the final answer.") often has neither, so
+        # it fell through here as "not a question" and landed in
+        # _extract_evidence_node's ledger_decision shortcut, producing a
+        # generic "want more detail or should I draft it?" scope question
+        # instead of the real answer (confirmed live). classify_case_fact_intent()
+        # returning ANY bucket at all (not just case_summary) is reused here
+        # as the same "this resolves to a deterministic answer" signal
+        # _answer_case_fact() itself is keyed on — a segment that WOULD
+        # produce a real, specific answer there is by definition a question,
+        # regardless of whether it's phrased as one.
         if not is_question and case_id:
             segment = _latest_segment(latest) if latest else ""
-            if classifier.looks_like_new_request(segment) and classifier.refers_to_current_case(segment):
+            if segment and classifier.classify_case_fact_intent(segment):
                 is_question = True
         return {
             "conversation": {"merchant_is_asking_question": is_question},
@@ -2910,6 +2939,8 @@ class DisputeAgent:
         except (ValueError, TypeError):
             deadline_human = row["response_deadline"]
         passed = _deadline_status(row["response_deadline"]) == "PASSED"
+        today_dt = datetime.now()
+        today_human = f"{today_dt.strftime('%B')} {today_dt.day}, {today_dt.year}"
 
         if intent == "case_id":
             return f"The case ID is {row['case_id']}."
@@ -2927,6 +2958,30 @@ class DisputeAgent:
             return f"{'Yes' if open_now else 'No'}. The case is currently marked {row['status']}."
         if intent == "deadline_date":
             return f"The response deadline {'was' if passed else 'is'} {deadline_human}."
+        if intent == "deadline_explanation":
+            if passed:
+                return (
+                    f"The recorded response deadline for this case is {deadline_human}, "
+                    f"and today's date is {today_human} — since the deadline date is "
+                    "already in the past, it's marked as passed."
+                )
+            return (
+                f"Actually, it hasn't passed — the response deadline is {deadline_human}, "
+                f"and today's date is {today_human}, which is still before that."
+            )
+        if intent == "deadline_implication":
+            if passed:
+                return (
+                    f"Not necessarily. The case is still shown as {row['status']}, so "
+                    "the data on its own does not establish a final loss. However, "
+                    "the standard response window has passed, so you should contact "
+                    "the acquiring PSP immediately to determine whether any late "
+                    "action is still available."
+                )
+            return (
+                "That doesn't apply here — the response deadline hasn't passed yet, "
+                f"so you're still within the standard response window ({deadline_human})."
+            )
         if intent == "can_respond":
             if passed:
                 return (
@@ -2980,7 +3035,7 @@ class DisputeAgent:
                     f"Typically needed for {row['reason_code']}: {labels}."
                 )
             return "No case-specific evidence is on file yet."
-        if intent in ("assessment", "who_is_right", "final_answer"):
+        if intent in ("assessment", "who_is_right", "final_answer", "sufficiency"):
             synthetic_case_ctx = {"reason_code": row["reason_code"]}
             synthetic_decision_ctx = {}
             if analysis.action is None and analysis.source in ("ledger", "network"):
@@ -2999,6 +3054,25 @@ class DisputeAgent:
                     f"{reason_clause}. This needs transaction reconciliation before "
                     "responsibility can be assigned, not a guess."
                 )
+            if intent == "sufficiency":
+                # A direct yes/not-yet, not a bare restatement of the
+                # evidence narrative with no framing — confirmed live:
+                # "Do I have enough evidence to fight?" returned the raw
+                # analysis.reason text with no answer to the actual
+                # yes/no question asked.
+                if assessment_label in ("CONTEST", "ACCEPT"):
+                    return f"Yes, based on the available records. {analysis.reason}"
+                if assessment_label == "INVESTIGATE":
+                    return (
+                        "Not enough to make a final case-specific determination "
+                        f"yet. {recommendation}"
+                    )
+                if assessment_label == "INSUFFICIENT_EVIDENCE":
+                    return (
+                        "Not yet — more evidence is needed before a confident "
+                        "recommendation can be made."
+                    )
+                return "Not enough information on file yet to answer that."
             if intent == "assessment":
                 if assessment_label == "CONTEST":
                     text = f"Yes — the recommended action is to fight this dispute. {recommendation}"
@@ -4471,7 +4545,28 @@ class DisputeAgent:
                 "attribute network-specific facts (fees, deadlines, thresholds) to the "
                 "network they actually describe — do not present one network's "
                 "documented figure as if it applies to a different network the "
-                "question is actually about."
+                "question is actually about.\n\n"
+                "ANSWER SCOPE — the reason code is background CONTEXT, not "
+                "automatically the SUBJECT of the answer. Confirmed live: "
+                "questions about a specific participant, hypothetical, or "
+                "piece of evidence ('What if the PSP charged the customer "
+                "twice?', 'Can you check whether the customer was charged "
+                "twice?', 'Why can't you just check NPCI?') all got answered "
+                "by re-explaining what the reason code means first, when the "
+                "merchant already knows that and asked something else "
+                "entirely. Rules:\n"
+                "1. Answer the merchant's actual question FIRST — identify "
+                "what they're actually asking (a specific participant's "
+                "role, a hypothetical, a piece of evidence, a procedural "
+                "'can you...') before writing anything.\n"
+                "2. Do not begin the answer by restating what the reason "
+                "code is or means UNLESS the question is itself asking what "
+                "the code means.\n"
+                "3. A hypothetical ('what if X happened') is not a fact — "
+                "answer what it would require to verify, not what the "
+                "reason code covers in general.\n"
+                "4. Mention the reason code by name at most once, only if "
+                "genuinely needed to answer what was asked."
             )
 
         # UPI/NPCI transactions don't route through Visa/Mastercard at all —

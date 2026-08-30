@@ -128,6 +128,18 @@ _CASE_FACT_PATTERNS = (
         r"\bcan\s+i\s+(still\s+)?(respond|reply|submit|fight|dispute)\b|\btoo\s+late\b",
         re.IGNORECASE,
     )),
+    # Checked BEFORE the bare deadline_date bucket below — "why...deadline"
+    # and "deadline...mean...lost" both contain "deadline" too, and would
+    # otherwise be swallowed by that bucket's bare \bdeadline\b match,
+    # returning just the date to a question that was never asking for the
+    # date at all (confirmed live: "Why are you saying the deadline
+    # passed?" and "Does deadline passed mean I automatically lost?" both
+    # got the same bare "The response deadline was June 29, 2026." non-answer).
+    ("deadline_explanation", re.compile(r"\bwhy\b.*\bdeadline\b", re.IGNORECASE)),
+    ("deadline_implication", re.compile(
+        r"\bdeadline\b.*\b(mean|means|imply|implies)\b.*\b(lost|lose|losing|automatic)\b",
+        re.IGNORECASE,
+    )),
     ("deadline_date",     re.compile(
         r"\bdeadline\b|\bdue\s*date\b|\bdue\s*by\b|\brespond\s+by\b|\bwhen\b.*\brespond\b",
         re.IGNORECASE,
@@ -156,9 +168,16 @@ _CASE_FACT_PATTERNS = (
         r"\bwhat.?s\s+missing\b|\bwhat\s+should\s+i\s+collect\b",
         re.IGNORECASE,
     )),
-    ("current_evidence",  re.compile(
-        r"\bwhat\s+evidence\s+do\s+i\s+(currently\s+)?have\b|\bcurrent\s+evidence\b|"
+    # Checked BEFORE current_evidence — "do I have enough evidence to
+    # fight?" needs a direct yes/not-yet answer (derived from the same
+    # 5-way assessment the Section-E intents below use), not a bare
+    # restatement of the evidence narrative with no framing at all.
+    ("sufficiency",       re.compile(
         r"\benough\s+evidence\s+to\s+fight\b|\bdo\s+i\s+have\s+enough\s+evidence\b",
+        re.IGNORECASE,
+    )),
+    ("current_evidence",  re.compile(
+        r"\bwhat\s+evidence\s+do\s+i\s+(currently\s+)?have\b|\bcurrent\s+evidence\b",
         re.IGNORECASE,
     )),
     # Section-E-style assessment/recommendation questions — map directly
