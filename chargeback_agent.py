@@ -2996,33 +2996,42 @@ class DisputeAgent:
                 return f"Yes, this case has been resolved — {row['resolution']}."
             return "The case does not currently have a confirmed final resolution."
         if intent in ("current_evidence", "missing_evidence", "ledger_proof"):
-            # analysis.reason is populated whenever CBS/ledger/network
-            # data resolved SOMETHING for this case (a confident action,
-            # or a genuine blocker) — chargeback_analysis.py's own
-            # docstring (2, 2b, 2c) is exactly the "what does the evidence
-            # establish" narrative this project already computes, so reuse
-            # it verbatim rather than re-deriving or re-wording it here.
-            if analysis.reason:
-                if intent == "missing_evidence" and analysis.action is not None:
-                    # Not "nothing further needed, this is settled" — a
-                    # decided action means the CURRENT evidence satisfies
-                    # the recommendation, not that nothing else could ever
-                    # be useful to collect (e.g. an appeal, or a request
-                    # from the acquirer for more detail later).
-                    return (
-                        "No additional evidence is currently required for the "
-                        f"recommendation. The available bank records support it: {analysis.reason}"
-                    )
-                if intent == "ledger_proof":
-                    if analysis.action == "refund":
-                        prefix = "No — if anything, the opposite: "
-                    elif analysis.action == "fight":
-                        prefix = "Based on what's on file, no: "
-                    else:
-                        prefix = "No — not by itself: "
-                    return f"{prefix}{analysis.reason}"
-                prefix = "Still needed: " if intent == "missing_evidence" else ""
-                return f"{prefix}{analysis.reason}"
+            # chargeback_analysis.Analysis exposes evidence_summary/
+            # evidence_gap/ledger_proof as DISTINCT fields for exactly
+            # this reason: reusing one `reason` string for all three
+            # questions (confirmed live) made them read as near-identical
+            # prose regardless of which was actually asked. Falls back to
+            # `reason` per-field when a field is genuinely empty — every
+            # U002 branch sets these; the CBS-refund override and the
+            # decision_rules fallback below don't, since they have only
+            # one fact to report, not several distinguishable ones.
+            if intent == "current_evidence":
+                text = analysis.evidence_summary or analysis.reason
+                if text:
+                    return text
+            elif intent == "missing_evidence":
+                if analysis.evidence_gap:
+                    return f"Still needed: {analysis.evidence_gap}"
+                # Bank-verified sources (ledger/network/a CBS refund record)
+                # are conclusive on their own — real evidence submission
+                # wouldn't change them. decision_rules.decide()'s "rules"
+                # source is DIFFERENT: analyze_chargeback() always calls it
+                # with evidence_present=[] (evidence-free default), so its
+                # action reflects what happens with NO evidence, not proof
+                # that evidence can't help — the required evidence tags
+                # below are exactly what COULD change that outcome. Only
+                # the bank-verified sources get the "nothing more needed"
+                # framing; "rules" falls through to the same required-
+                # evidence lookup the no-reason-at-all branch already uses.
+                if analysis.action is not None and analysis.source in ("ledger", "network", "cbs"):
+                    text = "No additional evidence is currently required for the recommendation."
+                    if analysis.reason:
+                        text += f" The available bank records support it: {analysis.reason}"
+                    return text
+            elif intent == "ledger_proof":
+                text = analysis.ledger_proof or analysis.reason
+                if text:
+                    return text
             # No CBS/ledger involvement for this reason code at all — fall
             # back to decision_rules' required evidence, the same
             # deterministic lookup _extract_evidence_node already uses.

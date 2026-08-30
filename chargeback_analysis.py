@@ -46,6 +46,37 @@ class Analysis(NamedTuple):
                               # forgets to, which should degrade to "not flagged"
                               # rather than crash.
 
+    # Additive fields (a company review's follow-up to the 5-way assessment
+    # work) — `reason` alone was being asked to answer several DIFFERENT
+    # merchant questions at once ("what evidence do I have," "what's
+    # missing," "does my ledger prove X") by being cited verbatim as the
+    # answer to all three, which read as near-identical, repetitive prose
+    # regardless of which was actually asked (chargeback_agent.py's
+    # _answer_case_fact() reused `reason` for exactly this reason before
+    # this change). These are OPTIONAL, deliberately not a parallel state
+    # model — every EXISTING call site (auto_decision_poller.py,
+    # suggestion_poller.py, chargeback_agent.py's case-intro/prose builders)
+    # keeps reading `reason` exactly as before; only U002's ledger/network
+    # branches below populate the new fields, since that's the one place
+    # this project actually has enough distinct sub-facts to make them
+    # meaningfully different from `reason` itself. Every other branch (the
+    # CBS-refund override, the decision_rules fallback) leaves them at "" —
+    # callers should fall back to `reason` whenever a specific field is
+    # empty, never assume it's always populated.
+    evidence_summary: str = ""       # What's currently on file (merchant +
+                              # network-side facts, as far as they're known)
+                              # — answers "what evidence do I have?"
+    evidence_gap: str = ""    # What's still missing/unverified — answers
+                              # "what evidence is missing?" Empty string
+                              # deliberately means "nothing missing," not
+                              # "not computed" — every U002 branch below
+                              # sets this explicitly, even to "".
+    ledger_proof: str = ""    # What the merchant's ledger SPECIFICALLY does
+                              # or doesn't establish on its own — answers
+                              # "does my ledger prove X?" A narrower claim
+                              # than evidence_summary: this is scoped to the
+                              # ledger record alone, not the combined case.
+
 
 def analyze_chargeback(row, db_path: str) -> Analysis:
     """
@@ -134,6 +165,16 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 ),
                 source="ledger",
                 deadline_expired=deadline_expired,
+                evidence_summary=(
+                    f"The merchant ledger shows {credits} separate credits totaling "
+                    f"₹{recon['ledger_credit_total']:,.2f}, against a network-reported "
+                    f"settlement of ₹{recon['settlement_amount']:,.2f}."
+                ),
+                evidence_gap="",
+                ledger_proof=(
+                    f"Yes — the ledger itself shows {credits} separate credits, directly "
+                    f"confirming the duplicate-charge claim rather than refuting it."
+                ),
             )
         if has_pending_suspense(row["utr"], db_path=db_path):
             return Analysis(
@@ -144,6 +185,12 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 ),
                 source="ledger",
                 deadline_expired=deadline_expired,
+                evidence_summary="A ledger entry for this transaction is still pending/unresolved.",
+                evidence_gap="The pending ledger entry needs to settle before a recommendation can be made.",
+                ledger_proof=(
+                    "Not yet — the entry hasn't settled, so the ledger can't establish "
+                    "anything conclusively yet."
+                ),
             )
         if credits in (0, 1):
             # credits == 0 (no credit ever posted for this UTR at all) used to
@@ -171,7 +218,18 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         f"investigated."
                     ),
                     source="ledger",
-                deadline_expired=deadline_expired,
+                    deadline_expired=deadline_expired,
+                    evidence_summary=f"Ledger shows {ledger_desc} (₹{recon['ledger_credit_total']:,.2f}).",
+                    evidence_gap=(
+                        f"The ledger does not reconcile with the network-reported "
+                        f"settlement (₹{recon['settlement_amount']:,.2f}) — this "
+                        f"discrepancy needs investigation before a recommendation can "
+                        f"be made."
+                    ),
+                    ledger_proof=(
+                        "No — the ledger doesn't even reconcile with the network's own "
+                        "settlement record, so it can't be trusted as proof on its own yet."
+                    ),
                 )
             # A reconciled (or, for credits==0, simply absent) ledger only
             # proves what reached the MERCHANT — it can't by itself rule out
@@ -193,7 +251,16 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         "checking with the acquiring PSP/NPCI before responding."
                     ),
                     source="network",
-                deadline_expired=deadline_expired,
+                    deadline_expired=deadline_expired,
+                    evidence_summary=f"The merchant ledger shows {ledger_desc}.",
+                    evidence_gap=(
+                        "Customer-side debit/transaction status, transaction attempts, "
+                        "and PSP/NPCI reconciliation are not yet on file for this UTR."
+                    ),
+                    ledger_proof=(
+                        "No — it confirms what reached the merchant, not how many times "
+                        "the customer's account was actually debited upstream."
+                    ),
                 )
             if debit["status"] == "duplicate_unreversed":
                 return Analysis(
@@ -208,7 +275,18 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         f"reconciling the missing settlement with the acquiring bank."
                     ),
                     source="network",
-                deadline_expired=deadline_expired,
+                    deadline_expired=deadline_expired,
+                    evidence_summary=(
+                        f"Merchant ledger shows {ledger_desc}, and NPCI/PSP transaction "
+                        f"records show {debit['attempt_count']} separate debit attempts "
+                        f"against the customer with no reversal recorded."
+                    ),
+                    evidence_gap="",
+                    ledger_proof=(
+                        "No — if anything, the network's own records confirm the "
+                        "opposite: a genuine duplicate debit occurred upstream, even "
+                        "though it was never reflected in the merchant's ledger."
+                    ),
                 )
             if debit["status"] == "duplicate_reversed":
                 return Analysis(
@@ -220,7 +298,18 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                         "twice, even though a duplicate attempt did occur upstream."
                     ),
                     source="network",
-                deadline_expired=deadline_expired,
+                    deadline_expired=deadline_expired,
+                    evidence_summary=(
+                        f"Merchant ledger shows {ledger_desc}, and NPCI/PSP transaction "
+                        f"records confirm a second debit attempt was made but reversed "
+                        f"by the network before settlement."
+                    ),
+                    evidence_gap="",
+                    ledger_proof=(
+                        "Yes — the network's own records confirm the customer was not "
+                        "net-charged twice, even though a duplicate attempt did occur "
+                        "upstream."
+                    ),
                 )
             return Analysis(
                 action="fight",
@@ -232,6 +321,17 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 ),
                 source="network",
                 deadline_expired=deadline_expired,
+                evidence_summary=(
+                    f"Merchant ledger shows {ledger_desc}, and NPCI/PSP transaction "
+                    "records confirm only one debit attempt was made against the "
+                    "customer with no reversal."
+                ),
+                evidence_gap="",
+                ledger_proof=(
+                    "Not by itself — but combined with the NPCI/PSP transaction "
+                    "records (which confirm only one debit attempt, no reversal), "
+                    "there's no evidence of a second charge."
+                ),
             )
 
     result = decision_rules.decide(
