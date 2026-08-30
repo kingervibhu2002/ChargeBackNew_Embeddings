@@ -12,6 +12,7 @@ from classifier import (
     detect_settlement_issue,
     looks_like_new_request,
     looks_like_explicit_resolution_request,
+    resolve_help_scope_reply,
     count_consecutive_matches,
     detect_knowledge_type_intent,
     detect_actor_intent,
@@ -312,6 +313,58 @@ def test_explicit_resolution_bare_ok_is_false():
 
 
 # ---------------------------------------------------------------------------
+# resolve_help_scope_reply
+#
+# Regression coverage for the twelfth bug (CHARGEBACK_AGENT_GUIDE.md): the
+# scoping question "want me to explain the evidence, or draft the response?"
+# had no code consuming the answer at all -- "yes" and "explain it in a
+# better way" both re-triggered the identical question forever.
+# ---------------------------------------------------------------------------
+
+def test_help_scope_bare_yes_is_draft():
+    return _check(
+        "'yes' -> 'draft'",
+        resolve_help_scope_reply("yes") == "draft",
+    )
+
+def test_help_scope_yeah_is_draft():
+    return _check(
+        "'yeah' -> 'draft'",
+        resolve_help_scope_reply("yeah") == "draft",
+    )
+
+def test_help_scope_go_ahead_is_draft():
+    return _check(
+        "'go ahead' -> 'draft'",
+        resolve_help_scope_reply("go ahead") == "draft",
+    )
+
+def test_help_scope_explain_it_is_explain():
+    return _check(
+        "'explain it' -> 'explain'",
+        resolve_help_scope_reply("explain it") == "explain",
+    )
+
+def test_help_scope_explain_better_way_is_explain():
+    return _check(
+        "'explain it in a better way' -> 'explain'",
+        resolve_help_scope_reply("explain it in a better way") == "explain",
+    )
+
+def test_help_scope_great_explain_it_is_explain():
+    return _check(
+        "'great explain it' -> 'explain'",
+        resolve_help_scope_reply("great explain it") == "explain",
+    )
+
+def test_help_scope_unrelated_question_is_none():
+    return _check(
+        "'what is the case ID?' -> None (not a scoping answer)",
+        resolve_help_scope_reply("what is the case ID?") is None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # count_consecutive_matches
 # ---------------------------------------------------------------------------
 
@@ -566,6 +619,13 @@ def main() -> None:
         test_case_fact_ambiguity_none_when_this_case_demonstrative,
         test_case_fact_ambiguity_none_when_no_previous_segment,
         test_case_fact_ambiguity_none_when_no_code_mentioned,
+        test_help_scope_bare_yes_is_draft,
+        test_help_scope_yeah_is_draft,
+        test_help_scope_go_ahead_is_draft,
+        test_help_scope_explain_it_is_explain,
+        test_help_scope_explain_better_way_is_explain,
+        test_help_scope_great_explain_it_is_explain,
+        test_help_scope_unrelated_question_is_none,
     ]
 
     print(f"\nRunning {len(tests)} classifier tests...\n")

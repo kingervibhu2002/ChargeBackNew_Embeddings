@@ -411,6 +411,19 @@ class ConversationState(TypedDict, total=False):
             whether a case-anchored follow-up asked specifically for the
             decision/letter, or was vague enough to warrant a short
             scoping question first.
+        help_scope_reply: "" | "explain" | "draft" — set by validate_node,
+            from the same RAW latest reply segment as
+            explicit_resolution_requested, via
+            classifier.resolve_help_scope_reply(). Answers the OTHER half
+            of extract_evidence_node's scoping question ("explain the
+            evidence" vs "draft the response") that
+            explicit_resolution_requested alone can't: that field is only
+            True/False, with no way to represent "the merchant picked
+            'explain', not 'draft'" — every reply that wasn't an explicit
+            draft/proceed ask (a bare "yes", "explain it in a better
+            way") used to be treated identically to a vague, unanswered
+            reply, so extract_evidence_node just re-asked the same
+            scoping question forever.
     """
     query_type:                    str   # "dispute" | "question" | "invalid"
     needs_more_info:               bool
@@ -419,6 +432,7 @@ class ConversationState(TypedDict, total=False):
     clarification_reason:          str
     merchant_is_asking_question:   bool
     explicit_resolution_requested: bool
+    help_scope_reply:              str   # "" | "explain" | "draft"
 
 
 class DecisionContext(TypedDict, total=False):
@@ -1655,6 +1669,21 @@ class DisputeAgent:
         _latest_raw_reply = _raw_segments[-1] if _raw_segments else raw_context_preview
         explicit_resolution_requested = classifier.looks_like_explicit_resolution_request(_latest_raw_reply)
 
+        # Same "derive from the RAW latest reply" reasoning as
+        # explicit_resolution_requested immediately above, for the OTHER
+        # branch extract_evidence_node's scoping question can take: does
+        # this reply pick "explain the evidence" instead of "draft the
+        # response now"? Reported live: nothing consumed the answer to
+        # that scoping question at all — "yes" and "explain it in a
+        # better way" both fell through every existing check (junk-reply
+        # filtering blanks "yes"; is_clarifying_question doesn't recognize
+        # "explain ..." as an answer to a prior question; and neither
+        # explicit_resolution_requested above nor anything else had an
+        # "explain" branch) — so extract_evidence_node re-asked the exact
+        # same scoping question forever, uncapped (see
+        # CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE's cap exemption).
+        help_scope_reply = classifier.resolve_help_scope_reply(_latest_raw_reply)
+
         # A case named DIRECTLY in a first-turn query ("Help me with case
         # NPCI20260530M002010", "explain more on UTR...") used to fall
         # straight through to the full dispute pipeline
@@ -2354,6 +2383,7 @@ class DisputeAgent:
                 "query_type":                    query_type,
                 "clarification_round":            clarification_round,
                 "explicit_resolution_requested":  explicit_resolution_requested,
+                "help_scope_reply":               help_scope_reply or "",
             },
         }
 
@@ -3569,7 +3599,8 @@ class DisputeAgent:
                 case_context.network, retrieved_docs,
                 case_context.ledger_decision,
                 case_context.ledger_no_decision_reason,
-                conversation.explicit_resolution_requested
+                conversation.explicit_resolution_requested,
+                conversation.help_scope_reply
         Writes: decision_ctx (evidence_present, evidence_missing),
                 conversation (needs_more_info, missing_info_question,
                 clarification_reason)
@@ -3614,7 +3645,40 @@ class DisputeAgent:
             # _build_case_intro()'s early return in validate_node always
             # intercepts that case — so this only ever fires on a real,
             # already-anchored follow-up, never a fresh conversation.
-            if not state.get("conversation", {}).get("explicit_resolution_requested"):
+            conv = state.get("conversation", {})
+            help_scope_reply = conv.get("help_scope_reply", "")
+            if help_scope_reply == "explain":
+                # The merchant picked the OTHER half of the scoping
+                # question — reuse the same deterministic evidence-summary
+                # lookup "What evidence do I currently have?" already uses
+                # (classify_case_fact_intent's "current_evidence" bucket),
+                # rather than re-asking or silently falling through to
+                # decide_node/generate_node as if "draft" had been picked.
+                # Keeps clarification_reason set to the SAME value so a
+                # follow-up "ok, go ahead" still resolves via
+                # help_scope_reply next turn instead of landing back on
+                # Guard 5/the round-cap machinery meant for a genuinely
+                # stalled conversation.
+                case_ctx = state.get("case_context", {})
+                explanation = self._answer_case_fact(
+                    state.get("merchant_id", ""),
+                    case_ctx.get("case_id", ""),
+                    "current_evidence",
+                ) or "No detailed evidence summary is available for this case yet."
+                return {
+                    "decision_ctx": {"evidence_present": [], "evidence_missing": []},
+                    "conversation": {
+                        "needs_more_info": True,
+                        "missing_info_question": (
+                            f"{explanation} Let me know if you'd like me to go "
+                            "ahead and draft the response now."
+                        ),
+                        "clarification_reason": CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE,
+                    },
+                }
+            if not (
+                conv.get("explicit_resolution_requested") or help_scope_reply == "draft"
+            ):
                 scope_question = (
                     "Want me to explain the evidence in more detail, "
                     "or should I go ahead and draft the response now?"

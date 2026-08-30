@@ -362,6 +362,64 @@ def looks_like_explicit_resolution_request(text: str) -> bool:
     return bool(_EXPLICIT_RESOLUTION_RE.search(text))
 
 
+_HELP_SCOPE_EXPLAIN_RE = re.compile(
+    r"\b(explain|more detail|in detail|better way|elaborate|walk me through|"
+    r"break(it| it)? down|breakdown|tell me more|clarify)\b",
+    re.IGNORECASE,
+)
+
+_HELP_SCOPE_BARE_AFFIRMATIVE_RE = re.compile(
+    r"^(yes|yeah|yep|sure|ok|okay|please do)[.!]?$", re.IGNORECASE,
+)
+
+
+def resolve_help_scope_reply(text: str) -> Optional[str]:
+    """
+    Resolves a reply to extract_evidence_node's binary scoping question
+    ("Want me to explain the evidence in more detail, or should I go ahead
+    and draft the response now?") into "explain", "draft", or None if the
+    reply picks neither.
+
+    Reported live: nothing consumed the answer to this question at all —
+    "yes" and "explain it in a better way" both fell through every existing
+    check (is_junk_reply blanks "yes" outright; is_clarifying_question
+    doesn't recognize "explain ..." as an answer; and neither
+    looks_like_explicit_resolution_request nor anything else had an
+    "explain" branch), so the scoping question was re-asked verbatim on
+    every single reply, forever — with no cap, since this clarification_reason
+    is deliberately exempted from MAX_CLARIFICATION_ROUNDS (see
+    chargeback_agent.py's _ask_user_node comment on
+    CLARIFICATION_REASON_UNCLEAR_HELP_SCOPE) on the assumption something
+    downstream would eventually resolve it.
+
+    "explain" signals are checked first and win over an explicit-resolution
+    match — "go ahead and explain it in more detail" mentions both "go
+    ahead" and "explain", and the merchant is clearly asking to see the
+    evidence explained, not for the letter.
+
+    A bare affirmative ("yes", "sure", "ok") is treated as "draft": this
+    question is the one place in the graph that already offers the
+    merchant an explicit choice, so an unqualified "yes" reads as "yes,
+    proceed" (the last, and only actionable, option this specific question
+    poses) — different from the vague "help me with it" case
+    looks_like_explicit_resolution_request's own docstring describes, which
+    isn't a reply to a two-option question at all.
+
+    Args:
+        text: The merchant's latest raw reply segment.
+
+    Returns:
+        "explain", "draft", or None if the reply resolves to neither.
+    """
+    if _HELP_SCOPE_EXPLAIN_RE.search(text):
+        return "explain"
+    if looks_like_explicit_resolution_request(text):
+        return "draft"
+    if _HELP_SCOPE_BARE_AFFIRMATIVE_RE.match(text.strip()):
+        return "draft"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Query type classification
 # ---------------------------------------------------------------------------
