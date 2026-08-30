@@ -33,7 +33,7 @@ def _check(label: str, condition: bool, detail: str = "") -> bool:
     return condition
 
 
-def _ask(agent: DisputeAgent, case_id: str, reason_code: str, turns: list) -> str:
+def _ask_full(agent: DisputeAgent, case_id: str, reason_code: str, turns: list) -> dict:
     state = {
         "case_context": {"case_id": case_id, "reason_code": reason_code, "network": "RuPay"},
         "additional_context": "\n\n".join(turns),
@@ -41,8 +41,11 @@ def _ask(agent: DisputeAgent, case_id: str, reason_code: str, turns: list) -> st
         "merchant_id": _MERCHANT_ID,
         "retrieved_docs": [],
     }
-    result = agent._answer_clarification_node(state)
-    return result["conversation"]["missing_info_question"]
+    return agent._answer_clarification_node(state)
+
+
+def _ask(agent: DisputeAgent, case_id: str, reason_code: str, turns: list) -> str:
+    return _ask_full(agent, case_id, reason_code, turns)["conversation"]["missing_info_question"]
 
 
 def test_reported_bug_single_match_auto_resolves():
@@ -117,6 +120,50 @@ def test_hypothetical_code_falls_through_to_anchor():
     )
 
 
+def test_single_match_auto_resolve_reanchors_case_context():
+    # Regression for the follow-on bug found after the above fix shipped:
+    # the auto-resolve branch answered correctly from the OTHER case but
+    # left case_context.case_id pointing at the ORIGINAL one. The very
+    # next free-text turn ("great explain it") then re-derived its case
+    # from the stale anchor via planner_node's case_ref_token fallback
+    # (case_context.case_id/anchored_case_id) — silently producing a full
+    # recommendation for the case the merchant had already moved on from,
+    # while the merchant believed they were still discussing the one they
+    # just asked about. case_context must move as a full, internally
+    # consistent set of fields (case_id + reason_code + ledger_decision +
+    # ...) together, not just case_id — see _resolve_case_context's own
+    # docstring for why a partial move is worse than no move at all.
+    agent = DisputeAgent(store=None, embed_fn=None)
+    result = _ask_full(agent, "NPCI20260530M002010", "U002", [
+        "Show me this case.",
+        "ohhh i have U003 also?",
+        "what is its amount?",
+    ])
+    new_ctx = result.get("case_context", {})
+    return _check(
+        "Auto-resolve to the OTHER case re-anchors case_context to that case",
+        new_ctx.get("case_id") == "NPCI20260704M002013"
+        and new_ctx.get("reason_code") == "U003",
+        detail=str(new_ctx),
+    )
+
+
+def test_no_ambiguity_baseline_does_not_reanchor():
+    # The anchor must NOT move when the question is answered from the
+    # already-anchored case unchanged — only a genuine cross-case
+    # auto-resolve should rewrite case_context.
+    agent = DisputeAgent(store=None, embed_fn=None)
+    result = _ask_full(agent, "NPCI20260530M002010", "U002", [
+        "Show me this case.",
+        "What is the amount?",
+    ])
+    return _check(
+        "No cross-case resolution -> case_context left untouched",
+        "case_context" not in result,
+        detail=str(result.get("case_context")),
+    )
+
+
 def main() -> None:
     tests = [
         test_reported_bug_single_match_auto_resolves,
@@ -124,6 +171,8 @@ def main() -> None:
         test_multi_match_asks_instead_of_guessing,
         test_multi_match_reply_resolves_back_to_anchor,
         test_hypothetical_code_falls_through_to_anchor,
+        test_single_match_auto_resolve_reanchors_case_context,
+        test_no_ambiguity_baseline_does_not_reanchor,
     ]
 
     print(f"\nRunning {len(tests)} case-fact resolution tests...\n")

@@ -2938,6 +2938,64 @@ class DisputeAgent:
     _NETWORK_DISPLAY = {"RuPay": "NPCI/RuPay"}
     _NETWORK_ARTICLE = {"RuPay": "an", "Amex": "an"}
 
+    def _resolve_case_context(self, merchant_id: str, case_id: str) -> dict:
+        """
+        Full case_context dict for `case_id` — the same shape planner_node's
+        case_ref_token branch produces (case_id, reason_code, network,
+        ledger_decision and friends), minus that branch's retrieved-doc
+        formatting, which is specific to grounding the main pipeline's LLM
+        calls and not needed here.
+
+        Used when _answer_clarification_node's ambiguity auto-resolve
+        answers a case-fact question from a DIFFERENT case than the one
+        currently anchored in case_context (case-fact resolution's own
+        docstring: "ohhh i have U003 also?" -> "what is its amount?"
+        correctly answers from the U003 case without switching the
+        anchor). Reported live: the anchor staying on the ORIGINAL case
+        after that meant the merchant's very next free-text follow-up
+        ("great explain it", "yes") got evaluated against the STALE
+        anchored case's ledger_decision — producing a fully-formed
+        recommendation for a case the merchant had already moved on from,
+        while believing they were still talking about the one they'd just
+        asked about. Returning only {"case_id": new_id} here would be
+        WORSE than doing nothing: case_context uses the _merge_dict
+        reducer (shallow per-key merge, see that function's own docstring)
+        so a partial update would move case_id onto the new case while
+        leaving ledger_decision/deadline_expired/etc. from the OLD case
+        untouched — a mismatched Frankenstate strictly worse than the
+        original stale-anchor bug. This returns every per-case field
+        together so a caller's return dict either moves the whole case
+        identity at once or not at all.
+
+        Returns {} if case_id doesn't resolve (caller should not overwrite
+        case_context in that case).
+        """
+        from chargeback_analysis import analyze_chargeback
+
+        _, row = self._lookup_case_details(merchant_id, case_id)
+        if row is None:
+            return {}
+        analysis = analyze_chargeback(row, db_path="chargebacks.db")
+        ledger_no_decision_reason = (
+            analysis.reason
+            if analysis.action is None and analysis.source in ("cbs", "ledger", "network")
+            else ""
+        )
+        return {
+            "case_id":                  row["case_id"],
+            "utr":                      row["utr"],
+            "network":                  "RuPay",
+            "reason_code":              row["reason_code"],
+            "case_ref_not_found":       "",
+            "deadline_expired":         analysis.deadline_expired,
+            "case_status":              "OPEN" if row["status"] in ("Open", "Pending") else "CLOSED",
+            "resolution_status":        "RESOLVED" if row["resolution"] else "UNRESOLVED",
+            "deadline_status":          _deadline_status(row["response_deadline"]),
+            "ledger_decision":          analysis.action or "",
+            "ledger_decision_reason":   analysis.reason if analysis.action else "",
+            "ledger_no_decision_reason": ledger_no_decision_reason,
+        }
+
     def _answer_case_fact(self, merchant_id: str, case_id: str, intent: str) -> str:
         """
         Crisp, deterministic answer to one Section-A/B/E-style case
@@ -3274,7 +3332,12 @@ class DisputeAgent:
         Reads:  user_query, additional_context, case_context.reason_code,
                 case_context.network, case_context.ledger_decision,
                 case_context.deadline_expired, retrieved_docs
-        Writes: conversation.missing_info_question
+        Writes: conversation.missing_info_question, case_context (only when
+                the ambiguity auto-resolve branches below answer from a
+                DIFFERENT case than the one currently anchored — see
+                _resolve_case_context's own docstring for why the anchor
+                must move with a full, consistent set of that case's
+                fields, not just case_id)
         """
         case_ctx     = state.get("case_context", {})
         context      = state.get("additional_context", "")
@@ -3338,9 +3401,15 @@ class DisputeAgent:
                             state.get("merchant_id", ""), other_id, fact_intent,
                         )
                         if resolved:
-                            return {"conversation": {"missing_info_question": (
+                            new_case_context = self._resolve_case_context(
+                                state.get("merchant_id", ""), other_id,
+                            )
+                            result = {"conversation": {"missing_info_question": (
                                 f"For your {ambiguous_code} case ({other_id}): {resolved}"
                             )}}
+                            if new_case_context:
+                                result["case_context"] = new_case_context
+                            return result
                     if len(other_cases) > 1:
                         return {"conversation": {"missing_info_question": (
                             f"Just to confirm which case you mean — the one we've been "
@@ -3390,7 +3459,14 @@ class DisputeAgent:
                     )
                     if resolved:
                         prefix = "" if resolved_id == case_id else f"For case {resolved_id}: "
-                        return {"conversation": {"missing_info_question": f"{prefix}{resolved}"}}
+                        result = {"conversation": {"missing_info_question": f"{prefix}{resolved}"}}
+                        if resolved_id != case_id:
+                            new_case_context = self._resolve_case_context(
+                                state.get("merchant_id", ""), resolved_id,
+                            )
+                            if new_case_context:
+                                result["case_context"] = new_case_context
+                        return result
 
         # The closing reminder must point at whatever is ACTUALLY still
         # missing, not a hardcoded "come back with evidence" regardless of
