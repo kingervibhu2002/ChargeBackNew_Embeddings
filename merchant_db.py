@@ -98,6 +98,22 @@ def deadline_bucket(response_deadline: str) -> str:
     return "later"
 
 
+# Relabels deadline_bucket()'s own buckets into the vocabulary a case-state
+# consumer (chargeback_agent.py's CaseContext.deadline_status) expects,
+# without recomputing the date math a second time — deadline_bucket() stays
+# the single source of truth for the actual overdue/due-soon logic.
+_DEADLINE_STATUS_LABELS = {
+    "overdue":       "PASSED",
+    "due_this_week": "DUE_SOON",
+    "later":         "ACTIVE",
+}
+
+
+def deadline_status(response_deadline: str) -> str:
+    """deadline_bucket()'s bucket, relabeled to PASSED/DUE_SOON/ACTIVE."""
+    return _DEADLINE_STATUS_LABELS[deadline_bucket(response_deadline)]
+
+
 def create_schema(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS chargebacks (

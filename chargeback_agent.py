@@ -53,7 +53,7 @@ from network_detection import (
 import classifier
 import decision_rules
 import retrieval_evaluator
-from merchant_db import deadline_bucket
+from merchant_db import deadline_bucket, deadline_status as _deadline_status
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +170,82 @@ def _merge_dict(old: dict, new: dict) -> dict:
     return {**old, **new}
 
 
+def _latest_segment(text: str) -> str:
+    """
+    The merchant's most recent reply within `text` — additional_context (or
+    any multi-turn blob following the same convention) holds every reply
+    this conversation has accumulated so far, joined by blank lines; only
+    the LAST one is "what the merchant is saying right now." Shared here
+    rather than re-inlined at each call site (_planner_node's case/network/
+    code lookups, _extract_code_node, _answer_clarification_node all need
+    exactly this) so a future change to the segment convention only needs
+    to happen once.
+    """
+    segments = [s.strip() for s in text.split("\n\n") if s.strip()]
+    return segments[-1] if segments else text
+
+
+# The 5-way case assessment a company review asked this project to adopt in
+# place of a bare "fight"/"refund" binary — CONTEST/ACCEPT map onto that
+# existing decision for UI/backward-compat reasons (see run()'s own comment
+# on why `decision` itself is never renamed or dropped), while INVESTIGATE/
+# INSUFFICIENT_EVIDENCE/NO_ACTION_AVAILABLE give a name to states this
+# project already computes (planner_node's ledger_no_decision_reason, an
+# unresolved case reference, decide_node reaching no rule/ledger-backed
+# call) but previously only ever surfaced as prose, never as a queryable
+# label. Deliberately NOT a graph-state field (no node writes it) — it's
+# derived once, in run(), purely from case_context/decision_ctx fields every
+# node already populates, so adding it never touches the LangGraph state
+# schema/reducers at all.
+def _derive_assessment(case_ctx: dict, decision_ctx: dict) -> tuple:
+    """
+    (assessment, recommendation) for this turn's result, or ("", "") when
+    the conversation hasn't reached a codeable case/decision yet (e.g. still
+    asking for the reason code) — an empty assessment is a real, valid
+    state, not a bug, for exactly the same reason DecisionContext.decision
+    is allowed to be "".
+
+    Priority order (first match wins) — mirrors the priority ledger_decision/
+    ledger_no_decision_reason/case_ref_not_found already carry through the
+    rest of this file, not a new ranking invented here:
+      1. case_ref_not_found        -> NO_ACTION_AVAILABLE (no real case to act on)
+      2. ledger_no_decision_reason (main_pipeline) OR decision_source in
+         cbs/ledger/network with no decision (case_intro_preview) ->
+         INVESTIGATE (a genuine bank-side blocker or unverified customer/
+         network fact — the exact "merchant ledger alone isn't enough" gap
+         this whole change targets, expressed under a different key
+         depending on which of the two origins produced it)
+      3. decision == "fight"       -> CONTEST
+      4. decision == "refund"      -> ACCEPT (covers both a rule-based refund
+         AND an always_refund code like U010 — there's a clear right answer,
+         it's just not evidence-driven)
+      5. a reason code is known but no rule/ledger path produced a decision
+         -> INSUFFICIENT_EVIDENCE
+      6. otherwise (no reason code yet) -> "" (not yet assessable)
+    """
+    if case_ctx.get("case_ref_not_found"):
+        return "NO_ACTION_AVAILABLE", "No matching case found on your account for that reference."
+    if case_ctx.get("ledger_no_decision_reason"):
+        return "INVESTIGATE", "Reconcile with the acquiring PSP/NPCI before responding."
+    decision = decision_ctx.get("decision", "")
+    # The case_intro_preview origin (_build_case_intro(), never decide_node)
+    # carries this exact same "a real bank/network-side blocker exists, but
+    # no confident action" signal under decision_ctx.decision_source instead
+    # of case_context.ledger_no_decision_reason — decision stays "" and
+    # decision_source is "cbs"/"ledger"/"network" rather than "rules"/"llm".
+    # Checked here so a case-intro turn gets the same INVESTIGATE label a
+    # main-pipeline turn on the identical case would get.
+    if not decision and decision_ctx.get("decision_source") in ("cbs", "ledger", "network"):
+        return "INVESTIGATE", decision_ctx.get("decision_reason", "") or "Reconcile with the acquiring PSP/NPCI before responding."
+    if decision == "fight":
+        return "CONTEST", decision_ctx.get("decision_reason", "")
+    if decision == "refund":
+        return "ACCEPT", decision_ctx.get("decision_reason", "")
+    if case_ctx.get("reason_code") and case_ctx.get("reason_code") != "Unknown":
+        return "INSUFFICIENT_EVIDENCE", "Gather more evidence before a confident recommendation can be made."
+    return "", ""
+
+
 class CaseContext(TypedDict, total=False):
     """
     Case-identity facts: who/what this dispute is about, independent of
@@ -254,6 +330,25 @@ class CaseContext(TypedDict, total=False):
             answer_clarification_node/generate_node check to give real,
             deadline-aware guidance (contact the acquiring bank/PSP)
             instead of presenting evidence submission as routine.
+        case_status: "OPEN" | "CLOSED" — derived from the DB row's `status`
+            column ("Open"/"Pending" -> OPEN, anything else -> CLOSED) at
+            the same call sites that already compute deadline_expired.
+            Kept explicitly distinct from resolution_status and
+            deadline_status below — a company review of this project
+            flagged that collapsing "is the case still open," "has it
+            actually been resolved," and "recommended action" into one
+            blended answer was a real, reported failure mode; each is a
+            separate fact with its own separate source of truth.
+        resolution_status: "RESOLVED" | "UNRESOLVED" — derived from
+            whether the DB row's `resolution` column is set, independent
+            of case_status (a case can be CLOSED/Expired with no
+            resolution ever recorded) and independent of any
+            recommendation this system gave (a recommendation is advice,
+            not a resolution that has actually happened).
+        deadline_status: "PASSED" | "DUE_SOON" | "ACTIVE" — relabels
+            merchant_db.deadline_bucket()'s own "overdue"/"due_this_week"/
+            "later" buckets into the vocabulary a case-state consumer
+            expects, without recomputing the date math a second time.
     """
     case_id:                   str
     utr:                       str
@@ -261,6 +356,9 @@ class CaseContext(TypedDict, total=False):
     reason_code:                str
     case_ref_not_found:         str
     deadline_expired:           bool
+    case_status:                 str   # "OPEN" | "CLOSED" | ""
+    resolution_status:           str   # "RESOLVED" | "UNRESOLVED" | ""
+    deadline_status:             str   # "PASSED" | "DUE_SOON" | "ACTIVE" | ""
     ledger_decision:             str   # "fight" | "refund" | ""
     ledger_decision_reason:      str
     ledger_no_decision_reason:   str
@@ -1166,6 +1264,17 @@ class DisputeAgent:
             # substituting this recommendation for an actual resolution
             # status, when the case was, separately, still not resolved.
             parts.append(f"Recommended action (advice, not a resolution): {analysis.action}. {analysis.reason}")
+        elif analysis.reason:
+            # No confident action, but a real reason WAS computed (a bank-
+            # side blocker, or — the exact gap a company review flagged —
+            # customer-side/network reconciliation that was simply never
+            # checked yet). Without this branch, this fact silently
+            # disappeared: the merchant got the generic RULES-table
+            # "evidence typically required" text below with no indication
+            # that reconciliation was already known to be incomplete,
+            # reading as if nothing had been checked at all rather than
+            # "checked, and still genuinely unverified."
+            parts.append(f"Assessment: {analysis.reason}")
         if analysis.deadline_expired:
             # Mentioning the deadline passed in prose (above) is not the
             # same as actually acting on it — reported live: a case whose
@@ -1298,7 +1407,23 @@ class DisputeAgent:
                 "using the tool facts, instead of the full two-shape summary "
                 "above — except the deadline-passed fact in shape 2 always "
                 "takes priority and must still be said if the deadline has "
-                "passed, no matter what was specifically asked."
+                "passed, no matter what was specifically asked.\n"
+                "CRITICAL — these are four SEPARATE facts, never merge them: "
+                "'case status' (Open/Closed) is not 'resolution status' (has "
+                "this case actually been resolved yet, yes or no) is not "
+                "'recommended action' (fight or refund — this system's ADVICE, "
+                "not a decision that has been made or acted on) is not "
+                "'response deadline' (and whether it has already passed — "
+                "state this explicitly whenever the record marks it passed, "
+                "never omit it). If asked specifically about 'resolution,' "
+                "answer that exact question (resolved or not, and why) rather "
+                "than substituting the recommended action for it.\n"
+                "A reason code is an allegation, not a finding — never say or "
+                "imply the merchant caused the dispute, is at fault, or is "
+                "liable, based on the reason code alone. Never state a "
+                "certain outcome ('you will definitely win/lose') — if a fact "
+                "was never checked, say so plainly using 'not verified' or "
+                "'unknown' rather than guessing or omitting it."
             )),
             HumanMessage(content=(
                 f"The merchant selected case {case_id}. "
@@ -1384,6 +1509,9 @@ class DisputeAgent:
             "case_intro_reason": analysis.reason,
             "case_intro_source": analysis.source,
             "case_deadline_expired": analysis.deadline_expired,
+            "case_status":       "OPEN" if case_row["status"] in ("Open", "Pending") else "CLOSED",
+            "resolution_status": "RESOLVED" if case_row["resolution"] else "UNRESOLVED",
+            "deadline_status":   _deadline_status(case_row["response_deadline"]),
         }
 
     def _validate_node(self, state: ChargebackState) -> dict:
@@ -1582,6 +1710,9 @@ class DisputeAgent:
                                 "reason_code":      intro["reason_code"],
                                 "network":          intro["card_network"],
                                 "deadline_expired": intro["case_deadline_expired"],
+                                "case_status":       intro["case_status"],
+                                "resolution_status": intro["resolution_status"],
+                                "deadline_status":   intro["deadline_status"],
                             },
                             "conversation": {
                                 "needs_more_info":     True,
@@ -1698,6 +1829,9 @@ class DisputeAgent:
                             "reason_code":      intro["reason_code"],
                             "network":          intro["card_network"],
                             "deadline_expired": intro["case_deadline_expired"],
+                            "case_status":       intro["case_status"],
+                            "resolution_status": intro["resolution_status"],
+                            "deadline_status":   intro["deadline_status"],
                         },
                         "conversation": {
                             "needs_more_info":     True,
@@ -2189,14 +2323,45 @@ class DisputeAgent:
         case_deadline_expired = False
         resolved_case_id = ""
         resolved_utr = ""
+        resolved_case_status = ""
+        resolved_resolution_status = ""
+        resolved_deadline_status = ""
 
-        # 1. Deterministic code extraction — covers the majority of disputes
-        network, code = classifier.extract_network_and_code(query)
+        # 1. Deterministic code extraction — covers the majority of disputes.
+        # Same stale-`query` problem the case-ID lookup below already
+        # documents: a genuine topic switch mid-conversation ("now tell me
+        # about Visa 13.1") only ever shows up in the LATEST additional_
+        # context segment, never in `query` itself once chat.html's
+        # needs_more_info loop has pinned it to the ORIGINAL message.
+        # Checked first so a real switch overrides a stale network/code;
+        # falls back to `query` when the latest reply doesn't name a
+        # network/code of its own (a plain evidence reply, "here's my
+        # tracking number," correctly leaves the ORIGINAL topic in place).
+        # Confirmed live this mattered: without it, "tell me about NPCI
+        # U002" -> "now tell me about Visa 13.1" -> "what evidence do I
+        # need?" kept resolving to U002's evidence vocabulary throughout,
+        # because step 1 only ever re-read the first message.
+        retrieval_query = query
+        topic_from_latest_reply = False
+        _ac_for_topic = state.get("additional_context", "")
+        network, code = "Unknown", "Unknown"
+        if _ac_for_topic:
+            _latest_reply = _latest_segment(_ac_for_topic)
+            network, code = classifier.extract_network_and_code(_latest_reply)
+            if network != "Unknown" or code != "Unknown":
+                retrieval_query = _latest_reply
+                topic_from_latest_reply = True
+        if not topic_from_latest_reply:
+            network, code = classifier.extract_network_and_code(query)
         payload_networks = _NETWORK_PAYLOAD_SPELLINGS.get(network, [network])
 
-        # 2. Broad hybrid search (no LLM needed to decide what to retrieve)
-        embedding = self._embed(query)
-        results   = self._store.hybrid_search(query, embedding, top_k=5)
+        # 2. Broad hybrid search (no LLM needed to decide what to retrieve).
+        # Uses retrieval_query — the text that actually produced the
+        # network/code match above — not always the stale `query`, so
+        # retrieval itself doesn't stay pinned to the old topic even after
+        # network/code are correctly re-pointed at a new one.
+        embedding = self._embed(retrieval_query)
+        results   = self._store.hybrid_search(retrieval_query, embedding, top_k=5)
 
         # Diversity: one result per document
         seen, diverse = set(), []
@@ -2233,12 +2398,26 @@ class DisputeAgent:
                 if targeted:
                     break
             if not targeted:
-                focused_q = f"{network} {code} {query}"
+                focused_q = f"{network} {code} {retrieval_query}"
                 emb2      = self._embed(focused_q)
                 targeted  = self._store.hybrid_search(focused_q, emb2, top_k=3)
+            # Prepended, not appended, specifically when the network/code
+            # came from a just-switched topic (topic_from_latest_reply) —
+            # these are exact (network, reason_code) payload matches for
+            # what the merchant is asking about RIGHT NOW, and must survive
+            # _extract_evidence_node's/_answer_clarification_node's [:2]
+            # truncation ahead of any stale-topic semantic hits step 2's
+            # search picked up (that search ran on retrieval_query too, but
+            # a generic hybrid search can still surface old-topic content
+            # semantically similar to leftover context elsewhere in the
+            # conversation). Left as append() for the normal, no-topic-
+            # switch case — unchanged, already-relied-on ordering.
             for r in targeted:
                 if r["content"] not in existing_set:
-                    retrieved_contents.append(r["content"])
+                    if topic_from_latest_reply:
+                        retrieved_contents.insert(0, r["content"])
+                    else:
+                        retrieved_contents.append(r["content"])
                     existing_set.add(r["content"])
 
         # 4. Merchant history — RuPay/UPI disputes only (NL→SQL, no LLM)
@@ -2290,9 +2469,7 @@ class DisputeAgent:
         case_ref = None
         _ac = state.get("additional_context", "")
         if _ac:
-            _ac_segments = [s.strip() for s in _ac.split("\n\n") if s.strip()]
-            _latest_ac = _ac_segments[-1] if _ac_segments else _ac
-            case_ref = re.search(r"\b(UTR\w+|NPCI\w+)\b", _latest_ac, re.IGNORECASE)
+            case_ref = re.search(r"\b(UTR\w+|NPCI\w+)\b", _latest_segment(_ac), re.IGNORECASE)
         if not case_ref:
             case_ref = re.search(r"\b(UTR\w+|NPCI\w+)\b", query, re.IGNORECASE)
         # Fallback chain, in priority order, used ONLY when neither this
@@ -2368,6 +2545,9 @@ class DisputeAgent:
                     # fact — collapsing any two of these was the actual bug,
                     # not just how the LLM phrased its answer.
                     case_deadline_expired = analysis.deadline_expired
+                    resolved_case_status     = "OPEN" if row["status"] in ("Open", "Pending") else "CLOSED"
+                    resolved_resolution_status = "RESOLVED" if row["resolution"] else "UNRESOLVED"
+                    resolved_deadline_status = _deadline_status(row["response_deadline"])
                     # Amount included here (not just in _build_case_intro's own
                     # separate _lookup_case_details() fact string) because THIS
                     # string, not that one, is what every turn AFTER the first
@@ -2488,6 +2668,9 @@ class DisputeAgent:
                 "reason_code":              code,
                 "case_ref_not_found":       case_ref_not_found,
                 "deadline_expired":         case_deadline_expired,
+                "case_status":              resolved_case_status,
+                "resolution_status":        resolved_resolution_status,
+                "deadline_status":          resolved_deadline_status,
                 "ledger_decision":          ledger_decision,
                 "ledger_decision_reason":   ledger_decision_reason,
                 "ledger_no_decision_reason": ledger_no_decision_reason,
@@ -2843,6 +3026,15 @@ class DisputeAgent:
                 "what's on file (e.g. no full transaction ledger exists to "
                 "verify a duplicate charge from the payment side), say that "
                 "plainly rather than answering as if you looked it up.\n"
+                "A reason code is an allegation, not a finding — never say or "
+                "imply the merchant caused the dispute, is at fault, or is "
+                "liable, based on the reason code alone; responsibility "
+                "depends on evidence and applicable rules, not the code by "
+                "itself. Never state a certain outcome ('you will definitely "
+                "win/lose') — if a fact (e.g. customer-side or network-side "
+                "verification) was never checked, say so plainly using "
+                "'not verified' or 'unknown' rather than guessing or omitting "
+                "it.\n"
                 f"{closing_instruction}\n"
                 "Respond ONLY with JSON: {\"answer\": \"...\"}"
             )),
@@ -2977,15 +3169,42 @@ class DisputeAgent:
         rule_guidance = ""
         if rule is not None:
             relevant_tags = sorted(set(rule.required_any) | set(rule.required_all))
+            # single_credit_confirmed is deliberately NEVER satisfied by the
+            # merchant's own bare word alone — only a bank/CBS record can
+            # truly confirm how many times a transaction was credited. When
+            # this rule cares about it, single_credit_self_reported (which
+            # can never independently satisfy decision_rules.decide() — see
+            # evidence_tags.py) is offered alongside it as the tag for an
+            # unverified claim, so the model has somewhere accurate to put
+            # "just the one payment went through" instead of overloading the
+            # confirmed tag. Confirmed live this mattered: without a distinct
+            # weaker tag, the model (correctly instructed to catch informal
+            # phrasing) tagged a bare, unverified claim as fully
+            # single_credit_confirmed, which alone satisfied U002's evidence
+            # requirement and recommended "fight" with zero independent
+            # corroboration — precisely what a reviewer flagged as this
+            # project being biased toward fighting on the merchant's say-so
+            # rather than on verified records.
+            if "single_credit_confirmed" in relevant_tags:
+                relevant_tags = sorted(set(relevant_tags) | {"single_credit_self_reported"})
             if relevant_tags:
                 labeled = "; ".join(f"{t} ({EVIDENCE_TAG_LABELS.get(t, t)})" for t in relevant_tags)
                 rule_guidance = (
                     "\n\nFor this specific reason code, ONLY these evidence tags "
                     "actually matter — check the merchant's text carefully for "
                     "anything matching them, even a short or informal statement "
-                    "(e.g. 'we checked and only one credit was received', 'yes, "
-                    "just the one payment went through' both count as "
-                    f"single_credit_confirmed): {labeled}"
+                    f"(e.g. those covering delivery/authorization/refund): {labeled}\n"
+                    "IMPORTANT distinction for single_credit_confirmed vs "
+                    "single_credit_self_reported: tag single_credit_confirmed ONLY "
+                    "when the merchant describes an actual record (a bank statement, "
+                    "ledger export, CBS/settlement report, screenshot of their "
+                    "processor dashboard). A bare, unverified claim with no record "
+                    "cited — e.g. 'we checked, only one credit', 'just the one "
+                    "payment went through', 'I received only one payment' — is "
+                    "single_credit_self_reported instead, NOT single_credit_confirmed. "
+                    "A merchant's own say-so about how many times THEY were credited "
+                    "does not establish how many times the CUSTOMER was debited, so it "
+                    "must not be tagged as if it were independently confirmed."
                 )
 
         response = self._invoke([
@@ -3266,7 +3485,6 @@ class DisputeAgent:
         """
         import re as _re
         query = state["user_query"]
-        cache_key = query.lower().strip()
 
         # Personal-data intent: "list my open chargebacks", "what all U002
         # cases exist currently?", "how much is outstanding this month?" —
@@ -3503,14 +3721,66 @@ class DisputeAgent:
             query, _re.IGNORECASE
         ))
 
+        # Visa's decimal-dot codes (13.1, 10.4, 12.6.1, ...) were missing
+        # from this pattern entirely — confirmed live this session: a topic
+        # switch to "Visa 13.1" correctly moved retrieval away from the OLD
+        # topic (via network_title_keys/domain detection below, which DO
+        # recognize the word "Visa"), but with no code captured here, the
+        # `elif mentioned_codes:` branch's precise title-filtered fetch never
+        # ran either — retrieval fell through to a generic within-domain
+        # semantic search and surfaced the wrong SPECIFIC Visa code (13.3
+        # instead of 13.1) for an "what evidence do I need?" follow-up.
+        # classifier.py's own _VISA_CODE_RE already handles this format for
+        # extract_network_and_code() — this is the same gap, just in this
+        # node's separate, simpler code-mention scan.
+        _CODE_MENTION_RE = r'\b(U\d{3}|C\d{2,3}|F\d{2,3}|FR\d|M\d{2,3}|1[0-9]\.\d{1,2}(?:\.\d)?|\d{4})\b'
+
+        # `query` is chat.html's PINNED original message — it stays
+        # "Tell me about NPCI U002" for the life of a needs_more_info loop,
+        # so a bare regex scan of `query` alone always re-matches "U002" on
+        # every later turn regardless of what the merchant just asked next.
+        # Confirmed live: "Tell me about NPCI U002" -> "Now tell me about
+        # Visa 13.1" -> "What evidence do I need?" kept resolving to U002's
+        # evidence throughout, because this exact `mentioned_codes` extraction
+        # only ever looked at `query`, and the `elif mentioned_codes:` branch
+        # below fires ahead of the network/domain-detection logic that DOES
+        # look at additional_context — so a genuine topic switch never even
+        # got a chance to override it.
+        #
+        # Scans EVERY additional_context segment, most recent first, not just
+        # the very latest one — a bare, topic-less follow-up ("what evidence
+        # do I need?") must inherit whatever topic was most recently named
+        # explicitly (here, "Visa 13.1" one segment back), not fall all the
+        # way back to the very first, now-stale `query`. Falls back to
+        # `query` only when NO segment names a code/network at all.
+        _latest_reply = ""
+        _latest_codes: list = []
+        _latest_networks: list = []
+        _ac_for_topic = state.get("additional_context", "")
+        if _ac_for_topic:
+            for _seg in reversed([s.strip() for s in _ac_for_topic.split("\n\n") if s.strip()]):
+                _seg_codes = [c.upper() for c in _re.findall(_CODE_MENTION_RE, _seg, flags=_re.IGNORECASE)]
+                _seg_networks, _ = detect_network_title_keys(_seg)
+                if _seg_codes or _seg_networks:
+                    _latest_reply, _latest_codes, _latest_networks = _seg, _seg_codes, _seg_networks
+                    break
+        effective_query = _latest_reply if (_latest_codes or _latest_networks) else query
+        # Latest actual reply text (topic-bearing or not) — used later so the
+        # LLM answers the merchant's CURRENT message, not the stale original.
+        _newest_reply = _latest_segment(_ac_for_topic) if _ac_for_topic else ""
+        # cache_key must track effective_query, not the pinned `query` set
+        # above — otherwise a topic switch mid-conversation would still hit
+        # a cache entry written for the ORIGINAL topic (same stale-query bug,
+        # just via the cache instead of via retrieval).
+        cache_key = effective_query.lower().strip()
+
         # Detect explicit reason codes mentioned in the query (e.g. U008, C02, FR2, 4853)
-        mentioned_codes = _re.findall(
-            r'\b(U\d{3}|C\d{2,3}|F\d{2,3}|FR\d|M\d{2,3}|\d{4})\b',
-            query, flags=_re.IGNORECASE
+        mentioned_codes = _latest_codes if _latest_codes else _re.findall(
+            _CODE_MENTION_RE, effective_query, flags=_re.IGNORECASE
         )
         mentioned_codes = [c.upper() for c in mentioned_codes]
 
-        embedding = self._embed(query)
+        embedding = self._embed(effective_query)
 
         # Network/app detection factored into network_detection.py — shared
         # with api_server.py's /search endpoint so both surfaces recognize
@@ -3522,7 +3792,7 @@ class DisputeAgent:
         # otherwise fall through to an unrelated semantic search across
         # every network in the knowledge base.
         network_title_keys, detected_networks = detect_network_title_keys(
-            query, state.get("additional_context", "")
+            effective_query, state.get("additional_context", "")
         )
 
         if stage_intent:
@@ -3599,7 +3869,7 @@ class DisputeAgent:
             if chunk_hits is None:
                 chunk_hits = [r for r in wide_candidates[:6] if r["score"] >= 0.65]
 
-            domain = detect_knowledge_domain(query, state.get("additional_context", ""))
+            domain = detect_knowledge_domain(effective_query, state.get("additional_context", ""))
             promoted = None
             parent_entry = None
             if domain:
@@ -4005,10 +4275,40 @@ class DisputeAgent:
             "customer's claim, not the merchant's defense."
         )
 
+        # `state['user_query']` is chat.html's PINNED original message — on a
+        # later turn it's stale (e.g. still "Tell me about NPCI U002" three
+        # turns after the merchant moved on to Visa 13.1). Retrieval above
+        # was already correctly re-pointed at the merchant's actual current
+        # topic (effective_query), but telling the LLM "Question: <stale
+        # text>" would still make it answer the ORIGINAL question regardless
+        # of what was actually retrieved — confirmed live this was the last
+        # piece needed: fixing retrieval alone wasn't enough while this
+        # prompt still asserted the wrong question was being asked. When the
+        # merchant's latest reply carries its own topic, it's what gets
+        # answered; the original question is included only for background,
+        # not as the thing to answer.
+        if effective_query != query and _newest_reply:
+            # A genuine topic switch was detected (effective_query came from
+            # additional_context, not the stale pinned query) — the original
+            # question is now actively misleading, not just unnecessary
+            # background. Confirmed live: including it as "Original
+            # question: Tell me about NPCI U002" alongside newly-retrieved
+            # Visa 13.1 evidence content made the model hedge ("I don't have
+            # any NPCI U002 documentation...") instead of just answering
+            # about Visa 13.1, which is what was actually retrieved and
+            # actually asked. Present only the current message in that case.
+            question_for_llm = f"Question: {_newest_reply}"
+        elif _newest_reply:
+            question_for_llm = (
+                f"Original question: {state['user_query']}\n"
+                f"Merchant's latest message — answer THIS one: {_newest_reply}"
+            )
+        else:
+            question_for_llm = f"Question: {state['user_query']}"
         response = self._invoke([
             SystemMessage(content=system_prompt),
             HumanMessage(content=(
-                f"Question: {state['user_query']}\n\n"
+                f"{question_for_llm}\n\n"
                 f"Knowledge base:\n{docs_text}"
             )),
         ])
@@ -4161,7 +4461,11 @@ class DisputeAgent:
         messages = [
             SystemMessage(content=(
                 "You are a chargeback strategy consultant.\n"
-                "Decide whether the merchant should fight or accept this chargeback."
+                "Decide whether the merchant should fight or accept this chargeback.\n"
+                "Base this only on the evidence and policy given — if a fact (e.g. "
+                "customer-side or network-side verification) was never checked, "
+                "treat it as unknown rather than inferring it from a merchant-side "
+                "fact alone, and prefer 'uncertain' over guessing."
             )),
             HumanMessage(content=(
                 f"Reason code: {case_ctx.get('network', '')} {case_ctx.get('reason_code', '')}\n"
@@ -4894,6 +5198,15 @@ class DisputeAgent:
         code   = result_case_ctx.get("reason_code",  "")
         rc_str = f"{card} {code}".strip() or "Unknown"
 
+        # assessment/recommendation are additive, unlike `decision` above —
+        # surfaced for BOTH origins (main_pipeline and case_intro_preview).
+        # `decision` stays hidden for case_intro_preview so chat.html's
+        # existing fight/refund "dispute card" UI doesn't render before any
+        # evidence-gathering has started; assessment is a plain text label
+        # with no such UI trigger tied to it, so there's no equivalent
+        # reason to hide it there too.
+        assessment, recommendation = _derive_assessment(result_case_ctx, result_decision)
+
         return {
             "final_answer":        result.get("final_answer",        ""),
             # Deliberately NOT surfaced for the case-intro-preview origin —
@@ -4927,6 +5240,11 @@ class DisputeAgent:
             "clarification_round":  result_conv.get("clarification_round",  0),
             "clarification_reason": result_conv.get("clarification_reason", ""),
             "case_id":               resolved_case_id,
+            "assessment":            assessment,
+            "recommendation":        recommendation,
+            "case_status":           result_case_ctx.get("case_status", ""),
+            "resolution_status":     result_case_ctx.get("resolution_status", ""),
+            "deadline_status":       result_case_ctx.get("deadline_status", ""),
         }
 
 

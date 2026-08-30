@@ -145,13 +145,26 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 source="ledger",
                 deadline_expired=deadline_expired,
             )
-        if credits == 1:
+        if credits in (0, 1):
+            # credits == 0 (no credit ever posted for this UTR at all) used to
+            # fall straight through to decision_rules.decide()'s evidence-free
+            # default below, which resolves EVERY such U002 case to "refund"
+            # purely because there's nothing to ask the merchant for — even
+            # when the network side hasn't been checked at all yet. That's a
+            # real, live gap: a genuinely fresh chargeback (ledger not even
+            # posted yet) got a confident-sounding "refund" recommendation
+            # instead of "we haven't reconciled this yet." Folded into the
+            # same reconciliation path credits==1 already used, rather than a
+            # separate branch, so both counts get the same network-side
+            # scrutiny — only the wording of what the ledger itself shows
+            # differs between the two.
+            ledger_desc = "no posted credit" if credits == 0 else "one posted credit"
             recon = reconcile_utr(row["utr"], db_path=db_path)
             if recon["status"] == "mismatch":
                 return Analysis(
                     action=None,
                     reason=(
-                        f"Ledger shows one posted credit (₹{recon['ledger_credit_total']:,.2f}), "
+                        f"Ledger shows {ledger_desc} (₹{recon['ledger_credit_total']:,.2f}), "
                         f"but it does not reconcile with the network-reported settlement "
                         f"(₹{recon['settlement_amount']:,.2f}) for this transaction — cannot "
                         f"confidently recommend fight or refund until this discrepancy is "
@@ -160,24 +173,24 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                     source="ledger",
                 deadline_expired=deadline_expired,
                 )
-            # A reconciled ledger only proves what reached the MERCHANT — it
-            # can't by itself rule out a duplicate debit upstream that was
-            # reversed (or, worse, one that succeeded but never reached
-            # this merchant's ledger at all). get_debit_attempt_status()
-            # checks the network's own, independent transaction log for
-            # exactly that — see this function's 2c docstring entry.
+            # A reconciled (or, for credits==0, simply absent) ledger only
+            # proves what reached the MERCHANT — it can't by itself rule out
+            # a duplicate debit upstream that was reversed (or, worse, one
+            # that succeeded but never reached this merchant's ledger at
+            # all). get_debit_attempt_status() checks the network's own,
+            # independent transaction log for exactly that — see this
+            # function's 2c docstring entry.
             debit = get_debit_attempt_status(row["utr"], db_path=db_path)
             if debit["status"] == "no_data":
                 return Analysis(
                     action=None,
                     reason=(
-                        "Ledger shows one posted credit, reconciled against the network-"
-                        "reported settlement — but that only confirms what reached the "
-                        "merchant, not how many times the customer's account was actually "
-                        "debited upstream. No NPCI/PSP transaction-status reconciliation is "
-                        "on file for this UTR yet, so a duplicate debit at an intermediary "
-                        "layer can't be ruled out. Recommend checking with the acquiring "
-                        "PSP/NPCI before responding."
+                        f"Merchant ledger shows {ledger_desc} — but that only confirms "
+                        "what reached the merchant, not how many times the customer's "
+                        "account was actually debited upstream. No NPCI/PSP transaction-"
+                        "status reconciliation is on file for this UTR yet, so a duplicate "
+                        "debit at an intermediary layer can't be ruled out. Recommend "
+                        "checking with the acquiring PSP/NPCI before responding."
                     ),
                     source="network",
                 deadline_expired=deadline_expired,
@@ -186,7 +199,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 return Analysis(
                     action="refund",
                     reason=(
-                        f"Merchant ledger shows only one posted credit, but NPCI/PSP "
+                        f"Merchant ledger shows {ledger_desc}, but NPCI/PSP "
                         f"transaction records show {debit['attempt_count']} separate debit "
                         f"attempts against the customer with no reversal recorded — the "
                         f"customer's duplicate-charge claim is confirmed at the network "
@@ -201,10 +214,9 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 return Analysis(
                     action="fight",
                     reason=(
-                        "Ledger shows exactly one posted credit, reconciled against the "
-                        "network-reported settlement, and NPCI/PSP transaction records "
-                        "confirm a second debit attempt was made but reversed by the "
-                        "network before settlement — the customer was not net-charged "
+                        f"Merchant ledger shows {ledger_desc}, and NPCI/PSP transaction "
+                        "records confirm a second debit attempt was made but reversed by "
+                        "the network before settlement — the customer was not net-charged "
                         "twice, even though a duplicate attempt did occur upstream."
                     ),
                     source="network",
@@ -213,8 +225,7 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
             return Analysis(
                 action="fight",
                 reason=(
-                    "Ledger shows exactly one posted credit for this transaction, reconciled "
-                    "against the network-reported settlement, and NPCI/PSP transaction "
+                    f"Merchant ledger shows {ledger_desc}, and NPCI/PSP transaction "
                     "records confirm only one debit attempt was made against the customer "
                     "with no reversal — the duplicate-charge claim is not supported by "
                     "either the merchant's ledger or the network's own transaction record."
@@ -222,10 +233,6 @@ def analyze_chargeback(row, db_path: str) -> Analysis:
                 source="network",
                 deadline_expired=deadline_expired,
             )
-        # credits == 0: no credit ever posted for this UTR at all — an odd
-        # situation the ledger itself can't resolve either way (not "one
-        # credit, claim refuted" and not "two credits, claim confirmed").
-        # Falls through to the rule table below rather than guess.
 
     result = decision_rules.decide(
         card_network=_NETWORK,

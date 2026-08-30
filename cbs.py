@@ -419,6 +419,81 @@ def get_debit_attempt_status(utr: str, db_path: str = DB_PATH) -> dict:
     }
 
 
+# Fixture: a U002 case with a clean, reconciled merchant-side ledger credit
+# but NO network_debit_attempts row at all — i.e. genuinely UNVERIFIED
+# customer-side/network reconciliation, not merely "not yet matched" or
+# "in conflict." Confirmed live (2026 chargeback-agent test session) that no
+# case in the randomized seed data actually lands in this state: every U002
+# row either has full reconciliation, a CBS refund override, or a ledger/
+# settlement mismatch (a DIFFERENT kind of uncertainty) — so
+# analyze_chargeback()'s "no NPCI/PSP transaction-status reconciliation is on
+# file... recommend checking with the acquiring PSP/NPCI" branch (the
+# INVESTIGATE/INSUFFICIENT_EVIDENCE case a company review specifically asked
+# this project to handle correctly) had zero fixture coverage. Added as its
+# own small, explicit, idempotent insert — not folded into seed_data()'s
+# randomized generation — so it reliably reproduces this exact state on any
+# fresh or existing DB, the same "backfill without re-touching what's
+# already there" pattern network_debit_attempts itself used above.
+_INVESTIGATE_DEMO_CASE_ID = "NPCI20260818M002777"
+_INVESTIGATE_DEMO_UTR     = "UTR20260815M002777"
+
+
+def ensure_investigate_demo_case(db_path: str = DB_PATH) -> None:
+    """Idempotently insert the unverified-reconciliation demo case (see the
+    module-level comment above) if it isn't already present."""
+    conn = get_connection(db_path)
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM chargebacks WHERE case_id = ?", (_INVESTIGATE_DEMO_CASE_ID,)
+        ).fetchone()
+        if exists:
+            return
+
+        amount = 9999.00
+        conn.execute(
+            """INSERT INTO chargebacks
+               (merchant_id, merchant_name, merchant_vpa, utr, case_id,
+                customer_vpa, customer_name, issuing_bank,
+                transaction_amount, chargeback_amount, transaction_date,
+                chargeback_filing_date, response_deadline,
+                reason_code, reason_description, status, resolution,
+                resolution_date, notes, suggested_action, suggestion_reason)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, '', NULL, NULL)""",
+            (
+                "AIRTEL_M002", "Airtel Broadband Solutions", "airtelbb@airtel",
+                _INVESTIGATE_DEMO_UTR, _INVESTIGATE_DEMO_CASE_ID,
+                "customer7777@upi", "Customer 7777", "PNB",
+                amount, amount, "2026-08-10", "2026-08-15", "2026-09-20",
+                "U002", "Duplicate transaction", "Open",
+            ),
+        )
+        conn.execute(
+            """INSERT INTO ledger_entries
+               (utr, entry_type, amount, status, posting_date, reference_id, remarks)
+               VALUES (?, 'credit', ?, 'posted', ?, ?, ?)""",
+            (
+                _INVESTIGATE_DEMO_UTR, amount, "2026-08-10",
+                f"CBS-{_INVESTIGATE_DEMO_UTR}-CR1",
+                "Demo fixture: single reconciled merchant-side credit, deliberately no network_debit_attempts row.",
+            ),
+        )
+        conn.execute(
+            """INSERT INTO settlement_entries
+               (utr, amount, settlement_type, settlement_date, cycle_id, reference_id, remarks)
+               VALUES (?, ?, 'AUTH', ?, ?, ?, '')""",
+            (
+                _INVESTIGATE_DEMO_UTR, amount, "2026-08-11",
+                "CYCLE-DEMO-777", f"SETTLE-{_INVESTIGATE_DEMO_UTR}-1",
+            ),
+        )
+        # Deliberately no network_debit_attempts INSERT for this UTR — that
+        # absence is the entire point of this fixture.
+        conn.commit()
+        print(f"Added investigate-demo case {_INVESTIGATE_DEMO_CASE_ID} (unverified network reconciliation).")
+    finally:
+        conn.close()
+
+
 def init_db(db_path: str = DB_PATH) -> None:
     """Create schema and seed if the tables are empty."""
     conn = get_connection(db_path)
@@ -439,6 +514,8 @@ def init_db(db_path: str = DB_PATH) -> None:
     else:
         print(f"network_debit_attempts already has {net_count} rows — skipping seed.")
     conn.close()
+
+    ensure_investigate_demo_case(db_path)
 
 
 def get_ledger_entries(utr: str, db_path: str = DB_PATH) -> list:
@@ -607,3 +684,4 @@ if __name__ == "__main__":
     seed_data(conn)
     seed_network_data(conn)
     conn.close()
+    ensure_investigate_demo_case()

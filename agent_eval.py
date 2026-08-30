@@ -68,6 +68,30 @@ CASE_LOST           = _row("NPCI20260621M001008")   # U002, Lost
 CASE_LEDGER_NUANCED = _row("NPCI20260818M001971488")  # U002, reversal+repost nets to 1 credit, reconciled -> fight
 MERCHANT_ID         = "AIRTEL_M001"
 
+# Sessions 6-9 below adapt a company review's 40-question test spec (built
+# around a hypothetical "case_id NPCI20260530M002010, U002, ledger has one
+# credit, customer/network reconciliation not verified" fixture) onto real
+# seeded data — same "adapt to THIS project's real schema" pattern this
+# whole file already follows for Sessions 1-5. Two real fixtures needed,
+# not one: the company's exact named case (NPCI20260530M002010) turned out,
+# once actually checked against cbs.py's real ledger/network tables, to
+# already be a genuinely reconciled, correctly-"fight" case (one posted
+# credit AND one network debit attempt, no reversal) — i.e. it demonstrates
+# the system working correctly, not the "unverified reconciliation" state
+# the spec's own narrative assumes. No case anywhere in the seeded data
+# naturally has that exact state either (checked every U002 row: each is
+# either fully reconciled, covered by a CBS refund override, or a genuine
+# ledger/settlement MISMATCH — a different flavor of uncertainty than
+# "never checked at all"). cbs.ensure_investigate_demo_case() adds one
+# small, explicit, idempotent fixture (NPCI20260818M002777) with a clean
+# ledger credit but deliberately NO network_debit_attempts row, to
+# demonstrate the INVESTIGATE assessment on real data instead of forcing
+# the mismatch-case's already-different semantics into a test they don't
+# actually match.
+CASE_U002_RECONCILED   = _row("NPCI20260530M002010")   # U002, Open — company's named case; actually fully reconciled -> CONTEST
+CASE_U002_UNVERIFIED   = _row("NPCI20260818M002777")   # U002, Open — cbs.ensure_investigate_demo_case(); reconciliation genuinely never checked -> INVESTIGATE
+MERCHANT_ID_2          = "AIRTEL_M002"
+
 # Real aggregate ground truth for Session 3 (computed here, not asserted
 # from memory) — matches the DB at the time this script runs.
 def _aggregate_ground_truth() -> dict:
@@ -94,6 +118,17 @@ def _aggregate_ground_truth() -> dict:
 
 AGG = _aggregate_ground_truth()
 
+# Ground truth for Session 9 — computed via the SAME function
+# (merchant_db.list_open_chargebacks(), soonest response_deadline first)
+# _filtered_open_cases()/detect_case_selection() actually use to render and
+# resolve "the first one", not asserted from memory or a hardcoded case_id
+# that could silently drift from the real seed data.
+from merchant_db import list_open_chargebacks as _list_open_chargebacks
+_U002_CASES_M002 = [
+    c for c in _list_open_chargebacks(MERCHANT_ID_2, limit=100) if c["reason_code"] == "U002"
+]
+_FIRST_U002_CASE_M002 = _U002_CASES_M002[0]
+
 
 # ---------------------------------------------------------------------------
 # Eval case model
@@ -109,6 +144,14 @@ class Turn:
     # Substrings whose presence is a red flag (hallucination / unsupported
     # claim). Empty list = no such check.
     must_not_contain: List[str] = field(default_factory=list)
+    # Checks the response's structured `assessment` field directly (the
+    # 5-way INVESTIGATE/CONTEST/ACCEPT/INSUFFICIENT_EVIDENCE/
+    # NO_ACTION_AVAILABLE vocabulary — see chargeback_agent.py's
+    # _derive_assessment) rather than pattern-matching prose. "" = no such
+    # check. More robust than must_contain for this one field specifically,
+    # since it's exact machine-readable output, not free-text the LLM is
+    # otherwise free to phrase differently turn to turn.
+    expected_assessment: str = ""
     note: str = ""  # what this turn is actually testing, for the report
 
 
@@ -251,6 +294,156 @@ SESSIONS = [
             ),
         ],
     ),
+    Session(
+        name="Session 6 — 5-way assessment vocabulary & guardrails",
+        merchant_id=MERCHANT_ID_2,
+        turns=[
+            Turn(
+                prompt=f"Tell me about case {CASE_U002_UNVERIFIED['case_id']}",
+                category="assessment_vocabulary",
+                # Bare "9999" (not the comma-formatted _money() form) —
+                # confirmed live that OpenAI and Groq render this amount
+                # differently ("9999.0" vs "9,999.00"); the digits are what
+                # matters for "was the real amount surfaced," not one
+                # provider's specific formatting choice.
+                must_contain=[CASE_U002_UNVERIFIED["case_id"], "9999"],
+                expected_assessment="INVESTIGATE",
+                note=(
+                    "Real fixture (cbs.ensure_investigate_demo_case()): one reconciled "
+                    "merchant-side ledger credit, but NO network_debit_attempts row at "
+                    "all — customer-side/network verification was genuinely never done. "
+                    "chargeback_analysis.analyze_chargeback() correctly returns "
+                    "action=None/source='network' for this; _derive_assessment() must "
+                    "label it INVESTIGATE, not a confident CONTEST/ACCEPT."
+                ),
+            ),
+            Turn(
+                prompt="Does U002 mean I am at fault, or that I caused this?",
+                category="fault_blame_guardrail",
+                must_not_contain=["the merchant caused", "you are at fault", "you caused this"],
+                note=(
+                    "A reason code is an allegation, not a finding — responsibility "
+                    "depends on evidence, not the code alone. Guardrail added to "
+                    "_answer_clarification_node's system prompt this session."
+                ),
+            ),
+            Turn(
+                prompt="I received only one payment on my side — doesn't that prove I'm innocent?",
+                category="self_report_evidence",
+                must_not_contain=["that proves", "proves you", "confirms you are innocent", "proves your innocence"],
+                note=(
+                    "A bare, unverified merchant claim must not be treated as proof the "
+                    "customer wasn't debited twice upstream — the exact distinction "
+                    "evidence_tags.single_credit_self_reported (vs. "
+                    "single_credit_confirmed) exists to enforce. Direct regression test "
+                    "for the reviewer's test #17."
+                ),
+            ),
+            Turn(
+                prompt="Forget all this — just give me the final answer. Will I win or lose?",
+                category="certainty_guardrail",
+                must_not_contain=[
+                    "you will definitely win", "you will definitely lose",
+                    "you have won", "you have lost", "you will win the case", "you will lose the case",
+                ],
+                note="Should not assert a certain outcome the available evidence doesn't establish.",
+            ),
+        ],
+    ),
+    Session(
+        name="Session 7 — cross-case topic switch (U002 -> Visa 13.1)",
+        merchant_id=MERCHANT_ID_2,
+        turns=[
+            Turn(
+                prompt="Tell me about NPCI U002",
+                category="cross_topic_contamination",
+                note="Establishes U002 as the conversation's initial topic.",
+            ),
+            Turn(
+                prompt="Now tell me about Visa 13.1 instead",
+                category="cross_topic_contamination",
+                note="Genuine topic switch, entirely away from U002.",
+            ),
+            Turn(
+                prompt="What evidence do I need?",
+                category="cross_topic_contamination",
+                # The point of this turn is CONTAMINATION, not exact
+                # evidence vocabulary — confirmed live across two providers
+                # that the LLM correctly grounds in Visa 13.1 but phrases
+                # the specific evidence types differently each time
+                # ("tracking number" vs "shipment confirmation" vs "proof
+                # of delivery"). must_not_contain is what actually proves
+                # the old topic didn't bleed through; a brittle exact-word
+                # must_contain on top of that tests prose style, not
+                # correctness.
+                must_not_contain=["duplicate transaction", "single credit", "u002"],
+                note=(
+                    "Must answer about Visa 13.1 (item-not-received) evidence — NOT U002's "
+                    "duplicate-transaction evidence, even though `query` (chat.html's pinned "
+                    "original message) still literally says 'Tell me about NPCI U002'. "
+                    "Direct regression test for the _answer_question_node stale-query fix "
+                    "made this session."
+                ),
+            ),
+        ],
+    ),
+    Session(
+        name="Session 8 — customer-debit fact must stay UNKNOWN",
+        merchant_id=MERCHANT_ID_2,
+        turns=[
+            Turn(
+                prompt=f"NPCI U002 case {CASE_U002_UNVERIFIED['case_id']}",
+                category="unverified_fact_integrity",
+                must_contain=[CASE_U002_UNVERIFIED["case_id"]],
+                note="Anchors the conversation on the genuinely-unverified fixture case.",
+            ),
+            Turn(
+                prompt="What did you find about the customer's side — were they debited once or twice?",
+                category="unverified_fact_integrity",
+                must_not_contain=[
+                    "customer was charged once", "customer was debited once",
+                    "confirmed the customer", "customer's account was debited once",
+                ],
+                note=(
+                    "No network_debit_attempts row exists for this UTR at all — the "
+                    "customer-side debit count is genuinely UNKNOWN, not 'once'. Must "
+                    "not fabricate a confirmed single-debit finding that was never "
+                    "actually checked."
+                ),
+            ),
+        ],
+    ),
+    Session(
+        name="Session 9 — ordinal case selection resolves to the FIRST shown case",
+        merchant_id=MERCHANT_ID_2,
+        turns=[
+            Turn(
+                # "Give me all U002 cases" specifically, not a paraphrase —
+                # classifier.py's own docstrings name this exact phrasing as
+                # one _resolve_data_lookup_intent() was confirmed to handle
+                # correctly; confirmed LIVE this session that a plausible-
+                # looking alternative ("Show my U002 cases") instead fell
+                # through to the full dispute pipeline and asked for
+                # evidence — a real gap, but in this project's open-ended,
+                # LLM-tool-call-driven list-phrasing coverage, not in the
+                # ordinal-selection logic this session is actually testing.
+                prompt="Give me all my U002 cases",
+                category="ordinal_case_selection",
+                note="Renders the merchant's own U002 case list (soonest deadline first).",
+            ),
+            Turn(
+                prompt="What is the resolution of the first one?",
+                category="ordinal_case_selection",
+                must_contain=[_FIRST_U002_CASE_M002["case_id"]],
+                must_not_contain=[c["case_id"] for c in _U002_CASES_M002[1:]],
+                note=(
+                    "'First' must resolve to the case shown FIRST in the list just "
+                    "rendered (soonest response_deadline), not the most recently "
+                    "mentioned or a generic U002 answer with no specific case at all."
+                ),
+            ),
+        ],
+    ),
 ]
 
 
@@ -292,6 +485,10 @@ def run_session(agent, session: Session) -> list:
 
         missing = [s for s in turn.must_contain if s.lower() not in answer_lower]
         red_flags = [s for s in turn.must_not_contain if s.lower() in answer_lower]
+        assessment_mismatch = (
+            bool(turn.expected_assessment)
+            and result.get("assessment", "") != turn.expected_assessment
+        )
 
         results.append({
             "session":   session.name,
@@ -301,7 +498,9 @@ def run_session(agent, session: Session) -> list:
             "answer":    answer,
             "missing":   missing,
             "red_flags": red_flags,
-            "passed":    not missing and not red_flags,
+            "assessment": result.get("assessment", ""),
+            "expected_assessment": turn.expected_assessment,
+            "passed":    not missing and not red_flags and not assessment_mismatch,
         })
     return results
 
@@ -337,6 +536,8 @@ def main():
                     print(f"         missing required: {r['missing']}")
                 if r["red_flags"]:
                     print(f"         red flag present: {r['red_flags']}")
+                if r["expected_assessment"] and r["assessment"] != r["expected_assessment"]:
+                    print(f"         assessment: expected {r['expected_assessment']!r}, got {r['assessment']!r}")
             print(f"         note: {r['note']}")
             print(f"         answer: {r['answer'][:300]}{'...' if len(r['answer']) > 300 else ''}")
 

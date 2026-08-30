@@ -268,6 +268,23 @@ def test_rupay_u002_fights_with_single_credit_confirmed() -> bool:
     )
 
 
+def test_rupay_u002_refunds_with_self_reported_credit_only() -> bool:
+    # single_credit_self_reported (a bare, unverified merchant claim — see
+    # evidence_tags.py and _extract_evidence_node's rule_guidance) must NEVER
+    # independently satisfy U002's required_any on its own, unlike
+    # single_credit_confirmed (an actual bank/CBS record). Proves the tag
+    # split actually changes decide()'s behavior, not just its vocabulary —
+    # this is the direct regression test for a reviewer-flagged bug where a
+    # bare "I only got one payment" claim alone was recommending "fight"
+    # with zero independent verification.
+    result = decide("RuPay", "U002", ["single_credit_self_reported"], [])
+    return _check(
+        "RuPay U002 + bare self-reported single credit (no record cited) → refund, not fight",
+        result is not None and result[0] == "refund",
+        detail=str(result),
+    )
+
+
 def test_rupay_u002_refunds_with_duplicate_charge_proof() -> bool:
     # duplicate_charge_proof means a duplicate charge DID occur — per this
     # code's own encyclopedia doc (NPCI_U002.md, "If the Merchant Received
@@ -345,6 +362,7 @@ def main() -> None:
         test_rupay_u005_refund_without_evidence,
         test_rupay_u002_disqualified_by_refund,
         test_rupay_u002_fights_with_single_credit_confirmed,
+        test_rupay_u002_refunds_with_self_reported_credit_only,
         test_rupay_u002_refunds_with_duplicate_charge_proof,
         test_unmapped_code_returns_none,
         test_unmapped_network_returns_none,

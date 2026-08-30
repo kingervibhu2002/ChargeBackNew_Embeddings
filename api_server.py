@@ -46,6 +46,7 @@ from case_recommendations import (
     init_schema as init_case_recommendations_schema,
     list_recent_recommendations,
 )
+from cbs import ensure_investigate_demo_case
 from chargeback_agent import build_dispute_agent
 from guardrails import AuditLogger, CostCircuitBreaker, RateLimiter
 from merchant_db import init_db, list_open_chargebacks, MERCHANTS
@@ -122,6 +123,10 @@ async def lifespan(app: FastAPI):
     # Initialise SQLite chargeback DB (creates + seeds if missing)
     init_db()
     print(f"Merchant DB ready ({len(MERCHANTS)} merchants).")
+
+    # Idempotent: inserts the unverified-reconciliation demo fixture once,
+    # no-ops on every subsequent startup once it exists.
+    ensure_investigate_demo_case()
 
     init_case_recommendations_schema()
     print("Case recommendation history ready (case_recommendations table).")
@@ -328,6 +333,31 @@ class DisputeResponse(BaseModel):
                                        focus. Lets a client link straight to
                                        GET /case-recommendations/{case_id} without re-parsing
                                        the query text.
+        assessment        (str):       "INVESTIGATE" | "CONTEST" | "ACCEPT" |
+                                       "INSUFFICIENT_EVIDENCE" | "NO_ACTION_AVAILABLE" | "" —
+                                       kept separate from `decision` (which stays fight/refund/""
+                                       for UI backward-compat): CONTEST/ACCEPT mirror `decision`,
+                                       while INVESTIGATE/INSUFFICIENT_EVIDENCE/NO_ACTION_AVAILABLE
+                                       give a name to states `decision` alone can't express (a
+                                       genuine bank-side blocker or unverified customer/network
+                                       fact, vs. simply no decision yet). "" when the
+                                       conversation hasn't reached a codeable case yet. Unlike
+                                       `decision`, surfaced for every response, including a
+                                       case-intro preview.
+        recommendation    (str):       Free-text next step paired with `assessment` (e.g.
+                                       "Reconcile with the acquiring PSP/NPCI before
+                                       responding."). "" when assessment is "".
+        case_status       (str):       "OPEN" | "CLOSED" | "" — independent of `assessment`;
+                                       whether the case itself is still open, not what this
+                                       system recommends doing about it.
+        resolution_status (str):       "RESOLVED" | "UNRESOLVED" | "" — whether the case has
+                                       actually been resolved, independent of case_status (a
+                                       closed/expired case may have no resolution recorded) and
+                                       independent of `assessment` (a recommendation is advice,
+                                       not a resolution that has happened).
+        deadline_status   (str):       "PASSED" | "DUE_SOON" | "ACTIVE" | "" — the response
+                                       deadline's own status, independent of the three fields
+                                       above.
     """
     final_answer:        str
     decision:            str
@@ -344,6 +374,11 @@ class DisputeResponse(BaseModel):
     clarification_round:  int
     clarification_reason: str
     case_id:               str
+    assessment:            str
+    recommendation:        str
+    case_status:            str
+    resolution_status:      str
+    deadline_status:        str
 
 
 # ---------------------------------------------------------------------------
@@ -832,6 +867,11 @@ def dispute(
             clarification_round  = result.get("clarification_round",  0),
             clarification_reason = result.get("clarification_reason", ""),
             case_id               = result.get("case_id", ""),
+            assessment            = result.get("assessment", ""),
+            recommendation        = result.get("recommendation", ""),
+            case_status            = result.get("case_status", ""),
+            resolution_status      = result.get("resolution_status", ""),
+            deadline_status        = result.get("deadline_status", ""),
         )
 
     except Exception as exc:
