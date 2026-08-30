@@ -271,9 +271,10 @@ class ConversationState(TypedDict, total=False):
     Turn-taking / clarification mechanics: what kind of turn this is and
     whether the graph needs to stop and ask the merchant something.
     Deliberately does NOT include case facts or business-decision output
-    — see CaseContext/DecisionContext for those, and ChargebackState's
-    own docstring (the six-field "cross-bucket" list) for the handful of
-    fields that genuinely straddle more than one of these three.
+    — see CaseContext/DecisionContext for those. A few fields genuinely
+    straddle more than one of these three buckets (e.g. decision_ctx's
+    `origin` needing case_context.case_id to mean anything); DecisionContext's
+    own docstring covers the one such case Phase 4 actually resolved.
 
     Keys:
         query_type: "dispute" | "question" | "invalid" — set by
@@ -324,36 +325,62 @@ class ConversationState(TypedDict, total=False):
 
 class DecisionContext(TypedDict, total=False):
     """
-    Business-decision output: the main pipeline's evidence-informed
-    fight/refund recommendation and the evidence it was based on.
-    Deliberately does NOT include case_intro_action/reason/source (the
-    OTHER, evidence-BLIND recommendation representation from
-    _build_case_intro()) — unifying those two is a real semantic change,
-    scoped separately (Phase 4 of the structured-state plan), not bundled
-    into this mechanical regroup.
+    Business-decision output: a fight/refund recommendation and the
+    evidence it was based on. Unifies what used to be two separate,
+    mutually-exclusive representations (Phase 4 of the structured-state
+    plan): the main pipeline's evidence-informed recommendation
+    (decide_node) and _build_case_intro()'s evidence-BLIND CBS/ledger-only
+    preview (formerly the flat case_intro_action/reason/source fields).
+    `origin` distinguishes which one produced a given value — genuinely
+    mutually exclusive by construction, not just convention: the
+    case-intro early-return path in validate_node never sets query_type,
+    so _route_after_validate sends it straight to END without ever
+    reaching decide_node, and vice versa (a run that reaches decide_node
+    by definition didn't take that early return). See run()'s own
+    docstring for why this matters for _persist_recommendation, and its
+    comment on why the two are safe to check with one shared code path.
+
+    Note: `origin` is deliberately NOT surfaced in the HTTP response
+    (api_server.py's DisputeResponse) — a case-intro preview is
+    evidence-blind and rendered as a plain summary in chat.html, not the
+    fight/refund "dispute card" UI (badge + rebuttal-letter section) a
+    real decide_node recommendation gets. run() only ever puts `decision`
+    in its output dict when origin=="main_pipeline", keeping that UI
+    distinction exactly as it was before this unification.
 
     Keys:
-        decision: "fight" or "refund" — set by decide_node.
+        decision: "fight" or "refund" — set by decide_node OR by
+            validate_node's case-intro branches (mirrors
+            _build_case_intro()'s CBS/ledger-based analysis.action).
         decision_reason: Explanation of the decision.
-        decision_source: "" | "ledger" | "rules" | "llm" — HOW
-            decide_node reached `decision`, set alongside it. Read by
-            run() to tag a persisted recommendation
-            (case_recommendations.py) with its provenance without
-            re-deriving it later.
+        decision_source: "" | "cbs" | "ledger" | "rules" | "llm" — HOW
+            this decision was reached. "cbs" only appears via the
+            case-intro origin (chargeback_analysis.Analysis.source);
+            decide_node itself never produces "cbs". Read by run() to
+            tag a persisted recommendation (case_recommendations.py)
+            with its provenance without re-deriving it later.
+        origin: "main_pipeline" | "case_intro_preview" — which of the
+            two code paths above produced `decision`/`decision_reason`/
+            `decision_source`.
         evidence_present: Evidence merchant mentioned — set by
             extract_evidence_node. Drawn from EvidenceTag vocabulary so
-            decision_rules.py can match reliably.
+            decision_rules.py can match reliably. Not set by the
+            case-intro-preview origin (evidence-blind by design).
         evidence_missing: Evidence still needed — set by
             extract_evidence_node.
         is_settlement_issue: True → set by detect_settlement_node.
         confidence_score: 1-10 rating of answer quality — set by
-            reflect_node.
+            reflect_node, or a fixed 8 by validate_node's case-intro
+            branches (see ChargebackState's own case-intro docstring for
+            why: no reflect_node pass runs on that path, but the summary
+            is a grounded, real DB+KB-backed response).
         is_grounded: True if answer is based only on retrieved docs.
         groundedness_issues: Description of any ungrounded claims found.
     """
     decision:              str   # "fight" | "refund" | ""
     decision_reason:        str
-    decision_source:        str   # "ledger" | "rules" | "llm"
+    decision_source:        str   # "cbs" | "ledger" | "rules" | "llm"
+    origin:                  str   # "main_pipeline" | "case_intro_preview"
     evidence_present:       List[str]
     evidence_missing:       List[str]
     is_settlement_issue:    bool
@@ -407,12 +434,17 @@ class ChargebackState(TypedDict):
                                              merchant_is_asking_question,
                                              explicit_resolution_requested.
         decision_ctx          (DecisionContext): Same status, holding decision,
-                                             decision_reason, decision_source,
+                                             decision_reason, decision_source, origin,
                                              evidence_present, evidence_missing,
                                              is_settlement_issue, confidence_score,
-                                             is_grounded, groundedness_issues. Deliberately
-                                             does NOT mirror case_intro_action/reason/source
-                                             — see DecisionContext's own docstring.
+                                             is_grounded, groundedness_issues. Unifies
+                                             both the main pipeline's evidence-informed
+                                             recommendation AND validate_node's two
+                                             case-intro early-return branches' evidence-
+                                             BLIND CBS/ledger-only preview (formerly
+                                             separate flat case_intro_action/reason/source
+                                             fields) — see DecisionContext's own docstring
+                                             for the `origin` tag that distinguishes them.
         is_valid_query        (bool):       False → validate_node rejected input; graph ends.
         retrieved_docs        (List[str]):  Policy doc contents — set by planner_node.
         retrieval_status      (str):        "good" | "ambiguous" | "bad" | "" (not assessed
@@ -421,21 +453,6 @@ class ChargebackState(TypedDict):
                                              module docstring for why nothing routes on it yet.
         retrieval_issues      (str):        Human-readable explanation when retrieval_status
                                              isn't "good" — set by planner_node.
-        case_intro_action     (str):        "fight" | "refund" | "" — set by validate_node's
-                                             two case-intro early-return branches from
-                                             _build_case_intro()'s analyze_chargeback() result.
-                                             NOT the same signal as `decision` above — this is
-                                             evidence-BLIND (CBS/ledger only), the same view
-                                             the background pollers (auto_decision_poller.py,
-                                             suggestion_poller.py) already act on/advise from,
-                                             shown as a preview before any evidence-gathering
-                                             happens. Read by run() to persist a
-                                             case-intro-preview recommendation even though
-                                             this path never reaches decide_node.
-        case_intro_reason     (str):        Explanation paired with case_intro_action, copied
-                                             verbatim from analyze_chargeback()'s reason text.
-        case_intro_source     (str):        "cbs" | "ledger" | "rules" — chargeback_analysis.
-                                             Analysis.source, paired with case_intro_action.
         draft_response        (str):        First version of letter/advice — set by generate_node.
         iteration             (int):        How many times generate_node has run.
         final_answer          (str):        Polished final output — set by reflect_node.
@@ -451,9 +468,6 @@ class ChargebackState(TypedDict):
     retrieved_docs:        List[str]
     retrieval_status:      str
     retrieval_issues:      str
-    case_intro_action:     str
-    case_intro_reason:     str
-    case_intro_source:     str
     draft_response:        str
     iteration:             int
     final_answer:          str
@@ -699,6 +713,7 @@ class DisputeAgent:
         }
         if "decision" in extra:
             decision_updates["decision"] = extra.pop("decision")
+            decision_updates["origin"]   = "main_pipeline"
         if "decision_reason" in extra:
             decision_updates["decision_reason"] = extra.pop("decision_reason")
 
@@ -1328,9 +1343,9 @@ class DisputeAgent:
         # worth it for a call this cheap (pure SQL via cbs.py, no LLM/
         # network I/O). Surfaced here so run() can persist this preview
         # recommendation (case_recommendations.py) even though this whole
-        # path never reaches decide_node — see ChargebackState's
-        # case_intro_action docstring for why this is evidence-BLIND,
-        # not the same signal as decision_node's own decision.
+        # path never reaches decide_node — see DecisionContext's own
+        # docstring (the "origin" tag) for why this is evidence-BLIND,
+        # not the same signal as decide_node's own decision.
         from chargeback_analysis import analyze_chargeback
         analysis = analyze_chargeback(case_row, db_path="chargebacks.db")
 
@@ -1535,14 +1550,7 @@ class DisputeAgent:
                             # reaching planner_node (the node that would
                             # normally set case_context.case_id) — set it here
                             # too, or run() has no case_id to persist
-                            # case_intro_action against.
-                            "case_intro_action": intro["case_intro_action"],
-                            "case_intro_reason": intro["case_intro_reason"],
-                            "case_intro_source": intro["case_intro_source"],
-                            # case_intro_action/reason/source deliberately
-                            # NOT mirrored into decision_ctx — see
-                            # DecisionContext's own docstring for why
-                            # unifying those is a separate, later phase.
+                            # this preview recommendation against.
                             "case_context": {
                                 "case_id":          intro["case_id"],
                                 "reason_code":      intro["reason_code"],
@@ -1555,6 +1563,10 @@ class DisputeAgent:
                                 "clarification_round":  clarification_round,
                             },
                             "decision_ctx": {
+                                "decision":        intro["case_intro_action"],
+                                "decision_reason": intro["case_intro_reason"],
+                                "decision_source": intro["case_intro_source"],
+                                "origin":          "case_intro_preview",
                                 "confidence_score":    8,
                                 "is_grounded":         True,
                                 "groundedness_issues": "",
@@ -1655,9 +1667,6 @@ class DisputeAgent:
                         # Same reasoning as the direct-mention branch above:
                         # this path never reaches planner_node, so
                         # case_context.case_id must be set here too.
-                        "case_intro_action": intro["case_intro_action"],
-                        "case_intro_reason": intro["case_intro_reason"],
-                        "case_intro_source": intro["case_intro_source"],
                         "case_context": {
                             "case_id":          intro["case_id"],
                             "reason_code":      intro["reason_code"],
@@ -1670,6 +1679,10 @@ class DisputeAgent:
                             "clarification_round":  clarification_round,
                         },
                         "decision_ctx": {
+                            "decision":        intro["case_intro_action"],
+                            "decision_reason": intro["case_intro_reason"],
+                            "decision_source": intro["case_intro_source"],
+                            "origin":          "case_intro_preview",
                             "confidence_score":    8,
                             "is_grounded":         True,
                             "groundedness_issues": "",
@@ -3942,7 +3955,8 @@ class DisputeAgent:
                 network, ledger_decision, ledger_decision_reason),
                 decision_ctx (evidence_present, evidence_missing,
                 is_settlement_issue), retrieved_docs
-        Writes: decision_ctx (decision, decision_reason, decision_source)
+        Writes: decision_ctx (decision, decision_reason, decision_source,
+                origin="main_pipeline")
 
         Args:
             state (ChargebackState): Current graph state.
@@ -3964,6 +3978,7 @@ class DisputeAgent:
                     "decision":        ledger_decision,
                     "decision_reason": ledger_decision_reason,
                     "decision_source": "ledger",
+                    "origin":          "main_pipeline",
                 },
             }
 
@@ -3981,6 +3996,7 @@ class DisputeAgent:
                     "decision_ctx": {
                         "decision":        "",
                         "decision_reason": "Transaction failed — customer was not charged",
+                        "origin":          "main_pipeline",
                     },
                     "final_answer": (
                         "Since the customer was not actually charged, there is no valid chargeback.\n\n"
@@ -4000,6 +4016,7 @@ class DisputeAgent:
                     "decision_ctx": {
                         "decision":        "",
                         "decision_reason": "Settlement failure — customer was charged but merchant not settled",
+                        "origin":          "main_pipeline",
                     },
                     "final_answer": (
                         "The customer was charged but the funds never reached you — "
@@ -4026,6 +4043,7 @@ class DisputeAgent:
                     "decision_ctx": {
                         "decision":        "",
                         "decision_reason": "Settlement status unclear",
+                        "origin":          "main_pipeline",
                     },
                     "final_answer": (
                         "I need one clear answer: was the customer's card actually charged?\n\n"
@@ -4054,6 +4072,7 @@ class DisputeAgent:
                     "decision": decision,
                     "decision_reason": decision_reason,
                     "decision_source": "rules",
+                    "origin": "main_pipeline",
                 },
             }
 
@@ -4114,6 +4133,7 @@ class DisputeAgent:
                 "decision":        decision,
                 "decision_reason": decision_reason,
                 "decision_source": "llm",
+                "origin":          "main_pipeline",
             },
         }
 
@@ -4757,9 +4777,6 @@ class DisputeAgent:
             "retrieved_docs":        [],
             "retrieval_status":      "",
             "retrieval_issues":      "",
-            "case_intro_action":     "",
-            "case_intro_reason":     "",
-            "case_intro_source":     "",
             "draft_response":        "",
             "iteration":             0,
             "final_answer":          "",
@@ -4771,33 +4788,27 @@ class DisputeAgent:
 
         # Persist whichever recommendation this turn actually reached, for
         # whichever case it was actually about — see case_recommendations.py
-        # and _persist_recommendation()'s own docstrings. The two branches
-        # are mutually exclusive by construction: the case-intro preview
-        # path (case_intro_action) never reaches decide_node, so `decision`
-        # stays at its "" initial_state default whenever case_intro_action
-        # is set, and vice versa.
+        # and _persist_recommendation()'s own docstrings. decision_ctx now
+        # unifies both representations (Phase 4 of the structured-state
+        # plan; see DecisionContext's own docstring) — `origin` says which
+        # code path produced it, mutually exclusive by construction (the
+        # case-intro preview path never reaches decide_node, and vice
+        # versa), so one check replaces what used to be two.
         result_case_ctx   = result.get("case_context", {})
         result_conv       = result.get("conversation", {})
         result_decision   = result.get("decision_ctx", {})
+        origin            = result_decision.get("origin", "")
 
         resolved_case_id = result_case_ctx.get("case_id", "")
-        if resolved_case_id and merchant_id:
-            if result_decision.get("decision") in ("fight", "refund"):
-                self._persist_recommendation(
-                    case_id=resolved_case_id, merchant_id=merchant_id,
-                    action=result_decision["decision"], reason=result_decision.get("decision_reason", ""),
-                    source=result_decision.get("decision_source", ""),
-                    confidence_score=result_decision.get("confidence_score", 0),
-                    origin="live_chat", thread_id=thread_id,
-                )
-            elif result.get("case_intro_action") in ("fight", "refund"):
-                self._persist_recommendation(
-                    case_id=resolved_case_id, merchant_id=merchant_id,
-                    action=result["case_intro_action"], reason=result.get("case_intro_reason", ""),
-                    source=result.get("case_intro_source", ""),
-                    confidence_score=result_decision.get("confidence_score", 0),
-                    origin="live_chat_preview", thread_id=thread_id,
-                )
+        if resolved_case_id and merchant_id and result_decision.get("decision") in ("fight", "refund"):
+            self._persist_recommendation(
+                case_id=resolved_case_id, merchant_id=merchant_id,
+                action=result_decision["decision"], reason=result_decision.get("decision_reason", ""),
+                source=result_decision.get("decision_source", ""),
+                confidence_score=result_decision.get("confidence_score", 0),
+                origin="live_chat_preview" if origin == "case_intro_preview" else "live_chat",
+                thread_id=thread_id,
+            )
 
         card   = result_case_ctx.get("network", "")
         code   = result_case_ctx.get("reason_code",  "")
@@ -4805,7 +4816,14 @@ class DisputeAgent:
 
         return {
             "final_answer":        result.get("final_answer",        ""),
-            "decision":            result_decision.get("decision",            ""),
+            # Deliberately NOT surfaced for the case-intro-preview origin —
+            # that recommendation is evidence-blind and already narrated in
+            # final_answer's own prose; exposing it here would make
+            # chat.html render the full fight/refund "dispute card" UI
+            # (badge + rebuttal-letter section) over a plain case summary,
+            # before any evidence-gathering has even started. See
+            # DecisionContext's own docstring for this exact reasoning.
+            "decision": result_decision.get("decision", "") if origin == "main_pipeline" else "",
             "reason_code":         rc_str,
             "evidence_present":    humanize_evidence(result_decision.get("evidence_present", [])),
             "evidence_missing":    humanize_evidence(result_decision.get("evidence_missing", [])),
