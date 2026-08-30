@@ -2260,11 +2260,33 @@ class DisputeAgent:
         if query_type == "invalid" and context:
             segments = [s.strip() for s in context.split('\n\n') if s.strip()]
             latest_context_segment = segments[-1] if segments else context
-            combined = f"{original_masked_query} {latest_context_segment}"
-            retried_type = classifier.classify_query_type(combined)
-            if retried_type != "invalid":
-                query_type = retried_type
-                masked_query = combined
+            # A self-contained personal-data-lookup question ("how much is
+            # still open or pending?") doesn't need the stale ORIGINAL
+            # topic concatenated in — it's a complete question on its own,
+            # just missing a payment-domain keyword classify_query_type()
+            # requires (the same known gap looks_like_data_lookup() exists
+            # to cover elsewhere in this file: "how much is outstanding"
+            # missed the intent entirely). Confirmed live: concatenating it
+            # with an unrelated earlier question ("how many chargebacks do
+            # I have?") made text_to_sql's LLM treat the pair as ONE
+            # compound multi-part request — non-deterministically either
+            # merging an unrelated earlier aggregate into the same answer
+            # (a count column bolted onto an unrelated sum) or generating
+            # two stacked SQL statements that then got rejected outright by
+            # the SELECT-only safety layer, failing the turn completely.
+            # Checked first so a genuine data-lookup follow-up is answered
+            # on its own; only a truly anaphoric segment ("Are all of those
+            # covered?", meaningless without the prior turn's topic) falls
+            # through to the concatenation rescue below.
+            if classifier.looks_like_data_lookup(latest_context_segment):
+                masked_query = mask_pii(latest_context_segment)
+                query_type = "question"
+            else:
+                combined = f"{original_masked_query} {latest_context_segment}"
+                retried_type = classifier.classify_query_type(combined)
+                if retried_type != "invalid":
+                    query_type = retried_type
+                    masked_query = combined
 
         is_valid   = query_type not in ("invalid", "escalation")
 
@@ -2927,9 +2949,14 @@ class DisputeAgent:
             # it verbatim rather than re-deriving or re-wording it here.
             if analysis.reason:
                 if intent == "missing_evidence" and analysis.action is not None:
+                    # Not "nothing further needed, this is settled" — a
+                    # decided action means the CURRENT evidence satisfies
+                    # the recommendation, not that nothing else could ever
+                    # be useful to collect (e.g. an appeal, or a request
+                    # from the acquirer for more detail later).
                     return (
-                        "Nothing further needed from you — this is already settled "
-                        f"by the bank's own records: {analysis.reason}"
+                        "No additional evidence is currently required for the "
+                        f"recommendation. The available bank records support it: {analysis.reason}"
                     )
                 if intent == "ledger_proof":
                     if analysis.action == "refund":
