@@ -37,7 +37,7 @@ from typing import Callable, List, Optional
 import llm_provider
 from vector_store import VectorStore
 from chargeback_agent import build_dispute_agent
-from merchant_db import get_connection
+from merchant_db import get_connection, NPCI_REASON_CODES as _NPCI_REASON_CODES
 
 DB_PATH = "chargebacks.db"
 
@@ -58,6 +58,51 @@ def _row(case_id: str) -> dict:
 
 def _money(amount: float) -> str:
     return f"{amount:,.2f}"
+
+
+def _amount_variants(amount: float) -> List[str]:
+    """
+    Every plausible rendering of `amount` an LLM might produce, for use
+    with Turn.must_contain_any. Confirmed live: OpenAI and Groq render the
+    same float differently ("19,473.40" vs "19,473.4" vs "19473.4") —
+    Session 6's fixture already worked around this ad hoc by using a bare
+    "9999" (an integer amount has no decimal-formatting ambiguity); this
+    generalizes that for amounts that DO have real cents.
+    """
+    comma2 = f"{amount:,.2f}"
+    bare2  = f"{amount:.2f}"
+    comma1 = comma2[:-1] if comma2.endswith("0") and "." in comma2 else comma2
+    bare1  = bare2[:-1] if bare2.endswith("0") and "." in bare2 else bare2
+    return list(dict.fromkeys([comma2, comma1, bare2, bare1]))
+
+
+# Cues that mean a matched must_not_contain phrase is actually part of a
+# SAFE sentence, not a genuine violation — see Turn.must_not_contain's own
+# docstring for the two live false positives this was built to fix.
+_NEGATION_CUES_BEFORE = ("not ", "n't ", "never ", "no ", "isn't", "doesn't", "wasn't")
+_HEDGE_CUES_AFTER      = (" or twice", " or more", " or not", " or less", " or once")
+
+
+def _is_genuine_violation(phrase_lower: str, answer_lower: str) -> bool:
+    """
+    True if `phrase_lower` appears in `answer_lower` as an actual assertion
+    — not negated just before it, and not immediately continuing into an
+    open/hedged disjunction just after it. Scans every occurrence (not just
+    the first) since a phrase could appear both safely and unsafely in the
+    same answer.
+    """
+    start = 0
+    while True:
+        idx = answer_lower.find(phrase_lower, start)
+        if idx == -1:
+            return False
+        before = answer_lower[max(0, idx - 20):idx]
+        after  = answer_lower[idx + len(phrase_lower):idx + len(phrase_lower) + 12]
+        negated = any(cue in before for cue in _NEGATION_CUES_BEFORE)
+        hedged  = any(after.startswith(cue) for cue in _HEDGE_CUES_AFTER)
+        if not negated and not hedged:
+            return True
+        start = idx + len(phrase_lower)
 
 
 # Real fixtures, all under AIRTEL_M001 (chosen for the richest, most varied
@@ -141,8 +186,22 @@ class Turn:
     # Substrings that MUST all appear (case-insensitive) for this turn to
     # pass the "grounded in real data" check. Empty list = no such check.
     must_contain: List[str] = field(default_factory=list)
+    # Groups of acceptable phrasing variants — at least ONE substring from
+    # EACH inner list must appear. Use this instead of must_contain for
+    # anything with more than one correct rendering (a money amount whose
+    # trailing-zero/comma formatting differs by LLM provider, a fact that
+    # could correctly be named by its code OR its description) — a single
+    # must_contain string is an AND-of-exact-strings check, which fails a
+    # CORRECT answer phrased differently than the one string anticipated.
+    must_contain_any: List[List[str]] = field(default_factory=list)
     # Substrings whose presence is a red flag (hallucination / unsupported
-    # claim). Empty list = no such check.
+    # claim). Empty list = no such check. NOT a bare substring check — see
+    # _is_genuine_violation() below: confirmed live (OpenAI eval run) that
+    # a naive substring match flagged two CORRECT answers as failures —
+    # "...does not... mean you are at fault" (a negation) and "...debited
+    # once or twice" (an open, correctly-hedged question) both contain the
+    # literal red-flag substring while being exactly the safe answer this
+    # check exists to require.
     must_not_contain: List[str] = field(default_factory=list)
     # Checks the response's structured `assessment` field directly (the
     # 5-way INVESTIGATE/CONTEST/ACCEPT/INSUFFICIENT_EVIDENCE/
@@ -170,9 +229,9 @@ SESSIONS = [
             Turn(
                 prompt=f"I have received a chargeback for case {CASE_NEW_OPEN['case_id']}. What exactly happened?",
                 category="case_retrieval",
+                must_contain_any=[_amount_variants(CASE_NEW_OPEN["chargeback_amount"])],
                 must_contain=[
                     CASE_NEW_OPEN["case_id"],
-                    _money(CASE_NEW_OPEN["chargeback_amount"]),
                     CASE_NEW_OPEN["reason_code"],
                 ],
                 note="Must retrieve real case_id/amount/reason_code, not narrate generically.",
@@ -240,7 +299,15 @@ SESSIONS = [
             Turn(
                 prompt="What are my most common chargeback reasons?",
                 category="historical_analytics",
-                must_contain=[AGG["most_common_code"]],
+                # Code OR its description — confirmed live (OpenAI): a
+                # correct answer named the reason by its DESCRIPTION
+                # ("Duplicate transaction  |  Count: 7"), not the bare code
+                # "U002", with the right code correctly identified as most
+                # frequent either way.
+                must_contain_any=[[
+                    AGG["most_common_code"],
+                    _NPCI_REASON_CODES.get(AGG["most_common_code"], "\x00nomatch"),
+                ]],
                 note=f"Real most-frequent code from DB: {AGG['most_common_code']} ({AGG['most_common_n']}x).",
             ),
         ],
@@ -484,7 +551,14 @@ def run_session(agent, session: Session) -> list:
         answer_lower = answer.lower()
 
         missing = [s for s in turn.must_contain if s.lower() not in answer_lower]
-        red_flags = [s for s in turn.must_not_contain if s.lower() in answer_lower]
+        missing += [
+            group[0] for group in turn.must_contain_any
+            if not any(v.lower() in answer_lower for v in group)
+        ]
+        red_flags = [
+            s for s in turn.must_not_contain
+            if _is_genuine_violation(s.lower(), answer_lower)
+        ]
         assessment_mismatch = (
             bool(turn.expected_assessment)
             and result.get("assessment", "") != turn.expected_assessment
