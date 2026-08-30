@@ -517,6 +517,149 @@ def test_u002_zero_credits_no_network_data_returns_insufficient_evidence() -> bo
         os.remove(db)
 
 
+def test_u002_evidence_fields_distinct_unverified() -> bool:
+    # The semantic-separation regression the Analysis.reason split exists
+    # for: evidence_summary/evidence_gap/ledger_proof must be genuinely
+    # DIFFERENT strings, not the same sentence copy-pasted three times
+    # (which is exactly what reusing `reason` for all three produced
+    # before this split, confirmed live).
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_FIELDS_NODATA", "U002")
+        _insert_ledger_entry(db, "UTR_FIELDS_NODATA", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_FIELDS_NODATA", 500)
+        # No network_debit_attempts row — the genuinely-unverified case.
+        row = _get_chargeback_row(db, "UTR_FIELDS_NODATA")
+        result = analyze_chargeback(row, db_path=db)
+        ok = (
+            bool(result.evidence_summary) and bool(result.evidence_gap) and bool(result.ledger_proof)
+            and result.evidence_summary != result.ledger_proof
+            and result.evidence_gap != result.evidence_summary
+            and result.evidence_gap != result.ledger_proof
+            and "ledger" in result.evidence_summary.lower()
+            and "reconciliation" in result.evidence_gap.lower()
+            and result.ledger_proof.lower().startswith("no")
+        )
+        return _check(
+            "unverified U002: evidence_summary/evidence_gap/ledger_proof are all "
+            "populated and pairwise distinct",
+            ok, detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_u002_evidence_fields_distinct_duplicate_credits() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_FIELDS_DUP", "U002")
+        _insert_ledger_entry(db, "UTR_FIELDS_DUP", "credit", 500, status="posted", posting_date="2026-01-01")
+        _insert_ledger_entry(db, "UTR_FIELDS_DUP", "credit", 500, status="posted", posting_date="2026-01-03")
+        row = _get_chargeback_row(db, "UTR_FIELDS_DUP")
+        result = analyze_chargeback(row, db_path=db)
+        ok = (
+            bool(result.evidence_summary) and bool(result.ledger_proof)
+            and result.evidence_gap == ""  # already conclusive — nothing missing
+            and result.evidence_summary != result.ledger_proof
+            and "credit" in result.evidence_summary.lower()
+            and result.ledger_proof.lower().startswith("yes")
+        )
+        return _check(
+            "duplicate-credit U002: evidence_summary describes the credits, "
+            "ledger_proof confirms the duplicate, evidence_gap is empty (nothing missing)",
+            ok, detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_u002_evidence_fields_distinct_single_debit_confirmed() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_FIELDS_ONE", "U002")
+        _insert_ledger_entry(db, "UTR_FIELDS_ONE", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_FIELDS_ONE", 500)
+        _insert_network_attempt(db, "UTR_FIELDS_ONE", 1, "success")
+        row = _get_chargeback_row(db, "UTR_FIELDS_ONE")
+        result = analyze_chargeback(row, db_path=db)
+        ok = (
+            bool(result.evidence_summary) and bool(result.ledger_proof)
+            and result.evidence_gap == ""
+            and result.evidence_summary != result.ledger_proof
+            and ("npci" in result.evidence_summary.lower() or "psp" in result.evidence_summary.lower())
+        )
+        return _check(
+            "reconciled + network-confirmed U002: evidence_summary names both "
+            "ledger and network facts, evidence_gap empty",
+            ok, detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_u002_evidence_fields_distinct_pending() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_FIELDS_PEND", "U002")
+        _insert_ledger_entry(db, "UTR_FIELDS_PEND", "credit", 500, status="pending")
+        row = _get_chargeback_row(db, "UTR_FIELDS_PEND")
+        result = analyze_chargeback(row, db_path=db)
+        ok = (
+            bool(result.evidence_summary) and bool(result.evidence_gap) and bool(result.ledger_proof)
+            and "pending" in result.evidence_summary.lower()
+            and "settle" in result.evidence_gap.lower()
+            and result.ledger_proof.lower().startswith("not yet")
+        )
+        return _check(
+            "pending-entry U002: fields describe the pending state, not a "
+            "settled evidence picture",
+            ok, detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_u002_evidence_fields_distinct_mismatch() -> bool:
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_FIELDS_MISMATCH", "U002")
+        _insert_ledger_entry(db, "UTR_FIELDS_MISMATCH", "credit", 500, status="posted")
+        _insert_settlement_entry(db, "UTR_FIELDS_MISMATCH", 0)
+        row = _get_chargeback_row(db, "UTR_FIELDS_MISMATCH")
+        result = analyze_chargeback(row, db_path=db)
+        ok = (
+            bool(result.evidence_summary) and bool(result.evidence_gap) and bool(result.ledger_proof)
+            and result.evidence_gap != result.evidence_summary
+            and "reconcile" in result.evidence_gap.lower()
+            and result.ledger_proof.lower().startswith("no")
+        )
+        return _check(
+            "reconciliation-mismatch U002: evidence_gap names the mismatch, "
+            "ledger_proof says the ledger can't be trusted alone yet",
+            ok, detail=str(result))
+    finally:
+        os.remove(db)
+
+
+def test_non_u002_evidence_fields_empty_fallback() -> bool:
+    # The regression the split's design deliberately allows FOR: a non-U002
+    # code (routed through decision_rules.decide() instead) leaves the new
+    # fields empty by design — callers MUST fall back to `reason` rather
+    # than producing a blank answer. This only checks the data contract;
+    # chargeback_agent.py's own fallback logic is exercised separately.
+    db = _make_test_db()
+    try:
+        _insert_chargeback(db, "UTR_FIELDS_U001", "U001")
+        row = _get_chargeback_row(db, "UTR_FIELDS_U001")
+        result = analyze_chargeback(row, db_path=db)
+        ok = (
+            result.evidence_summary == "" and result.evidence_gap == ""
+            and result.ledger_proof == "" and bool(result.reason)
+        )
+        return _check(
+            "non-U002 (rules-derived): new fields empty by design, `reason` "
+            "still populated for callers to fall back to",
+            ok, detail=str(result))
+    finally:
+        os.remove(db)
+
+
 def test_cbs_refund_check_still_takes_priority_over_ledger_check() -> bool:
     db = _make_test_db()
     try:
@@ -640,6 +783,12 @@ def main() -> None:
         test_u002_one_credit_unreconciled_returns_no_recommendation,
         test_u002_pending_entry_returns_no_recommendation,
         test_u002_zero_credits_no_network_data_returns_insufficient_evidence,
+        test_u002_evidence_fields_distinct_unverified,
+        test_u002_evidence_fields_distinct_duplicate_credits,
+        test_u002_evidence_fields_distinct_single_debit_confirmed,
+        test_u002_evidence_fields_distinct_pending,
+        test_u002_evidence_fields_distinct_mismatch,
+        test_non_u002_evidence_fields_empty_fallback,
         test_cbs_refund_check_still_takes_priority_over_ledger_check,
         test_non_u002_code_unaffected_by_ledger_check,
         test_deadline_expired_true_when_response_deadline_is_past,
