@@ -340,6 +340,18 @@
                                       // server-side. Cleared at the same three points
                                       // pendingQuery is: merchant switch, tab switch, and a
                                       // genuine new topic (looksLikeNewTopic()).
+  let threadId             = '';     // Dispute tab only — round-trips the server's LangGraph
+                                      // checkpointer thread_id so the SAME thread's checkpoint
+                                      // can be resumed turn to turn, instead of every call
+                                      // getting a brand-new one (see LANGCHAIN_LANGGRAPH_GUIDE.md
+                                      // §2.7/2.8). Genuine defense-in-depth alongside
+                                      // anchoredCaseId, not a replacement for it — planner_node
+                                      // still tries an explicit case reference and
+                                      // anchored_case_id first. Cleared at the exact same three
+                                      // points anchoredCaseId is: a genuine new topic must start
+                                      // a brand-new thread_id with no checkpoint to resume from,
+                                      // or a stale case could otherwise bleed into an unrelated
+                                      // new conversation on the same thread.
   let accumulatedContext   = '';     // all follow-up answers joined; grows each turn, capped
                                       // to the most recent MAX_CONTEXT_SEGMENTS (see
                                       // handleDispute) so a long-running conversation that
@@ -389,6 +401,7 @@
     pendingQuery       = '';
     accumulatedContext = '';
     anchoredCaseId     = '';
+    threadId           = '';
     lastQAQuery        = '';
     lastQuerySql       = '';
     showWelcome();
@@ -400,6 +413,7 @@
     pendingQuery       = '';
     accumulatedContext = '';
     anchoredCaseId     = '';
+    threadId           = '';
     lastQAQuery        = '';
     lastQuerySql       = '';
 
@@ -661,6 +675,7 @@
       pendingQuery        = '';
       accumulatedContext  = '';
       anchoredCaseId      = '';
+      threadId            = '';
       queryEl.placeholder = 'Describe your dispute…';
     }
 
@@ -672,11 +687,11 @@
         ? accumulatedContext.split('\n\n').concat([input])
         : [input];
       accumulatedContext = segments.slice(-MAX_CONTEXT_SEGMENTS).join('\n\n');
-      body = { query: pendingQuery, additional_context: accumulatedContext, anchored_case_id: anchoredCaseId };
+      body = { query: pendingQuery, additional_context: accumulatedContext, anchored_case_id: anchoredCaseId, thread_id: threadId };
     } else {
       // Turn 1 — fresh dispute (or right after an explicit reset above)
       accumulatedContext = '';
-      body = { query: input, additional_context: '', anchored_case_id: anchoredCaseId };
+      body = { query: input, additional_context: '', anchored_case_id: anchoredCaseId, thread_id: threadId };
     }
 
     const res = await fetch('/dispute', {
@@ -717,6 +732,11 @@
     // api_server.py's DisputeRequest.anchored_case_id docstring for why
     // this round-trip exists.
     if (data.case_id) anchoredCaseId = data.case_id;
+
+    // Unlike anchoredCaseId, thread_id is always present on every response
+    // (api_server.py mints one even on a fresh conversation) — no guard
+    // needed, just always track the server's current thread.
+    if (data.thread_id) threadId = data.thread_id;
 
     if (data.needs_more_info) {
       // needs_more_info alone only means "keep pendingQuery/additional_context

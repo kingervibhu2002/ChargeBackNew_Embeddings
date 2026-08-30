@@ -278,9 +278,13 @@ class DisputeRequest(BaseModel):
                                   text on every turn — reliable most of the time,
                                   but confirmed live to occasionally lose track of
                                   a case named several turns back in a long,
-                                  otherwise-unrelated conversation. This closes
-                                  that gap without touching the (still separately
-                                  inert) checkpointer at all.
+                                  otherwise-unrelated conversation. Now that
+                                  chat.html rounds-trips thread_id too, the
+                                  checkpointer offers the same fallback more
+                                  robustly (see _planner_node's fallback chain) —
+                                  this hint stays wired up anyway as a second,
+                                  independent line of defense, checked first since
+                                  it's the cheaper/more direct of the two.
     """
     query: str
     additional_context: str = ""
@@ -777,9 +781,10 @@ def dispute(
     # client, same "resolve and enforce scope server-side" pattern
     # text_to_sql.py already uses for cross-merchant query scoping. Without
     # this, any caller who obtained/guessed another merchant's thread_id
-    # could resume that merchant's dispute conversation once checkpointing
-    # is real (today, with no checkpointer wired in, thread_id was inert —
-    # this only becomes a real risk once the agent actually resumes state).
+    # could resume that merchant's dispute conversation — a real risk now
+    # that chat.html actually round-trips thread_id and the checkpointer
+    # resumes state from it (see chargeback_agent.py's _planner_node
+    # fallback chain), not just a hypothetical for a future wiring-up.
     owner_tag = merchant_id or "anon"
     thread_id = req.thread_id
     if thread_id and not thread_id.startswith(f"{owner_tag}:"):

@@ -2227,16 +2227,30 @@ class DisputeAgent:
         # merchant can't probe another merchant's case by guessing its ID —
         # same defense-in-depth pattern used everywhere else in this project.
         case_ref = re.search(r"\b(UTR\w+|NPCI\w+)\b", query, re.IGNORECASE)
-        # Fallback to the client-supplied anchor ONLY when this turn's own
+        # Fallback chain, in priority order, used ONLY when this turn's own
         # text has no case reference of its own — an explicit reference the
         # merchant actually typed always wins, so a genuine topic change to
-        # a different case is never overridden by a stale anchor. See
-        # ChargebackState's anchored_case_id docstring for why this exists:
-        # reconstructing case identity by re-parsing accumulated text every
-        # turn is reliable most of the time, but confirmed live to
-        # occasionally lose track of a case named several turns back in an
-        # otherwise-unrelated conversation.
-        case_ref_token = case_ref.group(1) if case_ref else state.get("anchored_case_id", "")
+        # a different case is never overridden by a stale anchor:
+        #   1. anchored_case_id — the client-supplied hint (see
+        #      ChargebackState's own docstring for why this exists:
+        #      reconstructing case identity by re-parsing accumulated text
+        #      every turn is reliable most of the time, but confirmed live
+        #      to occasionally lose track of a case named several turns
+        #      back in an otherwise-unrelated conversation).
+        #   2. case_context.case_id — whatever the checkpointer restored
+        #      for this thread_id, if any. Genuine defense-in-depth, not
+        #      the primary mechanism: chat.html resends anchored_case_id
+        #      on every relevant turn already, so this only matters if
+        #      that round-trip is ever missing (a client bug, a different
+        #      client resuming the same thread_id). Safe against stale
+        #      cross-topic bleed-through because chat.html clears its
+        #      thread_id at the exact same points it clears
+        #      anchored_case_id — a genuine new topic gets a brand-new
+        #      thread_id with no checkpoint to restore from at all.
+        case_ref_token = case_ref.group(1) if case_ref else (
+            state.get("anchored_case_id", "")
+            or state.get("case_context", {}).get("case_id", "")
+        )
         if case_ref_token and merchant_id:
             try:
                 from chargeback_analysis import analyze_chargeback
