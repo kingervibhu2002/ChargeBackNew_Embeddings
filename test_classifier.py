@@ -13,6 +13,8 @@ from classifier import (
     looks_like_new_request,
     looks_like_explicit_resolution_request,
     count_consecutive_matches,
+    detect_knowledge_type_intent,
+    detect_actor_intent,
 )
 
 
@@ -349,6 +351,95 @@ def test_consecutive_matches_zero_when_latest_doesnt_match():
     )
 
 
+# ---------------------------------------------------------------------------
+# detect_knowledge_type_intent / detect_actor_intent
+# ---------------------------------------------------------------------------
+
+def test_knowledge_type_definition():
+    return _check(
+        "What does U002 mean? -> DEFINITION",
+        detect_knowledge_type_intent("What does U002 mean?") == "DEFINITION",
+    )
+
+def test_knowledge_type_evidence():
+    return _check(
+        "What evidence do I need? -> EVIDENCE",
+        detect_knowledge_type_intent("What evidence do I need for this?") == "EVIDENCE",
+    )
+
+def test_knowledge_type_evidence_all_proofs_phrasing():
+    return _check(
+        "What all proofs do I need? -> EVIDENCE (not misrouted by 'all')",
+        detect_knowledge_type_intent("What all proofs do I need to submit?") == "EVIDENCE",
+    )
+
+def test_knowledge_type_responsibility():
+    return _check(
+        "Who is responsible for this? -> RESPONSIBILITY",
+        detect_knowledge_type_intent("Who is responsible for this chargeback?") == "RESPONSIBILITY",
+    )
+
+def test_knowledge_type_deadline():
+    return _check(
+        "What is the deadline to respond? -> DEADLINE",
+        detect_knowledge_type_intent("What is the deadline to respond?") == "DEADLINE",
+    )
+
+def test_knowledge_type_deadline_beats_evidence():
+    return _check(
+        "Deadline to submit evidence -> DEADLINE (more specific, checked first)",
+        detect_knowledge_type_intent("What's the deadline to submit evidence?") == "DEADLINE",
+    )
+
+def test_knowledge_type_rebuttal():
+    return _check(
+        "How do I fight this chargeback? -> REBUTTAL",
+        detect_knowledge_type_intent("How do I fight this chargeback?") == "REBUTTAL",
+    )
+
+def test_knowledge_type_scenario_psp():
+    return _check(
+        "What if the PSP charged the customer twice? -> SCENARIO",
+        detect_knowledge_type_intent("What if the PSP charged the customer twice?") == "SCENARIO",
+    )
+
+def test_knowledge_type_exception():
+    return _check(
+        "Is there an exception if the customer confirmed delivery? -> EXCEPTION",
+        detect_knowledge_type_intent("Is there an exception if the customer confirmed delivery?") == "EXCEPTION",
+    )
+
+def test_knowledge_type_none_for_unrelated():
+    return _check(
+        "Unrelated small talk -> None",
+        detect_knowledge_type_intent("Thanks, that helps a lot!") is None,
+    )
+
+def test_actor_intent_psp():
+    return _check(
+        "PSP mention -> psp",
+        detect_actor_intent("What if the PSP charged the customer twice?") == "psp",
+    )
+
+def test_actor_intent_network():
+    return _check(
+        "NPCI mention -> network",
+        detect_actor_intent("What if NPCI charged the customer twice?") == "network",
+    )
+
+def test_actor_intent_merchant():
+    return _check(
+        "Merchant mention -> merchant",
+        detect_actor_intent("Is the merchant liable here?") == "merchant",
+    )
+
+def test_actor_intent_none_when_unnamed():
+    return _check(
+        "No actor named -> None",
+        detect_actor_intent("What does U002 mean?") is None,
+    )
+
+
 def main() -> None:
     tests = [
         test_classify_dispute_explicit_code,
@@ -403,6 +494,20 @@ def main() -> None:
         test_consecutive_matches_counts_trailing_run,
         test_consecutive_matches_stops_at_first_break,
         test_consecutive_matches_zero_when_latest_doesnt_match,
+        test_knowledge_type_definition,
+        test_knowledge_type_evidence,
+        test_knowledge_type_evidence_all_proofs_phrasing,
+        test_knowledge_type_responsibility,
+        test_knowledge_type_deadline,
+        test_knowledge_type_deadline_beats_evidence,
+        test_knowledge_type_rebuttal,
+        test_knowledge_type_scenario_psp,
+        test_knowledge_type_exception,
+        test_knowledge_type_none_for_unrelated,
+        test_actor_intent_psp,
+        test_actor_intent_network,
+        test_actor_intent_merchant,
+        test_actor_intent_none_when_unnamed,
     ]
 
     print(f"\nRunning {len(tests)} classifier tests...\n")

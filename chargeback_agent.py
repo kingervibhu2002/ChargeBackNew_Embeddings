@@ -1315,7 +1315,16 @@ class DisputeAgent:
             return f"No knowledge-base domain found for network '{network}'."
 
         embedding = self._embed(f"{network} {reason_code} evidence required")
+        # This lookup is unconditionally about evidence requirements (see
+        # the synthetic query above), so filter to EVIDENCE-tagged chunks
+        # directly rather than relying on similarity alone — with a
+        # fallback to the unfiltered pool if the KB has no EVIDENCE-tagged
+        # chunk for this domain yet (heading-derived tagging isn't
+        # exhaustive), same graceful-fallthrough idiom used elsewhere here.
         domain_hits = self._store.search_chunks(
+            embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE, knowledge_domain=domain,
+            knowledge_type="EVIDENCE",
+        ) or self._store.search_chunks(
             embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE, knowledge_domain=domain
         )
         tier, best = select_domain_chunk(domain_hits, reason_code)
@@ -4286,10 +4295,25 @@ class DisputeAgent:
                 chunk_hits = [r for r in wide_candidates[:6] if r["score"] >= 0.65]
 
             domain = detect_knowledge_domain(effective_query, state.get("additional_context", ""))
+            # Question-phrasing → KnowledgeType (classifier.py's query-side
+            # counterpart to chunking.py's heading-derived knowledge_type):
+            # lets "what does U002 mean?" and "what if the PSP charged
+            # twice?" pull from different chunk pools within the same
+            # domain/code instead of the same undifferentiated similarity
+            # ranking. Tried as a hard filter with fallback to the unfiltered
+            # pool below when it returns nothing (heading-derived tagging
+            # isn't exhaustive) — same graceful-fallthrough idiom as the
+            # parent-document lookup further down.
+            kt_intent = classifier.detect_knowledge_type_intent(effective_query)
             promoted = None
             parent_entry = None
             if domain:
-                domain_hits = self._store.search_chunks(
+                domain_hits = (
+                    self._store.search_chunks(
+                        embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE, knowledge_domain=domain,
+                        knowledge_type=kt_intent,
+                    ) if kt_intent else []
+                ) or self._store.search_chunks(
                     embedding, top_k=DOMAIN_CANDIDATE_POOL_SIZE, knowledge_domain=domain
                 )
                 seen = {r["chunk_id"] for r in chunk_hits}
@@ -4325,6 +4349,19 @@ class DisputeAgent:
                         seen.add(r["chunk_id"])
 
                 chunk_hits.sort(key=lambda r: r["score"], reverse=True)
+
+                # Actor tie-break for scenario questions ("what if the PSP
+                # charged twice?" vs "...if NPCI charged twice?"): a stable
+                # sort so chunks whose content mentions the named actor move
+                # ahead, without disturbing score order within each group.
+                # actors[] is content-derived (chunking.derive_actors) and
+                # lower-confidence than knowledge_type, so this stays a
+                # soft, client-side boost rather than a hard Qdrant filter.
+                if kt_intent == "SCENARIO":
+                    actor_intent = classifier.detect_actor_intent(effective_query)
+                    if actor_intent:
+                        chunk_hits.sort(key=lambda r: actor_intent in (r.get("actors") or []), reverse=True)
+
                 if promoted:
                     chunk_hits = [promoted] + [r for r in chunk_hits if r["chunk_id"] != promoted["chunk_id"]]
 

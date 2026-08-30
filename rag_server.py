@@ -155,6 +155,9 @@ def add_chunk(
     reason_code: str = "",
     section: str = "",
     subsection: str = "",
+    knowledge_type: str = "",
+    actors: str = "",
+    evidence_tags: str = "",
 ) -> str:
     """
     Add or update one chunk of a document in the parallel chunk collection
@@ -179,6 +182,15 @@ def add_chunk(
         section:          Enclosing ## heading text, or empty.
         subsection:       Enclosing ### heading text (or FAQ question slug),
                           or empty.
+        knowledge_type:   Taxonomy classification of section/subsection
+                          (see chunking.derive_knowledge_type), e.g.
+                          'EVIDENCE', 'DEFINITION', or empty if undetermined.
+        actors:           Comma-separated actor roles mentioned in the
+                          content (see chunking.derive_actors), e.g.
+                          'merchant, psp'.
+        evidence_tags:    Comma-separated evidence_tags.EvidenceTag values
+                          mentioned in the content (see
+                          chunking.derive_evidence_tags).
 
     Returns:
         str: Confirmation with the chunk's id.
@@ -188,6 +200,8 @@ def add_chunk(
     cid = make_chunk_id(document_id, chunk_index)
     prefix = build_contextual_prefix(document_title, network, reason_code, section or None, subsection or None)
     embedding = _embed(prefix + content)
+    actors_list = [a.strip() for a in actors.split(",") if a.strip()]
+    evidence_tags_list = [t.strip() for t in evidence_tags.split(",") if t.strip()]
     _store.add_chunk(
         cid, document_id, document_title, content, embedding,
         knowledge_domain=knowledge_domain,
@@ -196,6 +210,9 @@ def add_chunk(
         section=section or None,
         subsection=subsection or None,
         chunk_index=chunk_index,
+        knowledge_type=knowledge_type or None,
+        actors=actors_list,
+        evidence_tags=evidence_tags_list,
     )
     return f"Indexed chunk '{cid}' (doc='{document_title}')"
 

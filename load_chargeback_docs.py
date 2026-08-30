@@ -576,6 +576,9 @@ async def main() -> None:
                             "document_id":    document_id,
                             "content":        chunk["content"],
                             "chunk_index":    chunk["chunk_index"],
+                            "knowledge_type": chunk["knowledge_type"] or "",
+                            "actors":         ", ".join(chunk["actors"]),
+                            "evidence_tags":  ", ".join(chunk["evidence_tags"]),
                         },
                     )
                 chunk_total += len(chunks)

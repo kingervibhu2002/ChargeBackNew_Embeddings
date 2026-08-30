@@ -203,6 +203,9 @@ async def index_documents(docs: list[dict], dry_run: bool = False) -> None:
                                 "reason_code":      reason_code,
                                 "section":          chunk["section"] or "",
                                 "subsection":       chunk["subsection"] or "",
+                                "knowledge_type":   chunk["knowledge_type"] or "",
+                                "actors":           ", ".join(chunk["actors"]),
+                                "evidence_tags":    ", ".join(chunk["evidence_tags"]),
                             },
                         )
                     chunk_total += len(chunks)

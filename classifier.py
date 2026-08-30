@@ -14,6 +14,8 @@ import difflib
 import re
 from typing import Dict, List, Optional, Tuple
 
+from chunking import ACTOR_KEYWORDS
+
 # A specific UTR (UPI Transaction Reference) or NPCI case ID, e.g.
 # "UTR20260802M002359516" / "NPCI20260818M002359516" (see merchant_db.py's
 # ID format). Referencing an exact case is unambiguous dispute-agent intent
@@ -1470,3 +1472,70 @@ def count_consecutive_matches(additional_context: str, predicate) -> int:
             break
         count += 1
     return count
+
+
+# ---------------------------------------------------------------------------
+# Knowledge-type / actor intent detection
+#
+# Query-side counterpart to chunking.py's index-side derive_knowledge_type()/
+# derive_actors() — maps question phrasing to the same KnowledgeType/Actor
+# vocabulary so _answer_question_node can filter/boost chunk retrieval by
+# the KIND of knowledge a question wants, not just its network/reason code.
+# Checked in order below, most specific first, so e.g. "what's the deadline
+# to submit evidence?" resolves to DEADLINE rather than the broader EVIDENCE
+# match later in the list.
+# ---------------------------------------------------------------------------
+
+_KNOWLEDGE_TYPE_INTENT_PATTERNS = [
+    (re.compile(r'\b(deadline|due date|time limit|time frame|how (many|long)\b.{0,15}\bdays?\b)\b', re.IGNORECASE), "DEADLINE"),
+    (re.compile(r'\b(exception|exempt|waiv(e|er|ed)|caveat)\b', re.IGNORECASE), "EXCEPTION"),
+    (re.compile(r'\b(rebuttal|represent(ment)?|how (do|can) i (fight|win|contest|dispute))\b', re.IGNORECASE), "REBUTTAL"),
+    (re.compile(r'\b(evidence|proofs?|documents?|documentation)\b', re.IGNORECASE), "EVIDENCE"),
+    (re.compile(r'\b(who is responsible|whose fault|who.?s liable|liability|liable)\b', re.IGNORECASE), "RESPONSIBILITY"),
+    (re.compile(r'\b(what if|what happens if|can i still)\b', re.IGNORECASE), "SCENARIO"),
+    (re.compile(r'\b(what does\b.{0,30}\bmean|meaning of|what is\b.{0,20}\b(code|reason))\b', re.IGNORECASE), "DEFINITION"),
+]
+
+
+def detect_knowledge_type_intent(query: str) -> Optional[str]:
+    """
+    Classify a question's phrasing into the KnowledgeType vocabulary
+    (chunking.derive_knowledge_type's DEFINITION/EVIDENCE/PROCEDURE/
+    RESPONSIBILITY/OUTCOME/DEADLINE/EXCEPTION/FAQ/SCENARIO/REBUTTAL/SUMMARY),
+    or None if nothing matches. Callers should treat None the same as any
+    other "no signal" case in this module — fall back to unfiltered
+    retrieval rather than erroring.
+    """
+    for pattern, ktype in _KNOWLEDGE_TYPE_INTENT_PATTERNS:
+        if pattern.search(query):
+            return ktype
+    return None
+
+
+# A scenario question naming a specific intermediary ("what if the PSP
+# charged the customer twice?") almost always also names "customer" or
+# "merchant" as the transaction's two parties regardless of which party is
+# actually at fault — those two are checked LAST so a more specific,
+# diagnostic actor (psp/issuer/acquirer/network) wins when both appear.
+_ACTOR_INTENT_PRIORITY = ["psp", "issuer", "acquirer", "network", "customer", "merchant"]
+
+
+def detect_actor_intent(query: str) -> Optional[str]:
+    """
+    Classify a question's phrasing into the Actor vocabulary
+    (chunking.derive_actors' merchant/customer/issuer/acquirer/psp/network),
+    or None if no actor is named. Shares chunking.ACTOR_KEYWORDS with the
+    content-side detector so query-side and content-side actor detection
+    can't drift apart — but checks it in _ACTOR_INTENT_PRIORITY order
+    (specific intermediary before generic transaction party), not
+    ACTOR_KEYWORDS' own dict order, since a query can legitimately name
+    both. Word-boundary matched (not a naive substring check) for the same
+    reason _answer_question_node's other intent checks are — see this
+    module's other detect_*/looks_like_* functions.
+    """
+    lowered = query.lower()
+    for actor in _ACTOR_INTENT_PRIORITY:
+        for kw in ACTOR_KEYWORDS[actor]:
+            if re.search(r'\b' + re.escape(kw) + r'\b', lowered):
+                return actor
+    return None

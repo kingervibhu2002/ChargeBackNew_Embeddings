@@ -217,6 +217,9 @@ class VectorStore:
         section: Optional[str] = None,
         subsection: Optional[str] = None,
         chunk_index: int = 0,
+        knowledge_type: Optional[str] = None,
+        actors: Optional[List[str]] = None,
+        evidence_tags: Optional[List[str]] = None,
     ) -> None:
         """
         Insert or overwrite one chunk in the parallel chunk collection.
@@ -245,6 +248,12 @@ class VectorStore:
             subsection:       Enclosing ### heading text (or FAQ question
                               slug), or None.
             chunk_index:      Position of this chunk within its document.
+            knowledge_type:   Taxonomy classification of section/subsection
+                              (chunking.derive_knowledge_type), or None.
+            actors:           Actor roles mentioned in the content
+                              (chunking.derive_actors), or None.
+            evidence_tags:    EvidenceTag values mentioned in the content
+                              (chunking.derive_evidence_tags), or None.
 
         Returns:
             None
@@ -268,6 +277,9 @@ class VectorStore:
                         "section":          section,
                         "subsection":       subsection,
                         "chunk_index":      chunk_index,
+                        "knowledge_type":   knowledge_type,
+                        "actors":           actors or [],
+                        "evidence_tags":    evidence_tags or [],
                     },
                 )
             ],
@@ -385,7 +397,8 @@ class VectorStore:
         }
 
     def search_chunks(
-        self, query_embedding: List[float], top_k: int = 6, knowledge_domain: Optional[str] = None
+        self, query_embedding: List[float], top_k: int = 6,
+        knowledge_domain: Optional[str] = None, knowledge_type: Optional[str] = None,
     ) -> List[Dict]:
         """
         Find the top-k most semantically similar chunks for a query vector,
@@ -403,18 +416,29 @@ class VectorStore:
                               when a network/app is already detected in the
                               query, to narrow the candidate pool up front
                               rather than rely on ranking alone.
+            knowledge_type:   Optional payload filter, e.g. "EVIDENCE" — used
+                              when the query's intent maps to a specific
+                              knowledge_type (classifier.detect_knowledge_type_
+                              intent), to target the right kind of chunk
+                              rather than the right network/code alone.
+                              Callers should fall back to an unfiltered call
+                              when this returns nothing, the same way other
+                              confident-case lookups in this codebase do.
 
         Returns:
             List[Dict]: chunk_id, document_id, document_title, content,
                        knowledge_domain, network, reason_code, section,
-                       subsection, chunk_index, score. Empty list if the
-                       chunk collection doesn't exist yet.
+                       subsection, chunk_index, knowledge_type, actors,
+                       evidence_tags, score. Empty list if the chunk
+                       collection doesn't exist yet.
         """
         try:
-            query_filter = (
-                Filter(must=[FieldCondition(key="knowledge_domain", match=MatchValue(value=knowledge_domain))])
-                if knowledge_domain else None
-            )
+            conditions = []
+            if knowledge_domain:
+                conditions.append(FieldCondition(key="knowledge_domain", match=MatchValue(value=knowledge_domain)))
+            if knowledge_type:
+                conditions.append(FieldCondition(key="knowledge_type", match=MatchValue(value=knowledge_type)))
+            query_filter = Filter(must=conditions) if conditions else None
             result = self.client.query_points(
                 collection_name=_CHUNKS_COLLECTION,
                 query=query_embedding,
@@ -436,6 +460,9 @@ class VectorStore:
                 "section":          hit.payload.get("section"),
                 "subsection":       hit.payload.get("subsection"),
                 "chunk_index":      hit.payload.get("chunk_index", 0),
+                "knowledge_type":   hit.payload.get("knowledge_type"),
+                "actors":           hit.payload.get("actors", []),
+                "evidence_tags":    hit.payload.get("evidence_tags", []),
                 "score":            round(hit.score, 4),
             }
             for hit in result.points
@@ -492,6 +519,9 @@ class VectorStore:
                 "section":          p.payload.get("section"),
                 "subsection":       p.payload.get("subsection"),
                 "chunk_index":      p.payload.get("chunk_index", 0),
+                "knowledge_type":   p.payload.get("knowledge_type"),
+                "actors":           p.payload.get("actors", []),
+                "evidence_tags":    p.payload.get("evidence_tags", []),
                 "score":            1.0,
             }
             for p in neighbors
