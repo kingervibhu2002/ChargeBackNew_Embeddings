@@ -75,6 +75,39 @@ def refers_to_current_case(text: str) -> bool:
     return bool(_SAME_CASE_DEMONSTRATIVE_RE.search(text))
 
 
+_CASE_INSTANCE_FACT_RE = re.compile(
+    r'\b(how much|amount|deadline|due\s*date|due\s*by|resolved|resolution|'
+    r'case\s*status|current\s*status)\b',
+    re.IGNORECASE,
+)
+
+
+def asks_about_case_instance_fact(text: str) -> bool:
+    """
+    True if `text` is asking for a specific, only-this-case-can-answer-it
+    fact (the amount, the deadline, whether it's resolved) rather than a
+    conceptual/definitional question about a reason code in general.
+
+    Distinct from refers_to_current_case() above: that function only
+    catches an EXPLICIT demonstrative ("this case," "that dispute"). A bare
+    follow-up like "what is the amount?" / "amount buddy?" carries no
+    demonstrative and no case ID of its own, so refers_to_current_case()
+    alone marks it as a generic/conceptual question — wrongly, since "the
+    amount" has no generic, case-less answer at all; it can only mean the
+    amount of whichever case is already anchored. Confirmed live: three
+    consecutive rephrasings of "what is the amount?" during a single-case-
+    anchored conversation all got a generic "the amount that was
+    duplicated" non-answer instead of the real, on-file figure, because
+    chargeback_agent.py's _answer_clarification_node gated its case-facts
+    lookup on refers_to_current_case()/extract_case_reference() alone,
+    neither of which any of the three phrasings satisfied. Meant to be
+    combined with a check that a case IS already anchored (never used
+    alone to decide WHICH case a fact-seeking question is about) — see
+    that node's own is_case_specific_question for how the two combine.
+    """
+    return bool(_CASE_INSTANCE_FACT_RE.search(text))
+
+
 _NEW_REQUEST_STARTER_RE = re.compile(
     r"^\s*(help me( with| to)?|please help|can you help|i need help|"
     r"show me|tell me|list |give me|explain( to me)?)\b",

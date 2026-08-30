@@ -1219,7 +1219,9 @@ class DisputeAgent:
                 return parent_doc["content"][:4000]
         return best["content"]
 
-    def _build_case_intro(self, merchant_id: str, case_id: str) -> Optional[dict]:
+    def _build_case_intro(
+        self, merchant_id: str, case_id: str, merchant_question: str = "",
+    ) -> Optional[dict]:
         """
         Called from _validate_node when a merchant's follow-up reply
         ("the first one") resolves to a real case_id — replaces the old
@@ -1228,6 +1230,18 @@ class DisputeAgent:
         get_reason_code_info once the reason code is known) so the
         merchant sees a case summary + reason-code context before being
         asked for evidence.
+
+        Args:
+            merchant_question: The merchant's own text for this turn (e.g.
+                "explain chargeback reason code"), when available. Passed
+                through to the LLM so a specific question gets a specific
+                answer instead of always the generic case-summary shape —
+                confirmed live that ignoring this and always sending the
+                fixed "Tell me about it." prompt produced the same generic
+                summary/evidence-uncertainty answer regardless of whether
+                the merchant asked to be walked through the case or asked
+                a narrow question like "explain the reason code" or "which
+                category does this belong to."
 
         Verified live before writing this (see the module-level comment
         above get_case_details/get_reason_code_info) that a single round
@@ -1276,9 +1290,21 @@ class DisputeAgent:
                 "the end — say it once. A merchant whose deadline has "
                 "already passed needs one short, clear answer telling them "
                 "what to do right now, not a full case walkthrough with the "
-                "same warning bookended at both ends of it."
+                "same warning bookended at both ends of it.\n"
+                "If the merchant asked something specific about the case "
+                "(e.g. which category/reason code it is, what evidence is "
+                "needed, what the reason code means) rather than a general "
+                "'tell me about it,' answer THAT specific question directly "
+                "using the tool facts, instead of the full two-shape summary "
+                "above — except the deadline-passed fact in shape 2 always "
+                "takes priority and must still be said if the deadline has "
+                "passed, no matter what was specifically asked."
             )),
-            HumanMessage(content=f"The merchant selected case {case_id}. Tell me about it."),
+            HumanMessage(content=(
+                f"The merchant selected case {case_id}. "
+                + (f'Their question: "{merchant_question}"' if merchant_question
+                   else "Tell me about it.")
+            )),
         ]
 
         case_row = None
@@ -1524,7 +1550,7 @@ class DisputeAgent:
                 ).fetchone()
                 conn.close()
                 if row:
-                    intro = self._build_case_intro(merchant_id_preview, row["case_id"])
+                    intro = self._build_case_intro(merchant_id_preview, row["case_id"], masked_query)
                     if intro:
                         return {
                             "is_valid_query": True,
@@ -1628,7 +1654,7 @@ class DisputeAgent:
                 # to "end" with final_answer already populated. Falls
                 # through to the old rewrite-and-continue behavior if the
                 # lookup finds no matching row — never a dead end.
-                intro = self._build_case_intro(merchant_id_preview, resolved)
+                intro = self._build_case_intro(merchant_id_preview, resolved, _latest_raw_reply)
                 if intro:
                     # confidence_score/is_grounded: 8/True is the fixed
                     # convention _answer_question_node's own confident,
@@ -2239,11 +2265,41 @@ class DisputeAgent:
         # or wait for the next poller run. Scoped to merchant_id so a
         # merchant can't probe another merchant's case by guessing its ID —
         # same defense-in-depth pattern used everywhere else in this project.
-        case_ref = re.search(r"\b(UTR\w+|NPCI\w+)\b", query, re.IGNORECASE)
-        # Fallback chain, in priority order, used ONLY when this turn's own
-        # text has no case reference of its own — an explicit reference the
-        # merchant actually typed always wins, so a genuine topic change to
-        # a different case is never overridden by a stale anchor:
+        # chat.html keeps `query` (user_query) pinned to the conversation's
+        # ORIGINAL message for the life of a needs_more_info loop — the
+        # merchant's actual CURRENT turn, once any follow-up has happened,
+        # lives in additional_context instead (its latest segment
+        # specifically). So a case reference in the latest additional_context
+        # segment is checked FIRST, ahead of `query` — `query` reliably still
+        # names whatever case the conversation started on, which is exactly
+        # the stale anchor a genuine new case mention must be able to
+        # override. Checking `query` first (as if it were always the
+        # freshest text) meant a follow-up like "NPCI20260809M002005 which
+        # category is it?" typed while an older case was still open in
+        # additional_context never even got a chance to match: `query` (the
+        # original case-opening message) always matched something first, so
+        # the merchant's real, current question was silently ignored and the
+        # answer got grounded in the WRONG (original) case — or, when
+        # nothing in that grounding data matched the case ID they'd actually
+        # just typed, an LLM-hallucinated "I don't have any record for that
+        # case," even though it's a real case on their own account. Only the
+        # LATEST segment of additional_context is checked (same pattern as
+        # the escalation/explicit-resolution checks above) so an old case ID
+        # mentioned earlier in a long back-and-forth can't resurrect itself
+        # over what the merchant is asking about right now.
+        case_ref = None
+        _ac = state.get("additional_context", "")
+        if _ac:
+            _ac_segments = [s.strip() for s in _ac.split("\n\n") if s.strip()]
+            _latest_ac = _ac_segments[-1] if _ac_segments else _ac
+            case_ref = re.search(r"\b(UTR\w+|NPCI\w+)\b", _latest_ac, re.IGNORECASE)
+        if not case_ref:
+            case_ref = re.search(r"\b(UTR\w+|NPCI\w+)\b", query, re.IGNORECASE)
+        # Fallback chain, in priority order, used ONLY when neither this
+        # turn's query NOR its latest reply has a case reference of its
+        # own — an explicit reference the merchant actually typed always
+        # wins, so a genuine topic change to a different case is never
+        # overridden by a stale anchor:
         #   1. anchored_case_id — the client-supplied hint (see
         #      ChargebackState's own docstring for why this exists:
         #      reconstructing case identity by re-parsing accumulated text
@@ -2312,7 +2368,18 @@ class DisputeAgent:
                     # fact — collapsing any two of these was the actual bug,
                     # not just how the LLM phrased its answer.
                     case_deadline_expired = analysis.deadline_expired
+                    # Amount included here (not just in _build_case_intro's own
+                    # separate _lookup_case_details() fact string) because THIS
+                    # string, not that one, is what every turn AFTER the first
+                    # actually reads — confirmed live: a merchant who asked
+                    # "what is the amount?" on a follow-up turn got a generic,
+                    # ungrounded "the amount that was duplicated" non-answer
+                    # even though the exact figure was shown to them one turn
+                    # earlier, because retrieved_docs[0] (the only case-specific
+                    # fact string this branch of the pipeline ever produces) had
+                    # no amount field for _answer_clarification_node to cite.
                     status_line = (
+                        f"Chargeback amount: ₹{row['chargeback_amount']:,.2f}. "
                         f"Case status: {row['status']}. "
                         f"Resolution status: "
                         f"{('resolved — ' + row['resolution']) if row['resolution'] else 'not resolved yet'}. "
@@ -2649,8 +2716,21 @@ class DisputeAgent:
         # below were firing for every question once a case was anchored,
         # with no signal to turn either off for a question that was never
         # asking about this case at all.
+        #
+        # A THIRD way in, beyond the demonstrative/case-ID checks above:
+        # classifier.asks_about_case_instance_fact() catches a bare
+        # fact-seeking follow-up with neither ("what is the amount?",
+        # "amount buddy?") — such a question has no generic, case-less
+        # answer at all, so once a case is already anchored (case_id set)
+        # it can only be asking about that case. Confirmed live this
+        # mattered: without it, three straight rephrasings of "what is the
+        # amount?" all got treated as conceptual and answered with a
+        # generic, ungrounded description instead of the real on-file
+        # figure sitting right there in retrieved_docs[0].
         is_case_specific_question = bool(
-            classifier.refers_to_current_case(latest) or classifier.extract_case_reference(latest)
+            classifier.refers_to_current_case(latest)
+            or classifier.extract_case_reference(latest)
+            or (case_ctx.get("case_id") and classifier.asks_about_case_instance_fact(latest))
         )
 
         if not is_case_specific_question:
@@ -2706,9 +2786,9 @@ class DisputeAgent:
                 "case-specific record (a line starting with \"Case <id>\" — the "
                 "system's own on-file status/recommendation for this exact "
                 "dispute) that answers or partially answers their question. If "
-                "so, lead with those specific facts by name (case status, "
-                "resolution status, response deadline, recommended action, "
-                "what evidence is or isn't on file) — the merchant is often "
+                "so, lead with those specific facts by name (chargeback amount, "
+                "case status, resolution status, response deadline, recommended "
+                "action, what evidence is or isn't on file) — the merchant is often "
                 "asking you to check something the system already knows, not "
                 "asking how to look it up themselves.\n"
                 "CRITICAL — these are four SEPARATE facts, never merge them: "
