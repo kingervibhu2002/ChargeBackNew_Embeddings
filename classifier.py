@@ -147,6 +147,22 @@ _CASE_FACT_PATTERNS = (
         re.IGNORECASE,
     )),
     ("resolution_status", re.compile(r"\bresolut(ion|ved)\b", re.IGNORECASE)),
+    # "is it chargeback raised, pre-arbitration, or arbitration?" — a
+    # lifecycle-STAGE question, distinct from case_status below (open/
+    # closed). Reported live: this matched no existing bucket at all (nor
+    # refers_to_current_case(), since it names no "case"/"this chargeback"
+    # explicitly), which let a caller upstream misread the bare word
+    # "chargeback" as a data-lookup hint and, finding no list/aggregate
+    # intent behind it, wrongly ask whether the question was even about
+    # the anchored case. See _answer_case_fact()'s own "dispute_stage"
+    # branch for why the answer is a fixed one regardless of what's
+    # matched here — this project has no pre-arbitration/arbitration
+    # concept at all (NPCI/UPI-only, no stage column in the DB schema).
+    ("dispute_stage",     re.compile(
+        r"\bchargeback\s+rais(e|ed|ing)\b|\bpre.?arbitration\b|\barbitration\b|"
+        r"\b(what|which|current)\s+stage\b",
+        re.IGNORECASE,
+    )),
     ("case_status",       re.compile(
         r"\bis\s+(it|the\s+case)\s+(still\s+)?(open|closed)\b|\bcase\s+status\b|"
         r"\bcurrent\s+status\b|\bstill\s+open\b",

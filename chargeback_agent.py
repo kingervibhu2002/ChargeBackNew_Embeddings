@@ -2081,10 +2081,25 @@ class DisputeAgent:
             latest_segment = segments[-1] if segments else raw_context_preview
             not_same_case_and_not_junk = (
                 not classifier.refers_to_current_case(latest_segment)
+                # A recognized case-fact bucket (e.g. "dispute_stage",
+                # "deadline_date") is as strong a "this IS about the
+                # anchored case" signal as refers_to_current_case() above —
+                # _detect_clarification_node already treats it the same
+                # way (see that node's own comment). Without this, a
+                # question naming no case explicitly but also naming no
+                # OTHER case ("is it chargeback raise, pre arbitration or
+                # arbitration?") fell all the way into looks_like_data_lookup()
+                # below purely because it contains the bare word
+                # "chargeback" — and the real LLM tool-call was confirmed
+                # live to then (reliably, not just occasionally) misjudge it
+                # as a request to list every open case, rather than the
+                # lifecycle-stage question about THIS case it actually was.
+                and not classifier.classify_case_fact_intent(latest_segment)
                 and not classifier.is_junk_reply(raw_context_preview, query=masked_query)
             )
             if not not_same_case_and_not_junk:
-                # Refers to the anchored case, or is junk filler — fall
+                # Refers to the anchored case (directly, or via a
+                # recognized case-fact bucket), or is junk filler — fall
                 # through unchanged to the normal evidence-gathering flow
                 # below, exactly as before any of this branch existed.
                 pass
@@ -2100,53 +2115,87 @@ class DisputeAgent:
                 if new_topic_intent:
                     masked_query = mask_pii(latest_segment)
                 else:
-                    # Loose data-lookup keyword matched, but the real
-                    # tool-call decided this ISN'T actually a list/
-                    # aggregate request either — genuinely unclear what
-                    # it is. Ask rather than silently falling through to
-                    # "must be evidence," the same anti-pattern _uncertain()
-                    # exists to close off everywhere in this file.
-                    anchored_case = classifier.extract_case_reference(masked_query) or "this case"
-                    # Cheap syntactic proxy for "did this SAME ambiguity
-                    # also show up in recent turns" — re-running the real
-                    # LLM tool-call (_resolve_data_lookup_intent) against
-                    # every historical segment just to check isn't worth
-                    # the cost/latency; this mirrors the same gate that got
-                    # us into this branch (looks_like_data_lookup and not
-                    # anchored-case-specific) closely enough. Reported
-                    # live: clarification_round (the conversation's TOTAL
-                    # segment count) was already 3 from five unrelated,
-                    # perfectly healthy U002 Q&A turns before "Can I win a
-                    # U002 case?" — the FIRST-EVER instance of this
-                    # ambiguity — triggered this branch and got the
-                    # escalation message instead of the clarifying
-                    # question, having never actually recurred once.
-                    ambiguity_streak = classifier.count_consecutive_matches(
-                        raw_context_preview,
-                        lambda seg: classifier.looks_like_data_lookup(seg)
-                        and not classifier.refers_to_current_case(seg),
+                    # The tool-call finding no list/aggregate intent only
+                    # means this ISN'T a data-lookup request — it does NOT
+                    # mean it's ambiguous WHICH case is meant. Only treat it
+                    # as case-ambiguous when the reply itself actually names
+                    # a DIFFERENT case or reason code than the one already
+                    # anchored (same conservative "a concrete other-case
+                    # signal is required" philosophy as
+                    # classifier.detect_case_fact_ambiguity()). Confirmed
+                    # live: "is it chargeback raise, pre arbitration or
+                    # arbitration?" — a genuine lifecycle-stage question
+                    # about the anchored case, naming no other case at all —
+                    # matched the loose "chargeback" keyword hint, got no
+                    # tool-call intent (correctly — it isn't a listing
+                    # request), and was wrongly met with "I'm not sure if
+                    # that's about case X or something else" even though
+                    # nothing in the text suggested anything but the one
+                    # case already anchored.
+                    anchored_case_id = classifier.extract_case_reference(masked_query) or ""
+                    other_case_id    = classifier.extract_case_reference(latest_segment)
+                    _, anchored_code = classifier.extract_network_and_code(masked_query)
+                    _, latest_code   = classifier.extract_network_and_code(latest_segment)
+                    names_different_case = (
+                        bool(other_case_id and other_case_id != anchored_case_id)
+                        or (latest_code != "Unknown" and latest_code != anchored_code)
                     )
-                    if ambiguity_streak >= MAX_CLARIFICATION_ROUNDS:
+                    if not names_different_case:
+                        # Nothing in this reply points at a different case —
+                        # fall through unchanged to the normal flow below
+                        # (question-answering/evidence-gathering for the
+                        # case already anchored), same as the
+                        # refers_to_current_case()-True branch above.
+                        pass
+                    else:
+                        # Loose data-lookup keyword matched, the real
+                        # tool-call decided this ISN'T actually a list/
+                        # aggregate request either, AND the reply names a
+                        # genuinely different case/code — ask rather than
+                        # silently falling through to "must be evidence,"
+                        # the same anti-pattern _uncertain() exists to close
+                        # off everywhere in this file.
+                        anchored_case = anchored_case_id or "this case"
+                        # Cheap syntactic proxy for "did this SAME ambiguity
+                        # also show up in recent turns" — re-running the real
+                        # LLM tool-call (_resolve_data_lookup_intent) against
+                        # every historical segment just to check isn't worth
+                        # the cost/latency; this mirrors the same gate that got
+                        # us into this branch (looks_like_data_lookup and not
+                        # anchored-case-specific) closely enough. Reported
+                        # live: clarification_round (the conversation's TOTAL
+                        # segment count) was already 3 from five unrelated,
+                        # perfectly healthy U002 Q&A turns before "Can I win a
+                        # U002 case?" — the FIRST-EVER instance of this
+                        # ambiguity — triggered this branch and got the
+                        # escalation message instead of the clarifying
+                        # question, having never actually recurred once.
+                        ambiguity_streak = classifier.count_consecutive_matches(
+                            raw_context_preview,
+                            lambda seg: classifier.looks_like_data_lookup(seg)
+                            and not classifier.refers_to_current_case(seg),
+                        )
+                        if ambiguity_streak >= MAX_CLARIFICATION_ROUNDS:
+                            return {
+                                "is_valid_query": True,
+                                "user_query":     masked_query,
+                                **self._uncertain(
+                                    self._CLARIFICATION_LIMIT_MESSAGE,
+                                    needs_more_info=False,
+                                    clarification_round=clarification_round,
+                                ),
+                            }
                         return {
                             "is_valid_query": True,
                             "user_query":     masked_query,
                             **self._uncertain(
-                                self._CLARIFICATION_LIMIT_MESSAGE,
-                                needs_more_info=False,
+                                f"I'm not sure if that's about case {anchored_case} or "
+                                "something else — could you clarify, or ask your "
+                                "question directly and I'll answer it?",
+                                clarification_reason=CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
                                 clarification_round=clarification_round,
                             ),
                         }
-                    return {
-                        "is_valid_query": True,
-                        "user_query":     masked_query,
-                        **self._uncertain(
-                            f"I'm not sure if that's about case {anchored_case} or "
-                            "something else — could you clarify, or ask your "
-                            "question directly and I'll answer it?",
-                            clarification_reason=CLARIFICATION_REASON_AMBIGUOUS_CASE_REFERENCE,
-                            clarification_round=clarification_round,
-                        ),
-                    }
             elif classifier.looks_like_new_request(latest_segment):
                 # Not data-lookup-shaped, but still clearly a fresh
                 # imperative ask ("help me with all open questions"),
@@ -3088,6 +3137,32 @@ class DisputeAgent:
                     "option is available."
                 )
             return f"Yes — the response deadline is {deadline_human}, which hasn't passed yet."
+        if intent == "dispute_stage":
+            # Every case in this schema is NPCI/RuPay (see this method's own
+            # comment above on `network`) — pre-arbitration/arbitration are
+            # Visa/Mastercard card-network concepts (see
+            # chargeback-encyclopedia/03_Chargeback_Lifecycle/003_Pre_
+            # Arbitration.md and 004_Arbitration.md, neither of which
+            # mentions RuPay/NPCI/UPI at all) and this project tracks no
+            # stage column for any network, so the answer is fixed rather
+            # than looked up. Confirmed live: leaving this to the LLM
+            # fallback path previously risked surfacing exactly those
+            # Visa/Mastercard docs for a UPI case (see network_detection.py's
+            # module comment on the same cross-network leak for a different
+            # query shape).
+            if row["status"] in ("Open", "Pending"):
+                stage_clause = (
+                    f"this case is at the initial dispute-response stage — "
+                    f"status {row['status']}, response deadline {deadline_human}"
+                    f"{' (already passed)' if passed else ''}"
+                )
+            else:
+                stage_clause = f"this case is marked {row['status'].lower()}"
+            return (
+                "NPCI/UPI disputes don't move through a pre-arbitration/"
+                "arbitration process the way Visa/Mastercard chargebacks do — "
+                f"that terminology is specific to card networks. On file, {stage_clause}."
+            )
         if intent == "resolution_status":
             if row["resolution"]:
                 return f"Yes, this case has been resolved — {row['resolution']}."
